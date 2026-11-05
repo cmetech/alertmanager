@@ -1,0 +1,454 @@
+{
+  "schema_version": 1,
+  "description": "Sequential native HTTP transitions; timestamps resolve relative to suite base or action time. Both GC arms execute every ID. No projection parity claim.",
+  "config": "global:\n  resolve_timeout: 1s\nroute:\n  receiver: $receiver\n  group_by: [alertname]\n  group_wait: 10ms\n  group_interval: 20ms\n  repeat_interval: 1h\ninhibit_rules:\n  - source_matchers: ['severity=\"critical\"']\n    target_matchers: ['severity=\"warning\"']\n    equal: [alertname]\nreceivers:\n  - name: proof-a\n  - name: proof-b\n",
+  "gc_intervals": [
+    "1s",
+    "30m"
+  ],
+  "queries": {
+    "all": "/api/v2/alerts",
+    "target": "/api/v2/alerts?filter=instance%3Dtarget",
+    "active": "/api/v2/alerts?active=true&silenced=false&inhibited=false&unprocessed=false",
+    "unprocessed": "/api/v2/alerts?active=false&silenced=false&inhibited=false&unprocessed=true",
+    "receiver_a": "/api/v2/alerts?receiver=proof-a",
+    "receiver_b": "/api/v2/alerts?receiver=proof-b"
+  },
+  "scenarios": [
+    {
+      "id": "create",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Parity",
+                "instance": "target",
+                "severity": "warning"
+              },
+              "annotations": {
+                "summary": "first"
+              },
+              "startsAt": "$base-60s",
+              "endsAt": "$base+3600s",
+              "generatorURL": "https://example.invalid/first"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": false,
+      "observation": "Upsert carries fingerprint, labels, annotations, startsAt, endsAt, updatedAt and generatorURL. Receivers/status/IDs require native API observation."
+    },
+    {
+      "id": "refresh",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Parity",
+                "instance": "target",
+                "severity": "warning"
+              },
+              "annotations": {
+                "summary": "refreshed"
+              },
+              "startsAt": "$base-60s",
+              "endsAt": "$base+3600s",
+              "generatorURL": "https://example.invalid/refreshed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": false,
+      "observation": "Upsert replaces annotations, generatorURL and updatedAt; native receiver/status fields remain API-derived."
+    },
+    {
+      "id": "duplicate",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Parity",
+                "instance": "target",
+                "severity": "warning"
+              },
+              "annotations": {
+                "summary": "refreshed"
+              },
+              "startsAt": "$base-60s",
+              "endsAt": "$base+3600s",
+              "generatorURL": "https://example.invalid/refreshed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": false,
+      "observation": "Repeated HTTP payload advances updatedAt and feed sequence; same fingerprint and payload fields remain stable."
+    },
+    {
+      "id": "silence-create",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/silences",
+          "body": {
+            "matchers": [
+              {
+                "name": "instance",
+                "value": "target",
+                "isRegex": false,
+                "isEqual": true
+              }
+            ],
+            "startsAt": "$now-1s",
+            "endsAt": "$now+3600s",
+            "createdBy": "parity",
+            "comment": "native parity"
+          },
+          "save": "silence"
+        }
+      ],
+      "expected": {
+        "state": "suppressed",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": true,
+      "observation": "Status and silencedBy change without any alert Put. Requires silence invalidation or bounded API sweep."
+    },
+    {
+      "id": "silence-delete",
+      "actions": [
+        {
+          "method": "DELETE",
+          "path": "/api/v2/silence/$silence"
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": true,
+      "observation": "Status and silencedBy change without any alert Put. Requires silence invalidation or bounded API sweep."
+    },
+    {
+      "id": "silence-future",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/silences",
+          "body": {
+            "matchers": [
+              {
+                "name": "instance",
+                "value": "target",
+                "isRegex": false,
+                "isEqual": true
+              }
+            ],
+            "startsAt": "$now+2s",
+            "endsAt": "$now+4s",
+            "createdBy": "parity",
+            "comment": "native parity"
+          },
+          "save": "silence"
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": true,
+      "observation": "Future silence is inactive now; feed has no event. Future startsAt requires clock invalidation or bounded API sweep."
+    },
+    {
+      "id": "silence-start",
+      "actions": [
+        {
+          "wait_ms": 2200
+        }
+      ],
+      "expected": {
+        "state": "suppressed",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": true,
+      "observation": "Clock alone changes status and silencedBy; no Put. Requires timed silence invalidation or bounded API sweep."
+    },
+    {
+      "id": "silence-end",
+      "actions": [
+        {
+          "wait_ms": 2200
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": true,
+      "observation": "Clock alone changes status and silencedBy; no Put. Requires timed silence invalidation or bounded API sweep."
+    },
+    {
+      "id": "inhibition-on",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Parity",
+                "instance": "source",
+                "severity": "critical"
+              },
+              "annotations": {
+                "summary": "first"
+              },
+              "startsAt": "$base-60s",
+              "endsAt": "$base+3600s",
+              "generatorURL": "https://example.invalid/first"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "suppressed",
+        "count": 2,
+        "receiver": "proof-a"
+      },
+      "no_put": false,
+      "observation": "Source Upsert changes target status/inhibitedBy without target Put. Requires dependency invalidation or bounded API sweep."
+    },
+    {
+      "id": "inhibition-off",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Parity",
+                "instance": "source",
+                "severity": "critical"
+              },
+              "annotations": {
+                "summary": "first"
+              },
+              "startsAt": "$base-60s",
+              "endsAt": "$now-1s",
+              "generatorURL": "https://example.invalid/first"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-a"
+      },
+      "no_put": false,
+      "observation": "Source resolve changes target status/inhibitedBy without target Put. Requires dependency/clock invalidation or bounded API sweep."
+    },
+    {
+      "id": "route-reload",
+      "actions": [
+        {
+          "config_receiver": "proof-b"
+        },
+        {
+          "method": "POST",
+          "path": "/-/reload"
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-b"
+      },
+      "no_put": true,
+      "observation": "Native /-/reload changes receivers without Put; requires config invalidation or bounded API sweep."
+    },
+    {
+      "id": "late-obsolete-resolve",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Parity",
+                "instance": "target",
+                "severity": "warning"
+              },
+              "annotations": {
+                "summary": "obsolete"
+              },
+              "startsAt": "$base-7200s",
+              "endsAt": "$base-3600s",
+              "generatorURL": "https://example.invalid/first"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-b"
+      },
+      "no_put": true,
+      "baseline_difference": "ported",
+      "observation": "Task 1 port: native fields and raw snapshot/cursor unchanged; no accepted store event."
+    },
+    {
+      "id": "explicit-resolve",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Parity",
+                "instance": "target",
+                "severity": "warning"
+              },
+              "annotations": {
+                "summary": "refreshed"
+              },
+              "startsAt": "$base-60s",
+              "endsAt": "$now-1s",
+              "generatorURL": "https://example.invalid/refreshed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "absent",
+        "count": 0,
+        "receiver": "proof-b"
+      },
+      "no_put": false,
+      "observation": "Resolve Upsert carries endsAt; GET removes alert immediately while raw retains it until GC. Requires endsAt membership evaluation or API sweep."
+    },
+    {
+      "id": "timeout-create",
+      "actions": [
+        {
+          "method": "POST",
+          "path": "/api/v2/alerts",
+          "body": [
+            {
+              "labels": {
+                "alertname": "Timeout",
+                "instance": "timeout"
+              },
+              "startsAt": "$base-60s",
+              "annotations": {
+                "summary": "timeout"
+              },
+              "generatorURL": "https://example.invalid/timeout"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "state": "active",
+        "count": 1,
+        "receiver": "proof-b"
+      },
+      "no_put": false,
+      "target": "timeout",
+      "observation": "Default resolve_timeout produces a real endsAt in both raw feed and native GET; Timeout flag is internal."
+    },
+    {
+      "id": "timeout",
+      "actions": [
+        {
+          "wait_ms": 1200
+        }
+      ],
+      "expected": {
+        "state": "absent",
+        "count": 0,
+        "receiver": "proof-b"
+      },
+      "no_put": true,
+      "target": "timeout",
+      "observation": "Clock expiry removes native membership without Put; at 30m GC raw remains present. Requires clock expiry or bounded API sweep."
+    },
+    {
+      "id": "gc",
+      "actions": [
+        {
+          "wait_ms": 1200
+        }
+      ],
+      "expected": {
+        "state": "absent",
+        "count": 0,
+        "receiver": "proof-b"
+      },
+      "no_put": true,
+      "observation": "Provider Delete eventually removes raw row under 1s GC; 30m GC deliberately retains rows after native disappearance."
+    },
+    {
+      "id": "source-restart",
+      "actions": [
+        {
+          "restart": true
+        }
+      ],
+      "expected": {
+        "state": "absent",
+        "count": 0,
+        "receiver": "proof-b"
+      },
+      "no_put": true,
+      "observation": "Fresh app.New and registry with same data dir produces new feed epoch and empty alert snapshot. Requires atomic snapshot replacement."
+    }
+  ],
+  "field_contract": {
+    "fingerprint": "raw identity; no divergence after accepted store",
+    "labels": "raw upsert; no divergence after accepted store",
+    "annotations": "raw upsert; no divergence after accepted store",
+    "startsAt": "raw merged start; native JSON millisecond precision",
+    "endsAt": "raw explicit or timeout end; native JSON millisecond precision",
+    "updatedAt": "raw authoritative server timestamp; native JSON millisecond precision",
+    "generatorURL": "raw upsert; no divergence after accepted store",
+    "receivers": "native routing/config; raw-only divergence lasts until native API refresh",
+    "status": "native silence/inhibition/clock prediction; raw-only divergence unbounded without refresh",
+    "silencedBy": "native silence IDs; create/start/end/delete require API refresh",
+    "inhibitedBy": "native source fingerprint IDs; source transitions require target API refresh",
+    "membership": "GET excludes expired rows before GC; raw-only stale membership up to GC interval; evaluate endsAt or sweep"
+  }
+}
