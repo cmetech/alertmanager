@@ -356,6 +356,7 @@ func (a *App) setup() error {
 	if err != nil {
 		return fmt.Errorf("error creating memory provider: %w", err)
 	}
+	alerts.SetStateObserver(opts.StateObserver)
 	a.onStop("alerts", func() error {
 		alerts.Close()
 		return nil
@@ -517,6 +518,9 @@ func (a *App) setup() error {
 	httpserver.Register(router, a.webReload)
 
 	mux := apih.Register(router, routePrefix)
+	if opts.ProbeHandler != nil {
+		mux.Handle("/_oscar/probe/", opts.ProbeHandler(alerts))
+	}
 
 	newServer := func() *http.Server {
 		protocols := new(http.Protocols)

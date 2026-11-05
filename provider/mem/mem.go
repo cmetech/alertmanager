@@ -18,6 +18,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -51,7 +52,11 @@ type Alerts struct {
 	listeners map[int]listeningAlerts
 	next      int
 
-	callback AlertStoreCallback
+	callback                               AlertStoreCallback
+	observer                               StateObserver
+	heartbeatProbe                         atomic.Bool
+	putWait, putHold, gcHold, snapshotHold prometheus.Histogram
+	heartbeatContention                    prometheus.Counter
 
 	logger     *slog.Logger
 	propagator propagation.TextMapPropagator
@@ -61,6 +66,75 @@ type Alerts struct {
 	alertsLimit             prometheus.Gauge
 	alertsLimitedTotal      *prometheus.CounterVec
 	subscriberChannelWrites *prometheus.CounterVec
+}
+
+// StateObserver observes successful provider mutations under the provider mutex.
+// Implementations must do bounded, nonblocking work and perform no I/O.
+type StateObserver interface {
+	Upserted(*alert.Alert)
+	Deleted(*alert.Alert)
+}
+
+// SetStateObserver installs the observer before ingestion begins.
+func (a *Alerts) SetStateObserver(observer StateObserver) {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	a.observer = observer
+}
+
+// SnapshotWithSequence captures one owned copy and its sequence atomically.
+// The sequence function must never acquire the provider mutex (lock order: provider, feed).
+func (a *Alerts) SnapshotWithSequence(sequence func() uint64) ([]*alert.Alert, uint64) {
+	a.mtx.Lock()
+	start := time.Now()
+	defer func() { observeDuration(a.snapshotHold, start); a.mtx.Unlock() }()
+	stored := a.alerts.List()
+	result := make([]*alert.Alert, len(stored))
+	for i, alrt := range stored {
+		copy := *alrt
+		copy.Labels = alrt.Labels.Clone()
+		copy.Annotations = alrt.Annotations.Clone()
+		result[i] = &copy
+	}
+	return result, sequence()
+}
+
+// TryHeartbeat confirms provider progress within timeout. Only one probe may
+// poll at a time; a contended provider cannot advance source contact.
+// The optional Heartbeat capability preserves the basic observer contract.
+func (a *Alerts) TryHeartbeat(timeout time.Duration) bool {
+	contended := func() {
+		if a.heartbeatContention != nil {
+			a.heartbeatContention.Inc()
+		}
+	}
+	if !a.heartbeatProbe.CompareAndSwap(false, true) {
+		contended()
+		return false
+	}
+	defer a.heartbeatProbe.Store(false)
+	deadline := time.Now().Add(timeout)
+	for {
+		if a.mtx.TryLock() {
+			defer a.mtx.Unlock()
+			if observer, ok := a.observer.(interface{ Heartbeat(time.Time) }); ok {
+				observer.Heartbeat(time.Now().UTC())
+			}
+			return true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			contended()
+			return false
+		}
+		time.Sleep(min(time.Millisecond, remaining))
+	}
+}
+
+func observeDuration(metric prometheus.Histogram, start time.Time) {
+	if metric != nil {
+		metric.Observe(time.Since(start).Seconds())
+	}
 }
 
 type AlertStoreCallback interface {
@@ -87,6 +161,14 @@ type listeningAlerts struct {
 }
 
 func (a *Alerts) registerMetrics(r prometheus.Registerer) {
+	histogram := func(name, help string) prometheus.Histogram {
+		return promauto.With(r).NewHistogram(prometheus.HistogramOpts{Name: "alertmanager_provider_" + name + "_seconds", Help: help, Buckets: prometheus.ExponentialBuckets(0.000001, 4, 12)})
+	}
+	a.putWait = histogram("put_mutex_wait", "Time waiting for the provider Put mutex.")
+	a.putHold = histogram("put_mutex_hold", "Time holding the provider Put mutex per call.")
+	a.gcHold = histogram("gc_mutex_hold", "Time holding the provider GC mutex.")
+	a.snapshotHold = histogram("snapshot_mutex_hold", "Time holding the provider snapshot mutex.")
+	a.heartbeatContention = promauto.With(r).NewCounter(prometheus.CounterOpts{Name: "alertmanager_provider_heartbeat_contention_total", Help: "Provider heartbeat probes rejected by contention."})
 	a.alertsLimit = promauto.With(r).NewGauge(prometheus.GaugeOpts{
 		Name: "alertmanager_alerts_per_alert_limit",
 		Help: "Current limit on number of alerts per alert name",
@@ -195,8 +277,15 @@ func (a *Alerts) gc() {
 
 func (a *Alerts) gcAlerts() []*alert.Alert {
 	a.mtx.Lock()
-	defer a.mtx.Unlock()
-	return a.alerts.GC()
+	start := time.Now()
+	defer func() { observeDuration(a.gcHold, start); a.mtx.Unlock() }()
+	deleted := a.alerts.GC()
+	if a.observer != nil {
+		for _, alrt := range deleted {
+			a.observer.Deleted(alrt)
+		}
+	}
+	return deleted
 }
 
 func (a *Alerts) gcListeners() {
@@ -299,8 +388,11 @@ func (a *Alerts) Get(fp model.Fingerprint) (*alert.Alert, error) {
 
 // Put adds the given alert to the set.
 func (a *Alerts) Put(ctx context.Context, alerts ...*alert.Alert) error {
+	wait := time.Now()
 	a.mtx.Lock()
-	defer a.mtx.Unlock()
+	start := time.Now()
+	observeDuration(a.putWait, wait)
+	defer func() { observeDuration(a.putHold, start); a.mtx.Unlock() }()
 
 	ctx, span := tracer.Start(ctx, "provider.mem.Put",
 		trace.WithAttributes(
@@ -349,6 +441,9 @@ func (a *Alerts) Put(ctx context.Context, alerts ...*alert.Alert) error {
 		}
 
 		a.callback.PostStore(alrt, existing)
+		if a.observer != nil {
+			a.observer.Upserted(alrt)
+		}
 
 		if !existing {
 			a.recorder.RecordEvent(ctx, func() eventrecorder.EventData {

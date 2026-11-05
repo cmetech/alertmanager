@@ -25,6 +25,7 @@ import (
 
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/featurecontrol"
+	"github.com/prometheus/alertmanager/provider/mem"
 )
 
 // DefaultClusterAddr is the default listen address used when the operator
@@ -98,6 +99,10 @@ type Options struct {
 	TLSConfigFile          string
 	AllowInsecureAdvertise bool
 	Label                  string
+
+	// Optional proof hooks. Nil leaves the native provider and API unchanged.
+	StateObserver mem.StateObserver
+	ProbeHandler  func(*mem.Alerts) http.Handler
 
 	// Injected dependencies.
 	Logger     *slog.Logger

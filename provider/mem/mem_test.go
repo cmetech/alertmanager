@@ -32,6 +32,7 @@ import (
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/oscarstate"
 	"github.com/prometheus/alertmanager/store"
 )
 
@@ -559,4 +560,216 @@ func TestSubscriberChannelMetrics(t *testing.T) {
 		writeCount := getCounterValue("alertmanager_alerts_subscriber_channel_writes_total", "subscriber", subscriberName)
 		return writeCount == float64(len(alertsToSend))
 	}, 1*time.Second, 10*time.Millisecond, "subscriberChannelWrites should equal the number of alerts sent")
+}
+
+// oscarObserver is local so core oscarstate never depends on provider/mem.
+type oscarObserver struct {
+	events    []string
+	sequence  uint64
+	heartbeat time.Time
+	feed      *oscarstate.Feed
+}
+
+func (o *oscarObserver) Upserted(a *alert.Alert) {
+	o.events = append(o.events, "upsert")
+	o.sequence++
+	if o.feed != nil {
+		o.feed.Publish(oscarstate.Change{Kind: oscarstate.Upsert, Fingerprint: a.Fingerprint(), Alert: a})
+	}
+}
+
+func (o *oscarObserver) Deleted(a *alert.Alert) { o.events = append(o.events, "delete"); o.sequence++ }
+
+func (o *oscarObserver) Heartbeat(now time.Time) {
+	o.heartbeat = now
+	if o.feed != nil {
+		o.feed.Heartbeat(now)
+	}
+}
+
+func TestOSCARFeedStoresAndSnapshot(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), reg, nil)
+	require.NoError(t, err)
+	defer p.Close()
+	o := &oscarObserver{}
+	p.SetStateObserver(o)
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}, Annotations: model.LabelSet{"summary": "a"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, p.Put(t.Context(), a))
+	require.NoError(t, p.Put(t.Context(), a))
+	obsolete := alert.New(model.Alert{Labels: a.Labels, StartsAt: now.Add(-2 * time.Hour), EndsAt: now.Add(-time.Hour)}, now, false)
+	require.NoError(t, p.Put(t.Context(), obsolete))
+	require.Equal(t, []string{"upsert", "upsert"}, o.events)
+	snap, seq := p.SnapshotWithSequence(func() uint64 { return o.sequence })
+	require.Equal(t, uint64(2), seq)
+	require.Len(t, snap, 1)
+	snap[0].Annotations["summary"] = "consumer"
+	stored, err := p.Get(a.Fingerprint())
+	require.NoError(t, err)
+	require.Equal(t, model.LabelValue("a"), stored.Annotations["summary"])
+	require.True(t, p.TryHeartbeat(time.Second))
+	require.False(t, o.heartbeat.IsZero())
+	p.mtx.Lock()
+	previous := o.heartbeat
+	require.False(t, p.TryHeartbeat(time.Millisecond))
+	require.False(t, p.TryHeartbeat(time.Millisecond))
+	require.Equal(t, previous, o.heartbeat)
+	p.mtx.Unlock()
+	require.Eventually(t, func() bool { return p.TryHeartbeat(time.Second) }, time.Second, time.Millisecond)
+}
+
+func TestOSCARFeedNilObserverMetrics(t *testing.T) {
+	t.Parallel()
+	reg := prometheus.NewRegistry()
+	p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), reg, nil)
+	require.NoError(t, err)
+	defer p.Close()
+	require.NoError(t, p.Put(t.Context(), newTestAlerts().alert1))
+	p.gcAlerts()
+	p.SnapshotWithSequence(func() uint64 { return 0 })
+	metrics, err := reg.Gather()
+	require.NoError(t, err)
+	counts := map[string]uint64{}
+	for _, m := range metrics {
+		if len(m.Metric) > 0 && m.Metric[0].Histogram != nil {
+			counts[m.GetName()] = m.Metric[0].Histogram.GetSampleCount()
+		}
+	}
+	for _, name := range []string{"alertmanager_provider_put_mutex_wait_seconds", "alertmanager_provider_put_mutex_hold_seconds", "alertmanager_provider_gc_mutex_hold_seconds", "alertmanager_provider_snapshot_mutex_hold_seconds"} {
+		require.Equal(t, uint64(1), counts[name], name)
+	}
+}
+
+// oscarBlockedDelete pauses only the existing post-delete callback, after GC unlocks.
+type oscarBlockedDelete struct {
+	noopCallback
+	entered, resume chan struct{}
+}
+
+func (c *oscarBlockedDelete) PostDelete(_ *alert.Alert) { close(c.entered); <-c.resume }
+func TestOSCARSnapshotGCReinsertOrdering(t *testing.T) {
+	t.Parallel()
+	callback := &oscarBlockedDelete{entered: make(chan struct{}), resume: make(chan struct{})}
+	p, err := NewAlerts(t.Context(), time.Hour, 0, callback, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	defer p.Close()
+	f := oscarstate.NewFeed(10, "test")
+	initial := f.Cursor()
+	o := &oscarObserver{feed: f}
+	p.SetStateObserver(o)
+	now := time.Now()
+	old := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
+	require.NoError(t, p.Put(t.Context(), old))
+	done := make(chan struct{})
+	go func() { p.gc(); close(done) }()
+	<-callback.entered
+	fresh := alert.New(model.Alert{Labels: old.Labels, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, p.Put(t.Context(), fresh))
+	snapshot, seq := p.SnapshotWithSequence(func() uint64 { return o.sequence })
+	require.Equal(t, uint64(3), seq)
+	require.Len(t, snapshot, 1)
+	require.Equal(t, fresh.StartsAt, snapshot[0].StartsAt)
+	require.Equal(t, []string{"upsert", "delete", "upsert"}, o.events)
+	close(callback.resume)
+	<-done
+	batch, err := f.Read(initial, 10)
+	require.NoError(t, err)
+	inventory := map[model.Fingerprint]*alert.Alert{}
+	var committed uint64
+	// Retry the batch, then replay a late old delete: committed sequences win.
+	apply := func(changes []oscarstate.Change) {
+		for _, change := range changes {
+			if change.Sequence <= committed {
+				continue
+			}
+			if change.Kind == oscarstate.Delete {
+				delete(inventory, change.Fingerprint)
+			} else {
+				inventory[change.Fingerprint] = change.Alert
+			}
+			committed = change.Sequence
+		}
+	}
+	apply(batch.Changes)
+	lag := time.Since(batch.Changes[len(batch.Changes)-1].PublishedAt)
+	require.GreaterOrEqual(t, lag, time.Duration(0))
+	apply(batch.Changes)
+	apply(batch.Changes[1:2])
+	require.Len(t, inventory, 1)
+	require.Equal(t, fresh.StartsAt, inventory[fresh.Fingerprint()].StartsAt)
+	require.Equal(t, []string{"upsert", "delete", "upsert"}, o.events)
+}
+
+type oscarRejectStore struct{ noopCallback }
+
+func (oscarRejectStore) PreStore(*alert.Alert, bool) error { return errors.New("rejected") }
+func TestOSCARFeedFailedStore(t *testing.T) {
+	t.Parallel()
+	p, err := NewAlerts(t.Context(), time.Hour, 0, oscarRejectStore{}, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	defer p.Close()
+	o := &oscarObserver{}
+	p.SetStateObserver(o)
+	require.NoError(t, p.Put(t.Context(), newTestAlerts().alert1))
+	require.Empty(t, o.events)
+}
+
+func TestOSCARFeedHeartbeatProviderProgress(t *testing.T) {
+	t.Parallel()
+	p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	defer p.Close()
+	f := oscarstate.NewFeed(10, "")
+	p.SetStateObserver(&oscarObserver{feed: f})
+	require.True(t, p.TryHeartbeat(time.Second))
+	before, err := f.Read(f.Cursor(), 1)
+	require.NoError(t, err)
+	require.False(t, before.HeartbeatAt.IsZero())
+	p.mtx.Lock()
+	require.False(t, p.TryHeartbeat(time.Millisecond))
+	held, err := f.Read(f.Cursor(), 1)
+	require.NoError(t, err)
+	require.Equal(t, before.HeartbeatAt, held.HeartbeatAt)
+	p.mtx.Unlock()
+	require.NoError(t, p.Put(t.Context(), newTestAlerts().alert1))
+	require.True(t, p.TryHeartbeat(time.Second))
+	after, err := f.Read(f.Cursor(), 1)
+	require.NoError(t, err)
+	require.True(t, after.HeartbeatAt.After(before.HeartbeatAt))
+	require.Empty(t, after.Changes)
+}
+
+func TestOSCARFeedDuplicateAndLateRefresh(t *testing.T) {
+	t.Parallel()
+	p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), nil, nil)
+	require.NoError(t, err)
+	defer p.Close()
+	o := &oscarObserver{}
+	p.SetStateObserver(o)
+	now := time.Now()
+	current := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}, Annotations: model.LabelSet{"summary": "current"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	late := alert.New(model.Alert{Labels: current.Labels, Annotations: model.LabelSet{"summary": "late"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute)}, now.Add(-time.Second), false)
+	require.NoError(t, p.Put(t.Context(), current, current, late))
+	snapshot, seq := p.SnapshotWithSequence(func() uint64 { return o.sequence })
+	require.Equal(t, uint64(3), seq)
+	require.Len(t, snapshot, 1)
+	require.Equal(t, model.LabelValue("current"), snapshot[0].Annotations["summary"])
+	p.gcAlerts()
+}
+
+func TestOSCARFeedStoreLimitPublishesOnlySuccess(t *testing.T) {
+	t.Parallel()
+	p, err := NewAlerts(t.Context(), time.Hour, 1, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	defer p.Close()
+	o := &oscarObserver{}
+	p.SetStateObserver(o)
+	now := time.Now()
+	for _, instance := range []string{"one", "two"} {
+		a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A", "instance": model.LabelValue(instance)}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+		require.NoError(t, p.Put(t.Context(), a))
+	}
+	require.Equal(t, []string{"upsert"}, o.events)
 }
