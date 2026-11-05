@@ -151,6 +151,28 @@ func (a *Alerts) Set(alrt *alert.Alert) error {
 	a.Lock()
 	defer a.Unlock()
 
+	return a.setLocked(alrt)
+}
+
+// SetUnlessObsoleteResolved atomically ignores explicit resolutions of intervals
+// strictly before the stored interval. The boolean reports whether it was stored.
+func (a *Alerts) SetUnlessObsoleteResolved(alrt *alert.Alert) (bool, error) {
+	a.Lock()
+	defer a.Unlock()
+
+	if a.destroyed {
+		return false, ErrDestroyed
+	}
+	if current, ok := a.alerts[alrt.Fingerprint()]; ok &&
+		!alrt.Timeout && alrt.Resolved() && alrt.EndsAt.Before(current.StartsAt) {
+		return false, nil
+	}
+	err := a.setLocked(alrt)
+	return err == nil, err
+}
+
+// setLocked requires the store lock.
+func (a *Alerts) setLocked(alrt *alert.Alert) error {
 	if a.destroyed {
 		return ErrDestroyed
 	}

@@ -933,7 +933,7 @@ func (ag *aggrGroup) insert(ctx context.Context, alrt *alert.Alert) bool {
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	defer span.End()
-	if err := ag.alerts.Set(alrt); err != nil {
+	if applied, err := ag.alerts.SetUnlessObsoleteResolved(alrt); err != nil {
 		if errors.Is(err, store.ErrDestroyed) {
 			return false
 		}
@@ -941,7 +941,7 @@ func (ag *aggrGroup) insert(ctx context.Context, alrt *alert.Alert) bool {
 		span.SetStatus(codes.Error, message)
 		span.RecordError(err)
 		ag.logger.Error(message, "err", err)
-	} else {
+	} else if applied {
 		ag.recorder.RecordEvent(ctx, func() eventrecorder.EventData {
 			return notify.NewAlertGroupedEvent(ag.alertGroupInfo(), alrt)
 		})

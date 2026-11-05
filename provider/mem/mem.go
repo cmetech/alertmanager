@@ -318,6 +318,10 @@ func (a *Alerts) Put(ctx context.Context, alerts ...*alert.Alert) error {
 		// Check that there's an alert existing within the store before
 		// trying to merge.
 		if old, err := a.alerts.Get(fp); err == nil {
+			// Ignore explicit clears from disjoint earlier intervals before any side effects.
+			if !alrt.Timeout && alrt.Resolved() && alrt.EndsAt.Before(old.StartsAt) {
+				continue
+			}
 			existing = true
 
 			// Merge alerts if there is an overlap in activity range.

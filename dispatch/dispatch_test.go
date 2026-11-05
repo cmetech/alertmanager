@@ -70,7 +70,7 @@ func TestAggrGroup(t *testing.T) {
 				"b": "v2",
 				"c": "v3",
 			},
-			StartsAt: time.Now().Add(time.Minute),
+			StartsAt: time.Now().Add(-time.Minute),
 			EndsAt:   time.Now().Add(time.Hour),
 		}, time.Now(), false)
 		a2 = alert.New(model.Alert{
@@ -88,7 +88,7 @@ func TestAggrGroup(t *testing.T) {
 				"b": "v2",
 				"c": "v5",
 			},
-			StartsAt: time.Now().Add(time.Minute),
+			StartsAt: time.Now().Add(-time.Minute),
 			EndsAt:   time.Now().Add(5 * time.Minute),
 		}, time.Now(), false)
 	)
@@ -193,6 +193,7 @@ func TestAggrGroup(t *testing.T) {
 	// Resolve an alert, and it should be removed after the next batch was sent.
 	a1r := *a1
 	a1r.EndsAt = time.Now()
+	require.NoError(t, a1r.Validate())
 	ag.insert(ctx, &a1r)
 	last = receiveBatch(t, last, opts.GroupInterval, append(alert.AlertSlice{&a1r}, removeEndsAt(alert.AlertSlice{a2, a3})...))
 
@@ -202,6 +203,7 @@ func TestAggrGroup(t *testing.T) {
 	resolved := alert.AlertSlice{&a2r, &a3r}
 	for _, a := range resolved {
 		a.EndsAt = time.Now()
+		require.NoError(t, a.Validate())
 		ag.insert(ctx, a)
 	}
 	receiveBatch(t, last, opts.GroupInterval, resolved)
