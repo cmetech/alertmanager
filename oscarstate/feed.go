@@ -126,6 +126,25 @@ func (f *Feed) Heartbeat(now time.Time) {
 
 // Read returns at most limit changes, each with independent payload ownership.
 func (f *Feed) Read(after Cursor, limit int) (Batch, error) {
+	return f.read(after, limit, CopyAlert)
+}
+
+func (f *Feed) read(after Cursor, limit int, copyPayload func(*alert.Alert) *alert.Alert) (Batch, error) {
+	batch, err := f.readRetained(after, limit)
+	if err != nil {
+		return batch, err
+	}
+	// Publish owns immutable payloads. Ring eviction replaces pointers rather
+	// than mutating payloads, so copying after unlock remains safe on wraparound.
+	for i := range batch.Changes {
+		batch.Changes[i].Alert = copyPayload(batch.Changes[i].Alert)
+	}
+	return batch, nil
+}
+
+// readRetained captures metadata and value copies under the feed mutex. Its
+// private payload references must be cloned before returning to consumers.
+func (f *Feed) readRetained(after Cursor, limit int) (Batch, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b := Batch{Continue: after, Head: f.head, HeadAt: f.headAt, HeartbeatAt: f.heartbeatAt, Changes: []Change{}}
@@ -144,7 +163,6 @@ func (f *Feed) Read(after Cursor, limit int) (Batch, error) {
 	count := min(uint64(limit), f.head.Sequence-after.Sequence)
 	for i := range count {
 		c := f.ring[(after.Sequence+i)%uint64(len(f.ring))]
-		c.Alert = CopyAlert(c.Alert)
 		b.Changes = append(b.Changes, c)
 		b.Continue.Sequence = c.Sequence
 	}

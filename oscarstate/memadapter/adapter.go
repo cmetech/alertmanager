@@ -48,5 +48,9 @@ func (o *Observer) Snapshot(p *mem.Alerts) oscarstate.Snapshot {
 	alerts, seq := p.SnapshotWithSequence(func() uint64 { return o.feed.Cursor().Sequence })
 	cursor := o.feed.Cursor()
 	cursor.Sequence = seq
-	return oscarstate.Snapshot{Alerts: alerts, Cursor: cursor}
+	rows := make([]oscarstate.SnapshotAlert, len(alerts))
+	for i, a := range alerts {
+		rows[i] = oscarstate.SnapshotAlert{Fingerprint: a.Fingerprint(), Alert: a}
+	}
+	return oscarstate.Snapshot{Alerts: rows, Cursor: cursor}
 }

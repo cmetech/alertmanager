@@ -564,10 +564,12 @@ func TestSubscriberChannelMetrics(t *testing.T) {
 
 // oscarObserver is local so core oscarstate never depends on provider/mem.
 type oscarObserver struct {
-	events    []string
-	sequence  uint64
-	heartbeat time.Time
-	feed      *oscarstate.Feed
+	owner              *Alerts
+	deletedOutsideLock atomic.Bool
+	events             []string
+	sequence           uint64
+	heartbeat          time.Time
+	feed               *oscarstate.Feed
 }
 
 func (o *oscarObserver) Upserted(a *alert.Alert) {
@@ -578,7 +580,17 @@ func (o *oscarObserver) Upserted(a *alert.Alert) {
 	}
 }
 
-func (o *oscarObserver) Deleted(a *alert.Alert) { o.events = append(o.events, "delete"); o.sequence++ }
+func (o *oscarObserver) Deleted(a *alert.Alert) {
+	if o.owner != nil && o.owner.mtx.TryLock() {
+		o.deletedOutsideLock.Store(true)
+		o.owner.mtx.Unlock()
+	}
+	o.events = append(o.events, "delete")
+	o.sequence++
+	if o.feed != nil {
+		o.feed.Publish(oscarstate.Change{Kind: oscarstate.Delete, Fingerprint: a.Fingerprint()})
+	}
+}
 
 func (o *oscarObserver) Heartbeat(now time.Time) {
 	o.heartbeat = now
@@ -657,7 +669,7 @@ func TestOSCARSnapshotGCReinsertOrdering(t *testing.T) {
 	defer p.Close()
 	f := oscarstate.NewFeed(10, "test")
 	initial := f.Cursor()
-	o := &oscarObserver{feed: f}
+	o := &oscarObserver{feed: f, owner: p}
 	p.SetStateObserver(o)
 	now := time.Now()
 	old := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
@@ -665,17 +677,31 @@ func TestOSCARSnapshotGCReinsertOrdering(t *testing.T) {
 	done := make(chan struct{})
 	go func() { p.gc(); close(done) }()
 	<-callback.entered
+	var resumeOnce sync.Once
+	defer resumeOnce.Do(func() { close(callback.resume); <-done })
 	fresh := alert.New(model.Alert{Labels: old.Labels, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 	require.NoError(t, p.Put(t.Context(), fresh))
-	snapshot, seq := p.SnapshotWithSequence(func() uint64 { return o.sequence })
+	snapshot, seq := p.SnapshotWithSequence(func() uint64 { return f.Cursor().Sequence })
 	require.Equal(t, uint64(3), seq)
+	require.Equal(t, f.Cursor().Sequence, seq)
+	empty, err := f.Read(oscarstate.Cursor{Epoch: initial.Epoch, Sequence: seq}, 10)
+	require.NoError(t, err)
+	require.Empty(t, empty.Changes)
 	require.Len(t, snapshot, 1)
 	require.Equal(t, fresh.StartsAt, snapshot[0].StartsAt)
 	require.Equal(t, []string{"upsert", "delete", "upsert"}, o.events)
-	close(callback.resume)
-	<-done
+	resumeOnce.Do(func() { close(callback.resume); <-done })
+	require.False(t, o.deletedOutsideLock.Load(), "delete publication must hold the provider mutex")
 	batch, err := f.Read(initial, 10)
 	require.NoError(t, err)
+	require.Len(t, batch.Changes, 3)
+	for i, kind := range []oscarstate.Kind{oscarstate.Upsert, oscarstate.Delete, oscarstate.Upsert} {
+		require.Equal(t, kind, batch.Changes[i].Kind)
+		require.Equal(t, uint64(i+1), batch.Changes[i].Sequence)
+		require.Equal(t, fresh.Fingerprint(), batch.Changes[i].Fingerprint)
+	}
+	lateDelete := batch.Changes[1]
+	require.Equal(t, oscarstate.Delete, lateDelete.Kind)
 	inventory := map[model.Fingerprint]*alert.Alert{}
 	var committed uint64
 	// Retry the batch, then replay a late old delete: committed sequences win.
@@ -692,11 +718,16 @@ func TestOSCARSnapshotGCReinsertOrdering(t *testing.T) {
 			committed = change.Sequence
 		}
 	}
-	apply(batch.Changes)
+	apply(batch.Changes[:1])
+	require.Len(t, inventory, 1)
+	apply([]oscarstate.Change{lateDelete})
+	require.Empty(t, inventory)
+	apply(batch.Changes[2:])
+	require.Equal(t, fresh.StartsAt, inventory[fresh.Fingerprint()].StartsAt)
 	lag := time.Since(batch.Changes[len(batch.Changes)-1].PublishedAt)
 	require.GreaterOrEqual(t, lag, time.Duration(0))
 	apply(batch.Changes)
-	apply(batch.Changes[1:2])
+	apply([]oscarstate.Change{lateDelete})
 	require.Len(t, inventory, 1)
 	require.Equal(t, fresh.StartsAt, inventory[fresh.Fingerprint()].StartsAt)
 	require.Equal(t, []string{"upsert", "delete", "upsert"}, o.events)

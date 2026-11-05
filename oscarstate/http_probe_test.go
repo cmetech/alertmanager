@@ -31,7 +31,7 @@ func TestOSCARProbeHTTP(t *testing.T) {
 	t.Parallel()
 	f := NewFeed(2, "epoch")
 	calls := 0
-	h := NewProbeHandler(func() Snapshot { calls++; return Snapshot{Cursor: f.Cursor(), Alerts: []*alert.Alert{}} }, f)
+	h := NewProbeHandler(func() Snapshot { calls++; return Snapshot{Cursor: f.Cursor(), Alerts: []SnapshotAlert{}} }, f)
 	request := func(path, addr string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", path, nil)
 		r.RemoteAddr = addr
@@ -74,7 +74,9 @@ func TestOSCARProbeHTTPStreamsFixedCopy(t *testing.T) {
 	calls := 0
 	h := NewProbeHandler(func() Snapshot {
 		calls++
-		return Snapshot{Cursor: f.Cursor(), Alerts: []*alert.Alert{alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}}, time.Now(), false), alert.New(model.Alert{Labels: model.LabelSet{"alertname": "B"}}, time.Now(), false)}}
+		a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}}, time.Now(), false)
+		b := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "B"}}, time.Now(), false)
+		return Snapshot{Cursor: f.Cursor(), Alerts: []SnapshotAlert{{Fingerprint: a.Fingerprint(), Alert: a}, {Fingerprint: b.Fingerprint(), Alert: b}}}
 	}, f)
 	r := httptest.NewRequest("GET", "/_oscar/probe/snapshot", nil)
 	r.RemoteAddr = "127.0.0.1:1"

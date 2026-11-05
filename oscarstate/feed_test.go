@@ -14,6 +14,10 @@
 package oscarstate
 
 import (
+	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,46 +101,94 @@ func TestOSCARFeedLimitedDrainAndOverflow(t *testing.T) {
 	require.Len(t, b.Changes, 1)
 }
 
+// The writer runs freely alongside Read: there is no per-batch rendezvous.
+// A deliberate reader pause guarantees overflow; every recovery starts a new
+// snapshot segment, and only Continue advances within a segment.
 func TestOSCARFeedConcurrentLimitedDrain(t *testing.T) {
 	t.Parallel()
-	f := NewFeed(64, "epoch")
-	cursor := f.Cursor()
-	published := make(chan struct{})
-	next := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for range 20 {
-			for range 3 {
-				f.Publish(Change{Kind: Delete})
+	for iteration := range 20 {
+		t.Run(fmt.Sprintf("iteration-%d", iteration), func(t *testing.T) {
+			const capacity = 64
+			f := NewFeed(capacity, "epoch")
+			cursor := f.Cursor()
+			publish := func(sequence uint64) { f.Publish(Change{Kind: Delete, Fingerprint: model.Fingerprint(sequence)}) }
+			for sequence := uint64(1); sequence <= capacity; sequence++ {
+				publish(sequence)
 			}
-			published <- struct{}{}
-			<-next
-		}
-	}()
-	var got []uint64
-	for range 20 {
-		<-published
-		b, err := f.Read(cursor, 2)
-		require.NoError(t, err)
-		for _, c := range b.Changes {
-			got = append(got, c.Sequence)
-		}
-		cursor = b.Continue
-		next <- struct{}{}
-	}
-	<-done
-	for cursor.Sequence < f.Cursor().Sequence {
-		b, err := f.Read(cursor, 2)
-		require.NoError(t, err)
-		for _, c := range b.Changes {
-			got = append(got, c.Sequence)
-		}
-		cursor = b.Continue
-	}
-	require.Len(t, got, 60)
-	for i, seq := range got {
-		require.Equal(t, uint64(i+1), seq)
+			// Exactly capacity remains readable; capacity+1 beyond Continue must gap.
+			boundary, err := f.Read(cursor, 3)
+			require.NoError(t, err)
+			require.Equal(t, uint64(1), boundary.Changes[0].Sequence)
+			cursor = boundary.Continue
+			for sequence := uint64(65); sequence <= 68; sequence++ {
+				publish(sequence)
+			}
+			gap, err := f.Read(cursor, 3)
+			require.ErrorIs(t, err, ErrGap)
+			require.Equal(t, uint64(capacity+1), gap.Head.Sequence-cursor.Sequence)
+			cursor = f.Cursor()
+			var latest atomic.Uint64
+			latest.Store(68)
+			stop, done := make(chan struct{}), make(chan struct{})
+			var stopOnce sync.Once
+			finish := func() { stopOnce.Do(func() { close(stop) }); <-done }
+			go func() {
+				defer close(done)
+				for sequence := uint64(69); ; sequence++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					publish(sequence)
+					latest.Store(sequence)
+					runtime.Gosched()
+				}
+			}()
+			defer finish()
+			// The publisher is not gated by the reader; it continues after this pause.
+			require.Eventually(t, func() bool { return latest.Load() > cursor.Sequence+capacity }, 2*time.Second, time.Millisecond)
+			seen := map[uint64]bool{}
+			batches, gaps := 0, 0
+			consume := func() {
+				batch, err := f.Read(cursor, 3)
+				if err != nil {
+					require.ErrorIs(t, err, ErrGap)
+					require.Greater(t, batch.Head.Sequence-cursor.Sequence, uint64(capacity))
+					gaps++
+					cursor = f.Cursor()
+					return
+				}
+				require.Len(t, batch.Changes, int(min(uint64(3), batch.Head.Sequence-cursor.Sequence)))
+				for i, change := range batch.Changes {
+					require.Equal(t, cursor.Sequence+uint64(i)+1, change.Sequence)
+					require.Equal(t, model.Fingerprint(change.Sequence), change.Fingerprint)
+					require.False(t, seen[change.Sequence])
+					seen[change.Sequence] = true
+				}
+				if len(batch.Changes) > 0 {
+					require.Equal(t, batch.Changes[len(batch.Changes)-1].Sequence, batch.Continue.Sequence)
+					batches++
+				} else {
+					require.Equal(t, cursor, batch.Continue)
+				}
+				cursor = batch.Continue
+			}
+			consume()
+			require.Equal(t, 1, gaps)
+			deadline := time.Now().Add(3 * time.Second)
+			for batches < 12 && time.Now().Before(deadline) {
+				consume()
+				runtime.Gosched()
+			}
+			require.GreaterOrEqual(t, batches, 12)
+			finish()
+			for cursor.Sequence < f.Cursor().Sequence {
+				consume()
+			}
+			require.Equal(t, f.Cursor(), cursor)
+			t.Logf("committed_batches=%d detected_gaps=%d unique_changes=%d", batches, gaps, len(seen))
+		})
 	}
 }
 
@@ -165,4 +217,57 @@ func TestOSCARFeedRetainedAfterOverflow(t *testing.T) {
 		cursor = b.Continue
 	}
 	require.Equal(t, f.Cursor(), cursor)
+}
+
+func TestOSCARFeedReadCopyDoesNotBlockPublish(t *testing.T) {
+	t.Parallel()
+	f := NewFeed(2, "epoch")
+	start := f.Cursor()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}, Annotations: model.LabelSet{"summary": "original"}}, time.Now(), false)
+	f.Publish(Change{Kind: Upsert, Fingerprint: a.Fingerprint(), Alert: a})
+	copying, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	readDone := make(chan Batch, 1)
+	readErrors := make(chan error, 1)
+	go func() {
+		b, err := f.read(start, 1, func(a *alert.Alert) *alert.Alert { close(copying); <-release; return CopyAlert(a) })
+		if err != nil {
+			readErrors <- err
+			return
+		}
+		readDone <- b
+	}()
+	select {
+	case <-copying:
+	case err := <-readErrors:
+		t.Fatal(err)
+	case <-time.After(time.Second):
+		t.Fatal("reader never reached payload copy")
+	}
+	// These wrap the ring while the reader still owns its captured pointers.
+	published := make(chan struct{})
+	go func() {
+		for range 3 {
+			f.Publish(Change{Kind: Delete})
+		}
+		close(published)
+	}()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("payload copying blocked producer progress")
+	}
+	once.Do(func() { close(release) })
+	select {
+	case b := <-readDone:
+		require.Equal(t, uint64(1), b.Continue.Sequence)
+		require.Equal(t, model.LabelValue("original"), b.Changes[0].Alert.Annotations["summary"])
+		b.Changes[0].Alert.Annotations["summary"] = "consumer"
+		require.Equal(t, model.LabelValue("original"), a.Annotations["summary"])
+	case err := <-readErrors:
+		t.Fatal(err)
+	case <-time.After(time.Second):
+		t.Fatal("reader did not finish")
+	}
 }

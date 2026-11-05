@@ -20,14 +20,23 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/prometheus/common/model"
+
 	"github.com/prometheus/alertmanager/alert"
 )
 
 // Snapshot is a single materialized copy captured under the provider mutex.
 // JSON encoding and network transfer take place after that mutex is released.
 type Snapshot struct {
-	Alerts []*alert.Alert `json:"alerts"`
-	Cursor Cursor         `json:"cursor"`
+	Alerts []SnapshotAlert `json:"alerts"`
+	Cursor Cursor          `json:"cursor"`
+}
+
+// SnapshotAlert carries the same explicit identity as Change. Consumers key
+// inventory by Fingerprint; the decoded native payload has no cached identity.
+type SnapshotAlert struct {
+	Fingerprint model.Fingerprint `json:"fingerprint"`
+	Alert       *alert.Alert      `json:"alert"`
 }
 
 // NewProbeHandler serves the proof protocol only to loopback peers. Changes are

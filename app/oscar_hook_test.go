@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/oscarstate"
 	"github.com/prometheus/alertmanager/oscarstate/memadapter"
 	"github.com/prometheus/alertmanager/provider/mem"
@@ -254,7 +255,7 @@ func TestOSCARAppHookFixedSnapshotTransfer(t *testing.T) {
 	post(fmt.Sprintf(`[{"labels":{"alertname":"Old"},"startsAt":%q,"endsAt":%q},{"labels":{"alertname":"New"}}]`, now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(-time.Second).Format(time.RFC3339Nano)))
 	require.Eventually(t, func() bool {
 		s := observer.Snapshot(provider)
-		return len(s.Alerts) == 1 && s.Alerts[0].Labels["alertname"] == "New"
+		return len(s.Alerts) == 1 && s.Alerts[0].Alert.Labels["alertname"] == "New"
 	}, time.Second, time.Millisecond)
 	close(release)
 	select {
@@ -262,7 +263,7 @@ func TestOSCARAppHookFixedSnapshotTransfer(t *testing.T) {
 		require.NoError(t, err)
 	case s := <-result:
 		require.Len(t, s.Alerts, 1)
-		require.Equal(t, model.LabelValue("Old"), s.Alerts[0].Labels["alertname"])
+		require.Equal(t, model.LabelValue("Old"), s.Alerts[0].Alert.Labels["alertname"])
 		b, err := f.Read(s.Cursor, 20)
 		require.NoError(t, err)
 		require.Len(t, b.Changes, 3)
@@ -270,4 +271,85 @@ func TestOSCARAppHookFixedSnapshotTransfer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("snapshot did not finish")
 	}
+}
+
+// The HTTP bootstrap must use the same explicit identity as later changes.
+func TestOSCARAppHookSnapshotIdentityConverges(t *testing.T) {
+	opts := testOptions(t)
+	opts.AlertGCInterval = 10 * time.Millisecond
+	f := oscarstate.NewFeed(20, "")
+	observer := memadapter.New(f)
+	opts.StateObserver = observer
+	var provider *mem.Alerts
+	opts.ProbeHandler = func(p *mem.Alerts) http.Handler {
+		provider = p
+		return oscarstate.NewProbeHandler(func() oscarstate.Snapshot { return observer.Snapshot(p) }, f)
+	}
+	a, err := New(opts)
+	require.NoError(t, err)
+	require.NoError(t, a.Start())
+	defer a.Stop(context.Background())
+	base := "http://" + a.Addr()
+	request := func(method, path, body string) []byte {
+		t.Helper()
+		req, err := http.NewRequest(method, base+path, strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		data, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, 200, resp.StatusCode, string(data))
+		return data
+	}
+	now := time.Now()
+	start := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	end := now.Add(time.Hour).Format(time.RFC3339Nano)
+	request("POST", "/api/v2/alerts", fmt.Sprintf(`[{"labels":{"alertname":"A"},"annotations":{"summary":"old"},"startsAt":%q,"endsAt":%q},{"labels":{"alertname":"B"},"startsAt":%q,"endsAt":%q}]`, start, end, start, end))
+	var snapshot oscarstate.Snapshot
+	require.NoError(t, json.Unmarshal(request("GET", "/_oscar/probe/snapshot", ""), &snapshot))
+	require.Len(t, snapshot.Alerts, 2)
+	fpA := model.LabelSet{"alertname": "A"}.Fingerprint()
+	fpB := model.LabelSet{"alertname": "B"}.Fingerprint()
+	inventory := map[model.Fingerprint]*alert.Alert{}
+	for _, row := range snapshot.Alerts {
+		require.NotZero(t, row.Fingerprint)
+		require.NotNil(t, row.Alert)
+		require.Equal(t, row.Alert.Labels.Fingerprint(), row.Fingerprint)
+		inventory[row.Fingerprint] = row.Alert
+	}
+	require.Contains(t, inventory, fpA)
+	require.Contains(t, inventory, fpB)
+	require.Len(t, inventory, 2)
+	request("POST", "/api/v2/alerts", fmt.Sprintf(`[{"labels":{"alertname":"A"},"annotations":{"summary":"new"},"startsAt":%q,"endsAt":%q},{"labels":{"alertname":"B"},"startsAt":%q,"endsAt":%q}]`, start, end, start, now.Add(-time.Second).Format(time.RFC3339Nano)))
+	cursor := snapshot.Cursor
+	var changes []oscarstate.Change
+	deadline := time.Now().Add(3 * time.Second)
+	for len(changes) < 3 && time.Now().Before(deadline) {
+		var batch oscarstate.Batch
+		require.NoError(t, json.Unmarshal(request("GET", fmt.Sprintf("/_oscar/probe/changes?epoch=%s&after=%d&limit=1", cursor.Epoch, cursor.Sequence), ""), &batch))
+		for _, change := range batch.Changes {
+			require.Equal(t, cursor.Sequence+1, change.Sequence)
+			if change.Kind == oscarstate.Delete {
+				delete(inventory, change.Fingerprint)
+			} else {
+				inventory[change.Fingerprint] = change.Alert
+			}
+			changes = append(changes, change)
+		}
+		cursor = batch.Continue
+		if len(batch.Changes) == 0 {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	require.Len(t, changes, 3)
+	require.Equal(t, oscarstate.Delete, changes[2].Kind)
+	require.Equal(t, fpB, changes[2].Fingerprint)
+	require.Len(t, inventory, 1)
+	require.Equal(t, model.LabelValue("new"), inventory[fpA].Annotations["summary"])
+	native := observer.Snapshot(provider)
+	require.Len(t, native.Alerts, 1)
+	require.Equal(t, inventory[fpA].Labels, native.Alerts[0].Alert.Labels)
+	require.Equal(t, inventory[fpA].Annotations, native.Alerts[0].Alert.Annotations)
 }
