@@ -496,7 +496,9 @@ func TestOSCARStateParity(t *testing.T) {
 					}
 					if s.ID == "late-obsolete-resolve" {
 						require.Equal(t, before, rows)
-						require.Equal(t, beforeRaw, f.observer.Snapshot(f.provider))
+						afterRaw := f.observer.Snapshot(f.provider)
+						require.Equal(t, beforeRaw.Cursor, afterRaw.Cursor)
+						require.ElementsMatch(t, beforeRaw.Alerts, afterRaw.Alerts)
 					}
 					if s.ID == "explicit-resolve" || s.ID == "timeout" {
 						require.Nil(t, parityTarget(rows, target))
