@@ -15,10 +15,14 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -26,6 +30,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
+	"github.com/prometheus/common/route"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/alertmanager/alert"
@@ -36,6 +41,7 @@ import (
 	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/provider/mem"
 	"github.com/prometheus/alertmanager/silence"
 	"github.com/prometheus/alertmanager/tracing"
@@ -255,4 +261,132 @@ func TestReloader_StopIsNilSafe(t *testing.T) {
 	r := newTestReloader(t)
 	// stop before any reload (both pointers nil) must not panic.
 	require.NoError(t, r.stop())
+}
+
+type pageGateProvider struct {
+	provider.Alerts
+	enabled atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *pageGateProvider) GetPending() provider.AlertIterator {
+	it := p.Alerts.GetPending()
+	if !p.enabled.CompareAndSwap(true, false) {
+		return it
+	}
+	out := make(chan *provider.Alert)
+	done := make(chan struct{})
+	go func() {
+		defer close(out)
+		defer it.Close()
+		close(p.entered)
+		select {
+		case <-p.release:
+		case <-done:
+			return
+		}
+		for a := range it.Next() {
+			select {
+			case out <- a:
+			case <-done:
+				return
+			}
+		}
+	}()
+	return provider.NewAlertIterator(out, done, nil)
+}
+
+func TestReloader_PageKeepsGenerationAndCapturedSet(t *testing.T) {
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	logger := promslog.NewNopLogger()
+	reg := prometheus.NewRegistry()
+	silences, err := silence.New(silence.Options{Metrics: reg, Logger: logger})
+	require.NoError(t, err)
+	r.silencer = silence.NewSilencer(silences, logger, eventrecorder.NopRecorder())
+	gate := &pageGateProvider{Alerts: r.alerts, entered: make(chan struct{}), release: make(chan struct{})}
+	apih, err := api.New(api.Options{Alerts: gate, Silences: silences, Logger: logger, Registry: reg, RequestDuration: newMetrics(reg).requestDuration, GroupFunc: r.groups})
+	require.NoError(t, err)
+	r.apih = apih
+	handler := apih.Register(route.New(), "")
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	now := time.Now()
+	for _, labels := range []model.LabelSet{{"alertname": "Test", "severity": "critical"}, {"alertname": "Test", "severity": "warning"}, {"alertname": "Silenced", "instance": "quiet"}} {
+		require.NoError(t, r.alerts.Put(t.Context(), alert.New(model.Alert{Labels: labels, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)))
+	}
+	// This provider uses a long GC interval: the expired alert is present in
+	// storage but both endpoints must exclude it before collection.
+	expired := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Expired"}, StartsAt: now.Add(-2 * time.Hour), EndsAt: now.Add(-time.Hour)}, now, false)
+	require.NoError(t, r.alerts.Put(t.Context(), expired))
+	stored, err := r.alerts.Get(expired.Fingerprint())
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	load := func(receiver string, inhibit bool) *config.Config {
+		yaml := fmt.Sprintf("route:\n  receiver: %s\n  group_wait: 1h\nreceivers:\n- name: %s\n", receiver, receiver)
+		if inhibit {
+			yaml += "inhibit_rules:\n- source_matchers: ['severity=\"critical\"']\n  target_matchers: ['severity=\"warning\"']\n  equal: [alertname]\n"
+		}
+		cfg, e := config.Load(yaml)
+		require.NoError(t, e)
+		return cfg
+	}
+	require.NoError(t, r.reload(load("old", true)))
+	body := fmt.Sprintf(`{"matchers":[{"name":"instance","value":"quiet","isRegex":false}],"startsAt":%q,"endsAt":%q,"createdBy":"test","comment":"test"}`, now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(time.Hour).Format(time.RFC3339Nano))
+	w := call("POST", "/api/v2/silences", body)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	legacy := call("GET", "/api/v2/alerts", "")
+	require.Equal(t, 200, legacy.Code, legacy.Body.String())
+	require.Contains(t, legacy.Body.String(), `"inhibitedBy":["`)
+	require.Contains(t, legacy.Body.String(), `"silencedBy":["`)
+	for _, query := range []string{"active=false", "silenced=false", "inhibited=false", "filter=" + url.QueryEscape(`severity=~"warning|critical"`), "filter=" + url.QueryEscape(`instance=""`), "filter=" + url.QueryEscape(`instance!=""`), "receiver=old", "receiver_matchers=" + url.QueryEscape(`owner="missing"`)} {
+		unpaged := call("GET", "/api/v2/alerts?"+query, "")
+		paged := call("GET", "/api/v2/oscar/alerts/page?column=fingerprint&order=asc&perPage=100&"+query, "")
+		require.Equal(t, 200, unpaged.Code, query)
+		require.Equal(t, 200, paged.Code, query)
+		var expected []json.RawMessage
+		var actual struct {
+			Records []json.RawMessage `json:"records"`
+			Total   int               `json:"total_records"`
+		}
+		require.NoError(t, json.Unmarshal(unpaged.Body.Bytes(), &expected))
+		require.NoError(t, json.Unmarshal(paged.Body.Bytes(), &actual))
+		require.Equal(t, expected, actual.Records, query)
+		require.Equal(t, len(expected), actual.Total, query)
+	}
+	gate.enabled.Store(true)
+	result := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result <- call("GET", "/api/v2/oscar/alerts/page?column=fingerprint&order=asc&perPage=100", "")
+	}()
+	<-gate.entered
+	require.NoError(t, r.alerts.Put(t.Context(), alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Later"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)))
+	require.NoError(t, r.reload(load("new", false)))
+	close(gate.release)
+	page := <-result
+	require.Equal(t, 200, page.Code, page.Body.String())
+	var got struct {
+		Records []json.RawMessage `json:"records"`
+		Total   int               `json:"total_records"`
+	}
+	require.NoError(t, json.Unmarshal(page.Body.Bytes(), &got))
+	var before []json.RawMessage
+	require.NoError(t, json.Unmarshal(legacy.Body.Bytes(), &before))
+	require.Equal(t, 3, got.Total)
+	require.Equal(t, before, got.Records)
+	next := call("GET", "/api/v2/oscar/alerts/page?column=fingerprint&order=asc&perPage=100", "")
+	require.Equal(t, 200, next.Code, next.Body.String())
+	require.NoError(t, json.Unmarshal(next.Body.Bytes(), &got))
+	require.Equal(t, 4, got.Total)
+	require.Contains(t, next.Body.String(), `"name":"new"`)
+	require.NotContains(t, next.Body.String(), `"inhibitedBy":["`)
+	after := call("GET", "/api/v2/alerts", "")
+	require.NoError(t, json.Unmarshal(after.Body.Bytes(), &before))
+	require.Equal(t, before, got.Records)
 }

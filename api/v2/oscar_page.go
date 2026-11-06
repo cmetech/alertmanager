@@ -229,10 +229,13 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 		}
 	}
 done:
-	sort.Slice(h.rows, func(i, j int) bool { return h.better(h.rows[i], h.rows[j]) })
+	if err = ctx.Err(); err != nil {
+		return ops.NewGetOscarAlertsPageInternalServerError().WithPayload(err.Error())
+	}
 	start := (page - 1) * per
 	records := models.GettableAlerts{}
 	if start < len(h.rows) {
+		sort.Slice(h.rows, func(i, j int) bool { return h.better(h.rows[i], h.rows[j]) })
 		end := min(start+per, len(h.rows))
 		for _, c := range h.rows[start:end] {
 			records = append(records, AlertToOpenAPIAlert(c.a, c.status, c.receivers, nil))

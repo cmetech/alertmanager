@@ -6,6 +6,7 @@ package v2
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"slices"
 	"strconv"
@@ -96,6 +97,7 @@ func TestOscarPageValidationAndParity(t *testing.T) {
 	deep := get("perPage=2&page=50000")
 	require.Empty(t, deep.Records)
 	require.Equal(t, 5, deep.Total)
+	require.Equal(t, 3, deep.Pages)
 	all := append(append(asc.Records, middle.Records...), last.Records...)
 	require.Equal(t, native, all)
 	desc := get("column=startsAt&order=desc&perPage=100")
@@ -171,5 +173,125 @@ func TestOscarPageCancellationAndReload(t *testing.T) {
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("page ignored cancellation")
+	}
+}
+
+func TestOscarPageSortColumns(t *testing.T) {
+	alerts, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	t.Cleanup(alerts.Close)
+	api, err := NewAPI(alerts, nil, nil, nil, promslog.NewNopLogger(), prometheus.NewRegistry())
+	require.NoError(t, err)
+	cfg, err := config.Load("route:\n  receiver: default\nreceivers:\n- name: default\n")
+	require.NoError(t, err)
+	api.Update(cfg, func(ctx context.Context, ls labelset.LabelSet) {
+		m, _ := marker.FromContext(ctx)
+		if ls.LabelSet["instance"] == "b" {
+			m.SetSilenced(ls.Fingerprint(), []string{"silenced"})
+		} else {
+			m.SetSilenced(ls.Fingerprint(), nil)
+		}
+	})
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	type row struct {
+		id, name, severity, summary string
+		start, end                  time.Time
+		fp                          string
+	}
+	rows := []row{
+		{id: "a", name: "Zebra", severity: "Warning", summary: "Alpha", start: base.Add(2 * time.Millisecond), end: base.Add(3 * time.Hour)},
+		{id: "b", name: "alpha", severity: "critical", summary: "zulu", start: base.Add(3 * time.Millisecond), end: base.Add(time.Hour)},
+		{id: "c", name: "ALPHA", severity: "", summary: "", start: time.Time{}, end: base.Add(2 * time.Hour)},
+		{id: "d", name: "beta", severity: "Critical", summary: "ALPHA", start: base.Add(4 * time.Millisecond), end: base.Add(4 * time.Hour)},
+		{id: "e", name: "beta", severity: "warning", summary: "beta", start: base.Add(5 * time.Millisecond), end: base.Add(5 * time.Hour)},
+		{id: "f", name: "Beta", severity: "warning", summary: "beta", start: base.Add(5 * time.Millisecond), end: base.Add(5 * time.Hour)},
+	}
+	// Make the later sub-millisecond instant have the smaller fingerprint, so
+	// an implementation comparing nanoseconds instead of milliseconds fails.
+	for i := range rows {
+		ls := model.LabelSet{"alertname": model.LabelValue(rows[i].name), "instance": model.LabelValue(rows[i].id)}
+		if rows[i].severity != "" {
+			ls["severity"] = model.LabelValue(rows[i].severity)
+		}
+		rows[i].fp = ls.Fingerprint().String()
+	}
+	if rows[4].fp < rows[5].fp {
+		rows[4].start = rows[4].start.Add(500 * time.Microsecond)
+	} else {
+		rows[5].start = rows[5].start.Add(500 * time.Microsecond)
+	}
+	for _, r := range rows {
+		ls := model.LabelSet{"alertname": model.LabelValue(r.name), "instance": model.LabelValue(r.id)}
+		if r.severity != "" {
+			ls["severity"] = model.LabelValue(r.severity)
+		}
+		annotations := model.LabelSet{}
+		if r.summary != "" {
+			annotations["summary"] = model.LabelValue(r.summary)
+		}
+		require.NoError(t, alerts.Put(t.Context(), alert.New(model.Alert{Labels: ls, Annotations: annotations, StartsAt: r.start, EndsAt: r.end}, base, false)))
+	}
+	columns := []string{"startsAt", "starts_at", "ends_at", "alertname", "severity", "instance", "summary", "alert_status", "fingerprint"}
+	for _, column := range columns {
+		for _, order := range []string{"asc", "desc"} {
+			t.Run(column+"/"+order, func(t *testing.T) {
+				expected := slices.Clone(rows)
+				key := func(r row) string {
+					switch column {
+					case "startsAt", "starts_at":
+						return r.start.UTC().Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
+					case "ends_at":
+						return r.end.UTC().Truncate(time.Millisecond).Format("2006-01-02T15:04:05.000Z07:00")
+					case "alertname":
+						return strings.ToLower(r.name)
+					case "severity":
+						return strings.ToLower(r.severity)
+					case "instance":
+						return r.id
+					case "summary":
+						return strings.ToLower(r.summary)
+					case "alert_status":
+						if r.id == "b" {
+							return "suppressed"
+						}
+						return "active"
+					default:
+						return r.fp
+					}
+				}
+				slices.SortFunc(expected, func(a, b row) int {
+					c := strings.Compare(key(a), key(b))
+					if c == 0 {
+						c = strings.Compare(a.fp, b.fp)
+					}
+					if order == "desc" {
+						return -c
+					}
+					return c
+				})
+				var actual []string
+				for page := 1; page <= 2; page++ {
+					w := httptest.NewRecorder()
+					api.Handler.ServeHTTP(w, httptest.NewRequest("GET", fmt.Sprintf("/api/v2/oscar/alerts/page?column=%s&order=%s&page=%d&perPage=3", column, order, page), nil))
+					require.Equal(t, 200, w.Code, w.Body.String())
+					var result struct {
+						Records []struct {
+							Fingerprint string `json:"fingerprint"`
+						} `json:"records"`
+						Total int `json:"total_records"`
+					}
+					require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+					require.Equal(t, len(rows), result.Total)
+					for _, r := range result.Records {
+						actual = append(actual, r.Fingerprint)
+					}
+				}
+				want := make([]string, 0, len(expected))
+				for _, r := range expected {
+					want = append(want, r.fp)
+				}
+				require.Equal(t, want, actual)
+			})
+		}
 	}
 }
