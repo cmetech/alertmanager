@@ -126,6 +126,7 @@ func NewAPI(
 		return docui.ServeSpec(swaggerSpec.Raw(), swaggerContext.RoutesHandler(b), docui.WithSpecPath("/swagger.json"))
 	}
 
+	openAPI.AlertGetOscarAlertsPageHandler = alert_ops.GetOscarAlertsPageHandlerFunc(api.getOscarAlertsPageHandler)
 	openAPI.AlertGetAlertsHandler = alert_ops.GetAlertsHandlerFunc(api.getAlertsHandler)
 	openAPI.AlertPostAlertsHandler = alert_ops.PostAlertsHandlerFunc(api.postAlertsHandler)
 	openAPI.AlertgroupGetAlertGroupsHandler = alertgroup_ops.GetAlertGroupsHandlerFunc(api.getAlertGroupsHandler)

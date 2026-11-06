@@ -78,6 +78,13 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 			return middleware.NotImplemented("operation alert.GetAlerts has not yet been implemented")
 		})
 	}
+	if api.AlertGetOscarAlertsPageHandler == nil {
+		api.AlertGetOscarAlertsPageHandler = alert.GetOscarAlertsPageHandlerFunc(func(params alert.GetOscarAlertsPageParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.GetOscarAlertsPage has not yet been implemented")
+		})
+	}
 	if api.ReceiverGetReceiversHandler == nil {
 		api.ReceiverGetReceiversHandler = receiver.GetReceiversHandlerFunc(func(params receiver.GetReceiversParams) middleware.Responder {
 			_ = params

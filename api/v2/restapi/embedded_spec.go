@@ -223,6 +223,98 @@ func init() {
         }
       }
     },
+    "/oscar/alerts/page": {
+      "get": {
+        "description": "Get a page of native alerts",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "getOscarAlertsPage",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "perPage",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "column",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "order",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "active",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "silenced",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "inhibited",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "unprocessed",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "receiver",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "severity",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "quick_search",
+            "in": "query"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "collectionFormat": "multi",
+            "name": "filter",
+            "in": "query"
+          },
+          {
+            "$ref": "#/parameters/receiverMatchers"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paged alerts",
+            "schema": {
+              "$ref": "#/definitions/oscarAlertPage"
+            }
+          },
+          "400": {
+            "$ref": "#/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/responses/InternalServerError"
+          }
+        }
+      }
+    },
     "/receivers": {
       "get": {
         "description": "Get list of all receivers (name of notification integrations)",
@@ -695,6 +787,27 @@ func init() {
         "$ref": "#/definitions/matcher"
       }
     },
+    "oscarAlertPage": {
+      "type": "object",
+      "required": [
+        "records",
+        "total_records",
+        "total_pages"
+      ],
+      "properties": {
+        "records": {
+          "$ref": "#/definitions/gettableAlerts"
+        },
+        "total_pages": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "total_records": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
     "peerStatus": {
       "type": "object",
       "required": [
@@ -1111,6 +1224,111 @@ func init() {
             "description": "Get alert groups response",
             "schema": {
               "$ref": "#/definitions/alertGroups"
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "schema": {
+              "type": "string"
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "/oscar/alerts/page": {
+      "get": {
+        "description": "Get a page of native alerts",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "getOscarAlertsPage",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "perPage",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "column",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "order",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "active",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "silenced",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "inhibited",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "unprocessed",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "receiver",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "severity",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "quick_search",
+            "in": "query"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "collectionFormat": "multi",
+            "name": "filter",
+            "in": "query"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "collectionFormat": "multi",
+            "description": "A matcher expression to filter by receiver labels. For example ` + "`" + `owner=\"my-team\"` + "`" + `. Can be repeated to apply multiple matchers.",
+            "name": "receiver_matchers",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paged alerts",
+            "schema": {
+              "$ref": "#/definitions/oscarAlertPage"
             }
           },
           "400": {
@@ -1623,6 +1841,27 @@ func init() {
       "minItems": 1,
       "items": {
         "$ref": "#/definitions/matcher"
+      }
+    },
+    "oscarAlertPage": {
+      "type": "object",
+      "required": [
+        "records",
+        "total_records",
+        "total_pages"
+      ],
+      "properties": {
+        "records": {
+          "$ref": "#/definitions/gettableAlerts"
+        },
+        "total_pages": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "total_records": {
+          "type": "integer",
+          "format": "int64"
+        }
       }
     },
     "peerStatus": {

@@ -80,6 +80,12 @@ func NewAlertmanagerAPI(spec *loads.Document) *AlertmanagerAPI {
 			return middleware.NotImplemented("operation alert.GetAlerts has not yet been implemented")
 		}),
 
+		AlertGetOscarAlertsPageHandler: alert.GetOscarAlertsPageHandlerFunc(func(params alert.GetOscarAlertsPageParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.GetOscarAlertsPage has not yet been implemented")
+		}),
+
 		ReceiverGetReceiversHandler: receiver.GetReceiversHandlerFunc(func(params receiver.GetReceiversParams) middleware.Responder {
 			_ = params
 
@@ -157,6 +163,8 @@ type AlertmanagerAPI struct {
 	AlertgroupGetAlertGroupsHandler alertgroup.GetAlertGroupsHandler
 	// AlertGetAlertsHandler sets the operation handler for the get alerts operation
 	AlertGetAlertsHandler alert.GetAlertsHandler
+	// AlertGetOscarAlertsPageHandler sets the operation handler for the get oscar alerts page operation
+	AlertGetOscarAlertsPageHandler alert.GetOscarAlertsPageHandler
 	// ReceiverGetReceiversHandler sets the operation handler for the get receivers operation
 	ReceiverGetReceiversHandler receiver.GetReceiversHandler
 	// SilenceGetSilenceHandler sets the operation handler for the get silence operation
@@ -254,6 +262,9 @@ func (o *AlertmanagerAPI) Validate() error {
 	}
 	if o.AlertGetAlertsHandler == nil {
 		unregistered = append(unregistered, "alert.GetAlertsHandler")
+	}
+	if o.AlertGetOscarAlertsPageHandler == nil {
+		unregistered = append(unregistered, "alert.GetOscarAlertsPageHandler")
 	}
 	if o.ReceiverGetReceiversHandler == nil {
 		unregistered = append(unregistered, "receiver.GetReceiversHandler")
@@ -375,6 +386,10 @@ func (o *AlertmanagerAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/alerts"] = alert.NewGetAlerts(o.context, o.AlertGetAlertsHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/oscar/alerts/page"] = alert.NewGetOscarAlertsPage(o.context, o.AlertGetOscarAlertsPageHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}

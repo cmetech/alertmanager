@@ -72,6 +72,8 @@ type ClientOption func(*runtime.ClientOperation)
 type ClientService interface {
 	GetAlerts(params *GetAlertsParams, opts ...ClientOption) (*GetAlertsOK, error)
 
+	GetOscarAlertsPage(params *GetOscarAlertsPageParams, opts ...ClientOption) (*GetOscarAlertsPageOK, error)
+
 	PostAlerts(params *PostAlertsParams, opts ...ClientOption) (*PostAlertsOK, error)
 
 	SetTransport(transport runtime.ClientTransport)
@@ -117,6 +119,49 @@ func (a *Client) GetAlerts(params *GetAlertsParams, opts ...ClientOption) (*GetA
 	//
 	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
 	msg := fmt.Sprintf("unexpected success response for getAlerts: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+GetOscarAlertsPage Get a page of native alerts
+*/
+func (a *Client) GetOscarAlertsPage(params *GetOscarAlertsPageParams, opts ...ClientOption) (*GetOscarAlertsPageOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewGetOscarAlertsPageParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "getOscarAlertsPage",
+		Method:             "GET",
+		PathPattern:        "/oscar/alerts/page",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetOscarAlertsPageReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*GetOscarAlertsPageOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for getOscarAlertsPage: API contract not enforced by server. Client expected to get an error, but got: %T", result)
 	panic(msg)
 }
 
