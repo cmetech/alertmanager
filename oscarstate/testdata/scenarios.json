@@ -449,6 +449,7 @@
     "status": "native silence/inhibition/clock prediction; raw-only divergence unbounded without refresh",
     "silencedBy": "native silence IDs; create/start/end/delete require API refresh",
     "inhibitedBy": "native source fingerprint IDs; source transitions require target API refresh",
-    "membership": "GET excludes expired rows before GC; raw-only stale membership up to GC interval; evaluate endsAt or sweep"
+    "membership": "GET excludes expired rows before GC; raw-only stale membership up to GC interval; evaluate endsAt or sweep",
+    "mutedBy": "Native status field asserted empty in these cases; time-interval muting transitions are untested and require API refresh."
   }
 }

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
 	"github.com/prometheus/exporter-toolkit/web"
 	"github.com/stretchr/testify/require"
@@ -55,6 +57,7 @@ type parityCatalogue struct {
 	Config        string
 	GCIntervals   []string `json:"gc_intervals"`
 	Queries       map[string]string
+	FieldContract map[string]string `json:"field_contract"`
 	Scenarios     []parityScenario
 }
 type parityNative struct {
@@ -81,6 +84,34 @@ type parityFixture struct {
 	client    *http.Client
 }
 
+func parityEventually(t *testing.T, condition func() bool, timeout, interval time.Duration, message ...any) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if condition() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met: %v", message)
+		}
+		time.Sleep(interval)
+	}
+}
+
+// waitResolvedGC removes unrelated expired rows before exact snapshot checks.
+func (f *parityFixture) waitResolvedGC() {
+	f.t.Helper()
+	parityEventually(f.t, func() bool {
+		pending := f.observer.Snapshot(f.provider)
+		for _, row := range pending.Alerts {
+			if row.Alert.EndsAt.Before(time.Now()) {
+				return false
+			}
+		}
+		return true
+	}, 3*time.Second, 10*time.Millisecond, "unrelated resolved source must be GC'd before exact snapshot assertion")
+}
+
 func (f *parityFixture) start() {
 	f.t.Helper()
 	f.feed = oscarstate.NewFeed(256, "")
@@ -92,7 +123,7 @@ func (f *parityFixture) start() {
 	f.runtime, err = app.New(f.opts)
 	require.NoError(f.t, err)
 	require.NoError(f.t, f.runtime.Start())
-	require.Eventually(f.t, func() bool {
+	parityEventually(f.t, func() bool {
 		r, e := f.client.Get("http://" + f.runtime.Addr() + "/-/ready")
 		if e != nil {
 			return false
@@ -254,6 +285,79 @@ func parityFields(t *testing.T, n parityNative, a *alert.Alert) {
 	require.Equal(t, a.GeneratorURL, n.GeneratorURL)
 }
 
+// parityMutationError validates feed evidence, including unchanged duplicate puts.
+func parityMutationError(s parityScenario, target string, batches ...[]oscarstate.Change) error {
+	for _, changes := range batches {
+		for _, ch := range changes {
+			if ch.Kind != oscarstate.Upsert {
+				continue
+			}
+			if s.NoPut {
+				return fmt.Errorf("unexpected Put for %s", s.ID)
+			}
+			if (s.ID == "inhibition-on" || s.ID == "inhibition-off") && ch.Fingerprint.String() == target {
+				return fmt.Errorf("target must not be put by source transition %s", s.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func TestOSCARStateParityMutationEvidence(t *testing.T) {
+	for _, id := range []string{"inhibition-on", "inhibition-off", "silence-create"} {
+		for _, position := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/batch%d", id, position), func(t *testing.T) {
+				s := parityScenario{ID: id, NoPut: id == "silence-create"}
+				feed := oscarstate.NewFeed(8, "evidence")
+				cursor := feed.Cursor()
+				a := alert.New(model.Alert{Labels: model.LabelSet{"instance": "target"}}, time.Now(), false)
+				feed.Publish(oscarstate.Change{Kind: oscarstate.Upsert, Fingerprint: a.Fingerprint(), Alert: a})
+				batch, err := feed.Read(cursor, 8)
+				require.NoError(t, err)
+				batches := [][]oscarstate.Change{nil, nil}
+				batches[position] = batch.Changes
+				require.Error(t, parityMutationError(s, a.Fingerprint().String(), batches...), "unchanged target upsert must be caught in either batch")
+			})
+		}
+	}
+	for _, id := range []string{"inhibition-on", "inhibition-off"} {
+		require.NoError(t, parityMutationError(parityScenario{ID: id}, "000000000000002a", []oscarstate.Change{{Kind: oscarstate.Upsert, Fingerprint: 43}}, nil))
+	}
+}
+
+// TestOSCARStateParityObsoleteClearGC stresses the exact-snapshot boundary
+// with an unrelated resolved inhibition source and the native 1s GC ticker.
+func TestOSCARStateParityObsoleteClearGC(t *testing.T) {
+	data, err := os.ReadFile("../../oscarstate/testdata/scenarios.json")
+	require.NoError(t, err)
+	var c parityCatalogue
+	require.NoError(t, json.Unmarshal(data, &c))
+	f := newParityFixture(t, c, time.Second)
+	selected := map[string]bool{"create": true, "refresh": true, "inhibition-on": true, "inhibition-off": true}
+	var obsolete parityScenario
+	for _, s := range c.Scenarios {
+		if selected[s.ID] {
+			for _, a := range s.Actions {
+				f.action(a)
+			}
+		}
+		if s.ID == "late-obsolete-resolve" {
+			obsolete = s
+		}
+	}
+	// This is the same barrier used by the complete catalogue runner.
+	f.waitResolvedGC()
+	before := f.native(c.Queries["all"])
+	require.Len(t, before, 1)
+	snapshot := f.observer.Snapshot(f.provider)
+	require.Len(t, snapshot.Alerts, 1)
+	for _, a := range obsolete.Actions {
+		f.action(a)
+	}
+	require.Equal(t, before, f.native(c.Queries["all"]))
+	require.Equal(t, snapshot, f.observer.Snapshot(f.provider))
+}
+
 // TestOSCARStateParity classifies raw-provider/API divergences. It does not fill a
 // projection from GET and does not claim DuckDB or bounded-sweep parity.
 func TestOSCARStateParity(t *testing.T) {
@@ -263,6 +367,9 @@ func TestOSCARStateParity(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &c))
 	require.Equal(t, 1, c.SchemaVersion)
 	require.Equal(t, []string{"1s", "30m"}, c.GCIntervals)
+	for _, field := range []string{"fingerprint", "labels", "annotations", "startsAt", "endsAt", "updatedAt", "generatorURL", "receivers", "status", "silencedBy", "inhibitedBy", "mutedBy", "membership"} {
+		require.NotEmpty(t, c.FieldContract[field], "missing catalogue field contract for %s", field)
+	}
 	ids := map[string]bool{}
 	for _, s := range c.Scenarios {
 		require.NotEmpty(t, s.ID)
@@ -286,7 +393,15 @@ func TestOSCARStateParity(t *testing.T) {
 					if target == "" {
 						target = "target"
 					}
+					if (s.ID == "late-obsolete-resolve" || s.ID == "gc") && gc <= time.Second {
+						f.waitResolvedGC()
+					}
 					before := f.native(c.Queries["all"])
+					if s.ID == "duplicate" || s.ID == "refresh" {
+						previous := parityTarget(before, target)
+						require.NotNil(t, previous)
+						parityEventually(t, func() bool { return time.Now().Truncate(time.Millisecond).After(previous.UpdatedAt) }, time.Second, time.Millisecond, "advance beyond native JSON precision")
+					}
 					beforeRaw := f.observer.Snapshot(f.provider)
 					for _, a := range s.Actions {
 						f.action(a)
@@ -301,7 +416,7 @@ func TestOSCARStateParity(t *testing.T) {
 						raw = map[string]*alert.Alert{}
 					}
 					var rows []parityNative
-					require.Eventually(t, func() bool {
+					parityEventually(t, func() bool {
 						rows = f.native(c.Queries["all"])
 						if len(rows) != s.Expected.Count {
 							return false
@@ -312,37 +427,36 @@ func TestOSCARStateParity(t *testing.T) {
 						}
 						return n != nil && n.Status.State == s.Expected.State
 					}, 3*time.Second, 10*time.Millisecond, "missing native observation for %s", s.ID)
-					batch, err := f.feed.Read(cursor, 256)
-					require.NoError(t, err)
-					for _, ch := range batch.Changes {
-						if s.NoPut {
-							require.NotEqual(t, oscarstate.Upsert, ch.Kind, "unexpected Put for %s", s.ID)
+					batches := [][]oscarstate.Change{}
+					consume := func() {
+						batch, err := f.feed.Read(cursor, 256)
+						require.NoError(t, err)
+						batches = append(batches, batch.Changes)
+						for _, ch := range batch.Changes {
+							if ch.Kind == oscarstate.Delete {
+								delete(raw, ch.Fingerprint.String())
+							} else {
+								raw[ch.Fingerprint.String()] = ch.Alert
+							}
 						}
-						if ch.Kind == oscarstate.Delete {
-							delete(raw, ch.Fingerprint.String())
-						} else {
-							raw[ch.Fingerprint.String()] = ch.Alert
-						}
+						cursor = batch.Continue
 					}
-					cursor = batch.Continue
-					snapshot = f.observer.Snapshot(f.provider)
-					// Reconcile any GC between batch and fixed snapshot before checking equality.
-					batch, err = f.feed.Read(cursor, 256)
-					require.NoError(t, err)
-					for _, ch := range batch.Changes {
-						if ch.Kind == oscarstate.Delete {
-							delete(raw, ch.Fingerprint.String())
-						} else {
-							raw[ch.Fingerprint.String()] = ch.Alert
-						}
+					consume() // The action's batch is retained alongside every reconciliation batch.
+					parityEventually(t, func() bool {
+						snapshot = f.observer.Snapshot(f.provider)
+						consume()
+						return snapshot.Cursor == cursor
+					}, 3*time.Second, 10*time.Millisecond, "fixed snapshot and replay cursor must agree for every ID")
+					require.Len(t, raw, len(snapshot.Alerts))
+					for _, a := range snapshot.Alerts {
+						require.Equal(t, a.Alert, raw[a.Fingerprint.String()])
 					}
-					cursor = batch.Continue
-					if snapshot.Cursor == cursor {
-						require.Len(t, raw, len(snapshot.Alerts))
-						for _, a := range snapshot.Alerts {
-							require.Equal(t, a.Alert, raw[a.Fingerprint.String()])
-						}
+					targetFP := ""
+					if previous := parityTarget(before, "target"); previous != nil {
+						targetFP = previous.Fingerprint
 					}
+					require.NoError(t, parityMutationError(s, targetFP, batches...))
+
 					for _, n := range rows {
 						parityFields(t, n, raw[n.Fingerprint])
 						require.Empty(t, n.Status.MutedBy)
@@ -366,9 +480,6 @@ func TestOSCARStateParity(t *testing.T) {
 					if s.ID == "inhibition-on" || s.ID == "inhibition-off" {
 						oldTarget := parityTarget(before, "target")
 						require.NotNil(t, oldTarget)
-						for _, ch := range batch.Changes {
-							require.NotEqual(t, oldTarget.Fingerprint, ch.Fingerprint.String(), "target must not be put by source transition")
-						}
 						for _, row := range beforeRaw.Alerts {
 							if row.Alert.Labels["instance"] == "target" {
 								require.Equal(t, row.Alert, parityRaw(raw, "target"))
@@ -380,7 +491,7 @@ func TestOSCARStateParity(t *testing.T) {
 						previous := parityTarget(before, target)
 						require.Equal(t, "refreshed", n.Annotations["summary"])
 						require.Equal(t, "https://example.invalid/refreshed", n.GeneratorURL)
-						require.True(t, !n.UpdatedAt.Before(previous.UpdatedAt))
+						require.True(t, n.UpdatedAt.After(previous.UpdatedAt))
 						require.Greater(t, cursor.Sequence, beforeRaw.Cursor.Sequence)
 					}
 					if s.ID == "late-obsolete-resolve" {
