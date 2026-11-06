@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/inhibit"
 	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/marker"
 	"github.com/prometheus/alertmanager/provider"
@@ -292,6 +293,77 @@ func TestOscarPageSortColumns(t *testing.T) {
 				}
 				require.Equal(t, want, actual)
 			})
+		}
+	}
+}
+
+func TestLegacyAlertsReloadKeepsRouteAndStatusTogether(t *testing.T) {
+	alerts, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	t.Cleanup(alerts.Close)
+	api, err := NewAPI(alerts, nil, nil, nil, promslog.NewNopLogger(), prometheus.NewRegistry())
+	require.NoError(t, err)
+	now := time.Now()
+	for _, severity := range []string{"critical", "warning"} {
+		require.NoError(t, alerts.Put(t.Context(), alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Test", "severity": model.LabelValue(severity)}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)))
+	}
+	cfg := func(name string, inhibited bool) *config.Config {
+		yaml := fmt.Sprintf("route:\n  receiver: %s\nreceivers:\n- name: %s\n", name, name)
+		if inhibited {
+			yaml += "inhibit_rules:\n- source_matchers: ['severity=\"critical\"']\n  target_matchers: ['severity=\"warning\"']\n  equal: [alertname]\n"
+		}
+		c, e := config.Load(yaml)
+		require.NoError(t, e)
+		return c
+	}
+	oldCfg, newCfg := cfg("old", true), cfg("new", false)
+	makeInhibitor := func(c *config.Config) *inhibit.Inhibitor {
+		i := inhibit.NewInhibitor(alerts, c.InhibitRules, promslog.NewNopLogger(), eventrecorder.NopRecorder())
+		go i.Run()
+		i.WaitForLoading()
+		t.Cleanup(i.Stop)
+		return i
+	}
+	oldInhibitor, newInhibitor := makeInhibitor(oldCfg), makeInhibitor(newCfg)
+	api.Update(oldCfg, func(ctx context.Context, ls labelset.LabelSet) { oldInhibitor.Mutes(ctx, ls) })
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	api.beforeAlertsConfigLock = func() { entered <- struct{}{}; <-release }
+	type response struct {
+		query string
+		w     *httptest.ResponseRecorder
+	}
+	responses := make(chan response, 2)
+	for _, query := range []string{"", "?inhibited=false"} {
+		go func() {
+			w := httptest.NewRecorder()
+			api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/alerts"+query, nil))
+			responses <- response{query: query, w: w}
+		}()
+	}
+	<-entered
+	<-entered
+	api.Update(newCfg, func(ctx context.Context, ls labelset.LabelSet) { newInhibitor.Mutes(ctx, ls) })
+	close(release)
+	for range 2 {
+		result := <-responses
+		require.Equal(t, 200, result.w.Code, result.w.Body.String())
+		var rows []struct {
+			Labels    map[string]string `json:"labels"`
+			Receivers []struct {
+				Name string `json:"name"`
+			} `json:"receivers"`
+			Status struct {
+				State       string   `json:"state"`
+				InhibitedBy []string `json:"inhibitedBy"`
+			} `json:"status"`
+		}
+		require.NoError(t, json.Unmarshal(result.w.Body.Bytes(), &rows))
+		require.Len(t, rows, 2, result.query)
+		for _, row := range rows {
+			require.Equal(t, "new", row.Receivers[0].Name)
+			require.Equal(t, "active", row.Status.State, row.Labels)
+			require.Empty(t, row.Status.InhibitedBy)
 		}
 	}
 }

@@ -82,6 +82,10 @@ type API struct {
 	m      *metrics.Alerts
 
 	Handler http.Handler
+
+	// beforeAlertsConfigLock is nil in production; tests use it to force a reload
+	// at the otherwise unobservable boundary before the legacy read lock.
+	beforeAlertsConfigLock func()
 }
 
 type (
@@ -296,10 +300,13 @@ func (api *API) getAlertsHandler(params alert_ops.GetAlertsParams) middleware.Re
 	alerts := api.alerts.GetPending()
 	defer alerts.Close()
 
-	alertFilter := api.alertFilter(ctx, matchers, *params.Silenced, *params.Inhibited, *params.Active)
 	now := time.Now()
 
+	if api.beforeAlertsConfigLock != nil {
+		api.beforeAlertsConfigLock()
+	}
 	api.mtx.RLock()
+	alertFilter := newAlertFilter(ctx, api.setAlertStatus, matchers, *params.Silenced, *params.Inhibited, *params.Active)
 	rcvLabels := api.receiverLabelsMap()
 	for a := range alerts.Next() {
 		alrt := a.Data
@@ -544,6 +551,11 @@ func (api *API) alertFilter(parent context.Context, matchers []*labels.Matcher, 
 	setAlertStatus := api.setAlertStatus
 	api.mtx.RUnlock()
 
+	return newAlertFilter(parent, setAlertStatus, matchers, silenced, inhibited, active)
+}
+
+// newAlertFilter uses the supplied status function without acquiring api.mtx.
+func newAlertFilter(parent context.Context, setAlertStatus setAlertStatusFn, matchers []*labels.Matcher, silenced, inhibited, active bool) dispatch.AlertFilter {
 	return func(a *alert.Alert, now time.Time) (alert.AlertStatus, bool) {
 		ctx, span := tracer.Start(parent, "alertFilter")
 		defer span.End()
