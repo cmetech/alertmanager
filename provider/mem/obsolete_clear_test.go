@@ -69,6 +69,7 @@ func TestObsoleteClearPreservesCurrentAndSubscribers(t *testing.T) {
 	oldFiring := clearInput(now, -3*time.Hour, time.Hour)
 	oldClear := clearInput(now, -3*time.Hour, -2*time.Hour)
 	current := clearInput(now, -time.Hour, time.Hour)
+	current.EndTimeSource = alert.EndTimeSourceSender
 	require.NoError(t, a.Put(t.Context(), oldFiring, oldClear, current))
 	it := a.Subscribe("test")
 	defer it.Close()
@@ -77,10 +78,14 @@ func TestObsoleteClearPreservesCurrentAndSubscribers(t *testing.T) {
 	duplicate := *oldClear
 	duplicate.UpdatedAt = now.Add(time.Second)
 	duplicate.Annotations = model.LabelSet{"description": "late clear"}
+	duplicate.EndTimeSource = alert.EndTimeSourceAlertmanagerTimeout
+	duplicate.ResolveTimeout = time.Hour
 	require.NoError(t, a.Put(t.Context(), &duplicate))
 	got, err := a.Get(current.Fingerprint())
 	require.NoError(t, err)
 	require.Same(t, current, got)
+	require.Equal(t, alert.EndTimeSourceSender, got.EndTimeSource)
+	require.Zero(t, got.ResolveTimeout)
 	require.Equal(t, beforePre, cb.pre)
 	require.Equal(t, beforePost, cb.post)
 	select {

@@ -385,8 +385,10 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 		// If no end time is defined, set a timeout after which an alert
 		// is marked resolved if it is not updated.
 		timeout := false
+		endTimeSource := alert.EndTimeSourceSender
 		if alrt.EndsAt.IsZero() {
 			timeout = true
+			endTimeSource = alert.EndTimeSourceAlertmanagerTimeout
 			alrt.EndsAt = now.Add(resolveTimeout)
 		}
 		if alrt.EndsAt.After(time.Now()) {
@@ -404,7 +406,12 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 		}
 		// Labels are final at this point, so the alert can be fingerprinted
 		// and become an internal alert.
-		validAlerts = append(validAlerts, alert.New(*alrt, now, timeout))
+		storedAlert := alert.New(*alrt, now, timeout)
+		storedAlert.EndTimeSource = endTimeSource
+		if timeout {
+			storedAlert.ResolveTimeout = resolveTimeout
+		}
+		validAlerts = append(validAlerts, storedAlert)
 	}
 	if err := api.alerts.Put(ctx, validAlerts...); err != nil {
 		message := "Failed to create alerts"

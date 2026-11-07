@@ -29,12 +29,24 @@ import (
 // to internal of the Alertmanager.
 // The type is never exposed to external communication and the
 // embedded alert has to be sanitized beforehand.
+type EndTimeSource string
+
+const (
+	EndTimeSourceUnknown             EndTimeSource = "unknown"
+	EndTimeSourceSender              EndTimeSource = "sender_ends_at"
+	EndTimeSourceAlertmanagerTimeout EndTimeSource = "alertmanager_timeout"
+)
+
 type Alert struct {
 	model.Alert
 
 	// The authoritative timestamp.
 	UpdatedAt time.Time
 	Timeout   bool
+	// EndTimeSource and ResolveTimeout describe the effective EndsAt. They are
+	// separate from Timeout, whose existing value controls native merge behavior.
+	EndTimeSource  EndTimeSource
+	ResolveTimeout time.Duration
 
 	// The fingerprint of Labels, computed once by New. The labels must not
 	// be modified after construction.
@@ -46,10 +58,11 @@ type Alert struct {
 // The labels must not be modified afterwards.
 func New(a model.Alert, updatedAt time.Time, timeout bool) *Alert {
 	return &Alert{
-		Alert:       a,
-		UpdatedAt:   updatedAt,
-		Timeout:     timeout,
-		fingerprint: a.Labels.Fingerprint(),
+		Alert:         a,
+		UpdatedAt:     updatedAt,
+		Timeout:       timeout,
+		EndTimeSource: EndTimeSourceUnknown,
+		fingerprint:   a.Labels.Fingerprint(),
 	}
 }
 
@@ -85,11 +98,15 @@ func (a *Alert) Merge(o *Alert) *Alert {
 		// The latest explicit resolved timestamp wins if both alerts are effectively resolved.
 		if a.Resolved() && a.EndsAt.After(o.EndsAt) {
 			res.EndsAt = a.EndsAt
+			res.EndTimeSource = a.EndTimeSource
+			res.ResolveTimeout = a.ResolveTimeout
 		}
 	} else {
 		// A non-timeout timestamp always rules if it is the latest.
 		if a.EndsAt.After(o.EndsAt) && !a.Timeout {
 			res.EndsAt = a.EndsAt
+			res.EndTimeSource = a.EndTimeSource
+			res.ResolveTimeout = a.ResolveTimeout
 		}
 	}
 
