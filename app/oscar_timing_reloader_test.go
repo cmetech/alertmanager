@@ -90,3 +90,40 @@ func TestReloaderTimingUsesLoadedWebhookIntegrationAndNativeLog(t *testing.T) {
 	require.Equal(t, "1h0m0s", timing.Schedules[0].Repeat)
 	require.NotEmpty(t, timing.Schedules[0].Next)
 }
+
+func TestReloaderTimingUnavailableFromPreStopThroughPrePublish(t *testing.T) {
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	cfg := mustConfig(t)
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, r.alerts.Put(t.Context(), a))
+	require.NoError(t, r.reload(cfg))
+	state := func() string {
+		w := httptest.NewRecorder()
+		r.apih.Register(route.New(), "").ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+		require.Equal(t, 200, w.Code, w.Body.String())
+		var page struct {
+			Timing map[string]struct {
+				LookupState string `json:"repeat_lookup_state"`
+			} `json:"timing_by_fingerprint"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+		return page.Timing[a.Fingerprint().String()].LookupState
+	}
+	require.Equal(t, "ready", state())
+	paused, releasePause := make(chan struct{}), make(chan struct{})
+	prePublish, releasePublish := make(chan struct{}), make(chan struct{})
+	r.afterTimingPause = func() { close(paused); <-releasePause }
+	r.beforeTimingPublish = func() { close(prePublish); <-releasePublish }
+	done := make(chan error, 1)
+	go func() { done <- r.reload(cfg) }()
+	<-paused
+	require.Equal(t, "unavailable", state())
+	close(releasePause)
+	<-prePublish
+	require.Equal(t, "unavailable", state())
+	close(releasePublish)
+	require.NoError(t, <-done)
+	require.Equal(t, "ready", state())
+}

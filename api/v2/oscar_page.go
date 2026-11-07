@@ -244,7 +244,14 @@ done:
 			records = append(records, AlertToOpenAPIAlert(c.a, c.status, c.receivers, nil))
 		}
 	}
-	timingByFingerprint := timingForPage(selected, route, timing, time.Now().UTC())
+	timingStart := time.Now()
+	timingByFingerprint, timingStats := timingForPageWithStats(selected, route, timing, timingStart.UTC())
+	if api.timingLookups != nil {
+		api.timingLookups.Add(float64(timingStats.lookups))
+		api.timingInspected.Add(float64(timingStats.inspected))
+		api.timingCappedPaths.Add(float64(timingStats.cappedPaths))
+		api.timingDuration.Observe(time.Since(timingStart).Seconds())
+	}
 	count := int64(total)
 	pages := int64((total + per - 1) / per)
 	return ops.NewGetOscarAlertsPageOK().WithPayload(&models.OscarAlertPage{Records: records, TotalRecords: &count, TotalPages: &pages, TimingByFingerprint: timingByFingerprint})

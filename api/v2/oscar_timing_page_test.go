@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/require"
@@ -104,4 +105,7 @@ func TestOscarPageTimingUsesSelectedNativeAlertAndNotificationLog(t *testing.T) 
 	require.NotNil(t, timing.Schedules[0].Next)
 	require.True(t, timing.Schedules[0].Next.Equal(baseline.Add(time.Hour)))
 	require.Equal(t, 1, lookups)
+	require.Equal(t, float64(1), testutil.ToFloat64(api.timingLookups))
+	require.Equal(t, float64(1), testutil.ToFloat64(api.timingInspected))
+	require.Equal(t, float64(0), testutil.ToFloat64(api.timingCappedPaths))
 }

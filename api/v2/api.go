@@ -32,6 +32,7 @@ import (
 	"github.com/go-openapi/runtime/server-middleware/docui"
 	"github.com/go-openapi/strfmt"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	prometheus_model "github.com/prometheus/common/model"
 	"github.com/prometheus/common/version"
 	"go.opentelemetry.io/otel/codes"
@@ -79,8 +80,12 @@ type API struct {
 	setAlertStatus     setAlertStatusFn
 	timing             *TimingSource
 
-	logger *slog.Logger
-	m      *metrics.Alerts
+	logger            *slog.Logger
+	m                 *metrics.Alerts
+	timingLookups     prometheus.Counter
+	timingInspected   prometheus.Counter
+	timingCappedPaths prometheus.Counter
+	timingDuration    prometheus.Observer
 
 	Handler http.Handler
 
@@ -111,6 +116,12 @@ func NewAPI(
 		logger:      l,
 		m:           metrics.NewAlerts(r),
 		uptime:      time.Now(),
+	}
+	if r != nil {
+		api.timingLookups = promauto.With(r).NewCounter(prometheus.CounterOpts{Name: "alertmanager_oscar_alert_timing_lookups_total", Help: "Distinct notification-log lookups for paged alert timing."})
+		api.timingInspected = promauto.With(r).NewCounter(prometheus.CounterOpts{Name: "alertmanager_oscar_alert_timing_inspected_hashes_total", Help: "Firing hashes inspected for paged alert timing."})
+		api.timingCappedPaths = promauto.With(r).NewCounter(prometheus.CounterOpts{Name: "alertmanager_oscar_alert_timing_capped_paths_total", Help: "Paged alert notification paths made unavailable by the scan budget."})
+		api.timingDuration = promauto.With(r).NewHistogram(prometheus.HistogramOpts{Name: "alertmanager_oscar_alert_timing_enrichment_duration_seconds", Help: "Time spent enriching selected paged alerts with timing metadata.", Buckets: prometheus.DefBuckets})
 	}
 
 	// Load embedded swagger file.

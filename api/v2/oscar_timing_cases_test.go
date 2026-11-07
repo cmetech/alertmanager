@@ -149,3 +149,46 @@ func TestOscarTimingTotalLookupBudgetCapsLaterGroup(t *testing.T) {
 	states := []string{*got[rows[0].fingerprint].RepeatSchedules[0].State, *got[rows[1].fingerprint].RepeatSchedules[0].State}
 	require.ElementsMatch(t, []string{"estimated", "unavailable"}, states)
 }
+
+func TestOscarTimingReportsLookupWorkAndCappedPaths(t *testing.T) {
+	now := time.Now().UTC()
+	rows, route := timingTestRows(now)
+	rows = rows[:1]
+	source := &TimingSource{Integrations: map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}}}, Lookup: func(string, *nflogpb.Receiver, []uint64, int) nflog.TimingLookup {
+		return nflog.TimingLookup{Found: true, Capped: true, Inspected: 0}
+	}}
+	_, stats := timingForPageWithStats(rows, route, source, now)
+	require.Equal(t, 1, stats.lookups)
+	require.Equal(t, 0, stats.inspected)
+	require.Equal(t, 1, stats.cappedPaths)
+}
+
+type timingMuter struct{}
+
+func (timingMuter) Mutes(names []string, _ time.Time) (bool, []string, error) {
+	if len(names) > 0 {
+		return true, names, nil
+	}
+	return false, nil, nil
+}
+func (timingMuter) ContainsTime([]string, time.Time) (bool, error) { return false, nil }
+
+func TestOscarTimingRouteMuteSuppressesOnlyItsPath(t *testing.T) {
+	now := time.Now().UTC()
+	rows, _ := timingTestRows(now)
+	rows = rows[:1]
+	cfg, err := config.Load("route:\n  receiver: fallback\n  group_by: [alertname]\n  routes:\n  - receiver: team\n    matchers: [instance=\"a\"]\n    continue: true\n    mute_time_intervals: [quiet]\n  - receiver: team\n    matchers: [instance=\"a\"]\nreceivers:\n- name: fallback\n- name: team\ntime_intervals:\n- name: quiet\n  time_intervals:\n  - weekdays: [sunday]\n")
+	require.NoError(t, err)
+	route := dispatch.NewRoute(cfg.Route, nil)
+	hash := notify.HashAlert(rows[0].a)
+	lookups := 0
+	source := &TimingSource{Integrations: map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}}}, Muter: timingMuter{}, Lookup: func(string, *nflogpb.Receiver, []uint64, int) nflog.TimingLookup {
+		lookups++
+		return nflog.TimingLookup{Found: true, Timestamp: now, ExpiresAt: now.Add(24 * time.Hour), Firing: map[uint64]bool{hash: true}, Inspected: 1}
+	}}
+	steps := timingForPage(rows, route, source, now)[rows[0].fingerprint].RepeatSchedules
+	require.Len(t, steps, 2)
+	require.Equal(t, "suppressed", *steps[0].State)
+	require.Equal(t, "estimated", *steps[1].State)
+	require.Equal(t, 1, lookups)
+}

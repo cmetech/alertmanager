@@ -79,6 +79,10 @@ type reloader struct {
 	dispatchStartDelay          time.Duration
 	dispatchMaintenanceInterval time.Duration
 	retention                   time.Duration
+
+	// Test hooks for the timing outage boundaries; nil in production.
+	afterTimingPause    func()
+	beforeTimingPublish func()
 }
 
 // groups returns the alert groups from the currently active dispatcher.
@@ -154,6 +158,9 @@ func (r *reloader) reload(conf *config.Config) error {
 		return fmt.Errorf("failed to apply tracing config: %w", err)
 	}
 	r.apih.PauseTiming()
+	if r.afterTimingPause != nil {
+		r.afterTimingPause()
+	}
 
 	// Reload event recorder outputs before stopping the old dispatcher so
 	// events emitted while it shuts down go to the new outputs.
@@ -251,6 +258,9 @@ func (r *reloader) reload(conf *config.Config) error {
 		LookupTiming(string, *nflogpb.Receiver, []uint64, int) nflog.TimingLookup
 	}); ok {
 		timingLookup = log.LookupTiming
+	}
+	if r.beforeTimingPublish != nil {
+		r.beforeTimingPublish()
 	}
 	r.apih.PublishTiming(conf, timingIntegrations, intervener, timingLookup)
 

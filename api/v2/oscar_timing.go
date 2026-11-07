@@ -83,8 +83,20 @@ type timingGroup struct {
 	targets  []timingTarget
 }
 
+type timingPageStats struct {
+	lookups     int
+	inspected   int
+	cappedPaths int
+}
+
 func timingForPage(rows []pageCandidate, route *dispatch.Route, source *TimingSource, asOf time.Time) map[string]models.OscarAlertTiming {
+	out, _ := timingForPageWithStats(rows, route, source, asOf)
+	return out
+}
+
+func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source *TimingSource, asOf time.Time) (map[string]models.OscarAlertTiming, timingPageStats) {
 	out := make(map[string]models.OscarAlertTiming, len(rows))
+	stats := timingPageStats{}
 	groups := make(map[string]*timingGroup)
 	for _, c := range rows {
 		endSource := string(c.a.EndTimeSource)
@@ -177,10 +189,13 @@ func timingForPage(rows []pageCandidate, route *dispatch.Route, source *TimingSo
 		}
 		slices.Sort(hashes)
 		result := source.Lookup(group.key, group.receiver, hashes, remaining)
+		stats.lookups++
+		stats.inspected += result.Inspected
 		remaining -= result.Inspected
 		for _, target := range group.targets {
 			if result.Capped || !result.Found && result.Inspected != 0 {
 				*target.step.State = "unavailable"
+				stats.cappedPaths++
 				continue
 			}
 			if !result.Found || !result.Firing[target.hash] {
@@ -196,5 +211,5 @@ func timingForPage(rows []pageCandidate, route *dispatch.Route, source *TimingSo
 			target.step.NextRepeatEligibleAt = &date
 		}
 	}
-	return out
+	return out, stats
 }
