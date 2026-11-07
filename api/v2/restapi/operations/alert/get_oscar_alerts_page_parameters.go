@@ -52,6 +52,11 @@ type GetOscarAlertsPageParams struct {
 	/*
 	  In: query
 	*/
+	BaseFilter *string
+
+	/*
+	  In: query
+	*/
 	Column *string
 
 	/*
@@ -59,6 +64,11 @@ type GetOscarAlertsPageParams struct {
 	  Collection Format: multi
 	*/
 	Filter []string
+
+	/*
+	  In: query
+	*/
+	GridFilter *string
 
 	/*
 	  In: query
@@ -127,6 +137,11 @@ func (o *GetOscarAlertsPageParams) BindRequest(r *http.Request, route *middlewar
 		res = append(res, err)
 	}
 
+	qBaseFilter, qhkBaseFilter, _ := qs.GetOK("base_filter")
+	if err := o.bindBaseFilter(qBaseFilter, qhkBaseFilter, route.Formats); err != nil {
+		res = append(res, err)
+	}
+
 	qColumn, qhkColumn, _ := qs.GetOK("column")
 	if err := o.bindColumn(qColumn, qhkColumn, route.Formats); err != nil {
 		res = append(res, err)
@@ -134,6 +149,11 @@ func (o *GetOscarAlertsPageParams) BindRequest(r *http.Request, route *middlewar
 
 	qFilter, qhkFilter, _ := qs.GetOK("filter")
 	if err := o.bindFilter(qFilter, qhkFilter, route.Formats); err != nil {
+		res = append(res, err)
+	}
+
+	qGridFilter, qhkGridFilter, _ := qs.GetOK("grid_filter")
+	if err := o.bindGridFilter(qGridFilter, qhkGridFilter, route.Formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -210,6 +230,24 @@ func (o *GetOscarAlertsPageParams) bindActive(rawData []string, hasKey bool, for
 	return nil
 }
 
+// bindBaseFilter binds and validates parameter BaseFilter from query.
+func (o *GetOscarAlertsPageParams) bindBaseFilter(rawData []string, hasKey bool, formats strfmt.Registry) error {
+	var raw string
+	if len(rawData) > 0 {
+		raw = rawData[len(rawData)-1]
+	}
+
+	// Required: false
+	// AllowEmptyValue: false
+
+	if raw == "" { // empty values pass all other validations
+		return nil
+	}
+	o.BaseFilter = &raw
+
+	return nil
+}
+
 // bindColumn binds and validates parameter Column from query.
 func (o *GetOscarAlertsPageParams) bindColumn(rawData []string, hasKey bool, formats strfmt.Registry) error {
 	var raw string
@@ -246,6 +284,24 @@ func (o *GetOscarAlertsPageParams) bindFilter(rawData []string, hasKey bool, for
 	}
 
 	o.Filter = filterIR
+
+	return nil
+}
+
+// bindGridFilter binds and validates parameter GridFilter from query.
+func (o *GetOscarAlertsPageParams) bindGridFilter(rawData []string, hasKey bool, formats strfmt.Registry) error {
+	var raw string
+	if len(rawData) > 0 {
+		raw = rawData[len(rawData)-1]
+	}
+
+	// Required: false
+	// AllowEmptyValue: false
+
+	if raw == "" { // empty values pass all other validations
+		return nil
+	}
+	o.GridFilter = &raw
 
 	return nil
 }

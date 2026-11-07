@@ -79,11 +79,17 @@ type GetOscarAlertsPageParams struct {
 	// Active.
 	Active *string
 
+	// BaseFilter.
+	BaseFilter *string
+
 	// Column.
 	Column *string
 
 	// Filter.
 	Filter []string
+
+	// GridFilter.
+	GridFilter *string
 
 	// Inhibited.
 	Inhibited *string
@@ -182,6 +188,17 @@ func (o *GetOscarAlertsPageParams) SetActive(active *string) {
 	o.Active = active
 }
 
+// WithBaseFilter adds the baseFilter to the get oscar alerts page params
+func (o *GetOscarAlertsPageParams) WithBaseFilter(baseFilter *string) *GetOscarAlertsPageParams {
+	o.SetBaseFilter(baseFilter)
+	return o
+}
+
+// SetBaseFilter adds the baseFilter to the get oscar alerts page params
+func (o *GetOscarAlertsPageParams) SetBaseFilter(baseFilter *string) {
+	o.BaseFilter = baseFilter
+}
+
 // WithColumn adds the column to the get oscar alerts page params
 func (o *GetOscarAlertsPageParams) WithColumn(column *string) *GetOscarAlertsPageParams {
 	o.SetColumn(column)
@@ -202,6 +219,17 @@ func (o *GetOscarAlertsPageParams) WithFilter(filter []string) *GetOscarAlertsPa
 // SetFilter adds the filter to the get oscar alerts page params
 func (o *GetOscarAlertsPageParams) SetFilter(filter []string) {
 	o.Filter = filter
+}
+
+// WithGridFilter adds the gridFilter to the get oscar alerts page params
+func (o *GetOscarAlertsPageParams) WithGridFilter(gridFilter *string) *GetOscarAlertsPageParams {
+	o.SetGridFilter(gridFilter)
+	return o
+}
+
+// SetGridFilter adds the gridFilter to the get oscar alerts page params
+func (o *GetOscarAlertsPageParams) SetGridFilter(gridFilter *string) {
+	o.GridFilter = gridFilter
 }
 
 // WithInhibited adds the inhibited to the get oscar alerts page params
@@ -339,6 +367,23 @@ func (o *GetOscarAlertsPageParams) WriteToRequest(r runtime.ClientRequest, reg s
 		}
 	}
 
+	if o.BaseFilter != nil {
+
+		// query param base_filter
+		var qrBaseFilter string
+
+		if o.BaseFilter != nil {
+			qrBaseFilter = *o.BaseFilter
+		}
+		qBaseFilter := qrBaseFilter
+		if qBaseFilter != "" {
+
+			if err := r.SetQueryParam("base_filter", qBaseFilter); err != nil {
+				return err
+			}
+		}
+	}
+
 	if o.Column != nil {
 
 		// query param column
@@ -364,6 +409,23 @@ func (o *GetOscarAlertsPageParams) WriteToRequest(r runtime.ClientRequest, reg s
 		// query array param filter
 		if err := r.SetQueryParam("filter", joinedFilter...); err != nil {
 			return err
+		}
+	}
+
+	if o.GridFilter != nil {
+
+		// query param grid_filter
+		var qrGridFilter string
+
+		if o.GridFilter != nil {
+			qrGridFilter = *o.GridFilter
+		}
+		qGridFilter := qrGridFilter
+		if qGridFilter != "" {
+
+			if err := r.SetQueryParam("grid_filter", qGridFilter); err != nil {
+				return err
+			}
 		}
 	}
 

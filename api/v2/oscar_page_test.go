@@ -41,7 +41,7 @@ func TestOscarPageHTTP(t *testing.T) {
 	w := httptest.NewRecorder()
 	api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
 	require.Equal(t, 200, w.Code, w.Body.String())
-	require.JSONEq(t, `{"records":[],"total_records":0,"total_pages":0,"timing_by_fingerprint":{}}`, w.Body.String())
+	require.JSONEq(t, `{"contract_version":2,"records":[],"total_records":0,"total_pages":0,"timing_by_fingerprint":{}}`, w.Body.String())
 }
 
 func TestOscarPageValidationAndParity(t *testing.T) {
@@ -105,7 +105,7 @@ func TestOscarPageValidationAndParity(t *testing.T) {
 	slices.Reverse(all)
 	require.Equal(t, all, desc.Records)
 	require.Equal(t, 5, get("severity=CRITICAL&receiver=default&receiver_matchers=owner%3D%22team%22").Total)
-	require.Equal(t, 1, get("quick_search=STRASSE").Total)
+	require.Equal(t, 2, get("quick_search=STRASSE").Total)
 	require.Equal(t, 0, get("active=false").Total)
 	require.Equal(t, 1, get("filter=instance%3D%220%22").Total)
 

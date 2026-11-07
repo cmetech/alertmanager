@@ -1,0 +1,315 @@
+{
+  "oracle_commit": "0673761b76aae998515f0dfad446fe234d9d692a",
+  "source_sha256": "35a67dd61085c47dde80f7a344c72de88bc3a452d6baf0db32064183a9254890",
+  "python": "3.13.15",
+  "pydantic": "2.14.3",
+  "unicode": "15.1.0",
+  "wire_rows": [
+    {
+      "fingerprint": "fp-street",
+      "startsAt": "2030-11-07T10:00:00.000Z",
+      "endsAt": "2030-11-07T11:00:00.000Z",
+      "updatedAt": "2030-11-07T10:05:00.000Z",
+      "labels": {
+        "alertname": "Straße",
+        "severity": "major",
+        "site": "WEST",
+        "instance": "one"
+      },
+      "annotations": {},
+      "receivers": [
+        {
+          "name": "default"
+        }
+      ],
+      "status": {
+        "state": "active"
+      }
+    },
+    {
+      "fingerprint": "fp-upper",
+      "startsAt": "2030-11-07T10:00:00.001Z",
+      "endsAt": "2030-11-07T11:00:00.000Z",
+      "updatedAt": "2030-11-07T10:05:00.000Z",
+      "labels": {
+        "alertname": "STRASSE",
+        "severity": "critical",
+        "site": "EAST",
+        "instance": "two"
+      },
+      "annotations": {
+        "summary": ""
+      },
+      "receivers": [
+        {
+          "name": "default"
+        }
+      ],
+      "status": {
+        "state": "active"
+      }
+    },
+    {
+      "fingerprint": "fp-other",
+      "startsAt": "2030-11-07T09:00:00.000Z",
+      "endsAt": "2030-11-07T12:00:00.000Z",
+      "updatedAt": "2030-11-07T09:05:00.000Z",
+      "labels": {
+        "alertname": "Other",
+        "instance": "three"
+      },
+      "annotations": {
+        "summary": "hello"
+      },
+      "receivers": [
+        {
+          "name": "default"
+        }
+      ],
+      "status": {
+        "state": "active"
+      }
+    }
+  ],
+  "internal_times": {
+    "fp-street": {
+      "startsAt": "2030-11-07T10:00:00.000500Z",
+      "endsAt": "2030-11-07T11:00:00.000500Z",
+      "updatedAt": "2030-11-07T10:05:00.000500Z"
+    },
+    "fp-upper": {
+      "startsAt": "2030-11-07T10:00:00.001400Z",
+      "endsAt": "2030-11-07T11:00:00.000400Z",
+      "updatedAt": "2030-11-07T10:05:00.000400Z"
+    },
+    "fp-other": {
+      "startsAt": "2030-11-07T09:00:00.000000Z",
+      "endsAt": "2030-11-07T12:00:00.000000Z",
+      "updatedAt": "2030-11-07T09:05:00.000000Z"
+    }
+  },
+  "cases": [
+    {
+      "name": "empty",
+      "public": "{}",
+      "canonical": null,
+      "status": 200,
+      "fingerprints": [
+        "fp-other",
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "empty_or",
+      "public": "{\"items\": [], \"logicOperator\": \"or\"}",
+      "canonical": null,
+      "status": 200,
+      "fingerprints": [
+        "fp-other",
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "ignored_or",
+      "public": "{\"items\": [{\"field\": \"ignore_field\", \"operator\": \"equals\", \"value\": \"x\"}], \"logicOperator\": \"or\"}",
+      "canonical": null,
+      "status": 200,
+      "fingerprints": [
+        "fp-other",
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "name_casefold",
+      "public": "{\"items\": [{\"field\": \"alertname\", \"operator\": \"equals\", \"value\": \"STRASSE\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"alertname\",\"operator\":\"equals\",\"value\":\"STRASSE\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "name_any",
+      "public": "{\"items\": [{\"field\": \"alertname\", \"operator\": \"isAnyOf\", \"value\": [\"STRASSE\"]}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"alertname\",\"operator\":\"isAnyOf\",\"value\":[\"STRASSE\"]}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "severity_absent",
+      "public": "{\"items\": [{\"field\": \"severity\", \"operator\": \"isEmpty\", \"value\": null}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"severity\",\"operator\":\"isEmpty\",\"value\":null}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-other"
+      ]
+    },
+    {
+      "name": "summary_absent",
+      "public": "{\"items\": [{\"field\": \"summary\", \"operator\": \"isEmpty\", \"value\": null}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"summary\",\"operator\":\"isEmpty\",\"value\":null}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street"
+      ]
+    },
+    {
+      "name": "summary_not_empty",
+      "public": "{\"items\": [{\"field\": \"summary\", \"operator\": \"isNotEmpty\", \"value\": null}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"summary\",\"operator\":\"isNotEmpty\",\"value\":null}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-other",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "summary_negative",
+      "public": "{\"items\": [{\"field\": \"summary\", \"operator\": \"doesNotContain\", \"value\": \"hello\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"summary\",\"operator\":\"doesNotContain\",\"value\":\"hello\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "label_fold",
+      "public": "{\"items\": [{\"field\": \"label:Site\", \"operator\": \"equals\", \"value\": \"west\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"label:Site\",\"operator\":\"equals\",\"value\":\"west\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street"
+      ]
+    },
+    {
+      "name": "label_any_negative_present",
+      "public": "{\"items\": [{\"field\": \"label_any:site,missing\", \"operator\": \"doesNotContain\", \"value\": \"east\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"label_any:site,missing\",\"operator\":\"doesNotContain\",\"value\":\"east\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street"
+      ]
+    },
+    {
+      "name": "label_any_negative_absent",
+      "public": "{\"items\": [{\"field\": \"label_any:missing,other\", \"operator\": \"doesNotContain\", \"value\": \"east\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"label_any:missing,other\",\"operator\":\"doesNotContain\",\"value\":\"east\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": []
+    },
+    {
+      "name": "date_after",
+      "public": "{\"items\": [{\"field\": \"starts_at\", \"operator\": \"after\", \"value\": \"2030-11-07T10:00:00Z\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"starts_at\",\"operator\":\"after\",\"value\":\"2030-11-07T10:00:00Z\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "date_before",
+      "public": "{\"items\": [{\"field\": \"starts_at\", \"operator\": \"before\", \"value\": \"2030-11-07T10:00:00Z\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"starts_at\",\"operator\":\"before\",\"value\":\"2030-11-07T10:00:00Z\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-other"
+      ]
+    },
+    {
+      "name": "date_between_reverse",
+      "public": "{\"items\": [{\"field\": \"starts_at\", \"operator\": \"between\", \"value\": [\"2030-11-07T10:00:00.001Z\", \"2030-11-07T09:00:00Z\"]}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"starts_at\",\"operator\":\"between\",\"value\":[\"2030-11-07T10:00:00.001000Z\",\"2030-11-07T09:00:00Z\"]}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-other",
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "date_minute_is",
+      "public": "{\"items\": [{\"field\": \"starts_at\", \"operator\": \"is\", \"value\": \"2030-11-07T10:00\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"starts_at\",\"operator\":\"is\",\"value\":\"2030-11-07T10:00:00Z\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street",
+        "fp-upper"
+      ]
+    },
+    {
+      "name": "date_minute_not",
+      "public": "{\"items\": [{\"field\": \"starts_at\", \"operator\": \"not\", \"value\": \"2030-11-07T10:00\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"starts_at\",\"operator\":\"not\",\"value\":\"2030-11-07T10:00:00Z\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-other"
+      ]
+    },
+    {
+      "name": "mui_metadata",
+      "public": "{\"items\": [{\"field\": \"instance\", \"operator\": \"equals\", \"value\": \"one\", \"id\": 4, \"fromInput\": true}], \"logicOperator\": \"and\", \"quickFilterValues\": [\"one\"]}",
+      "canonical": "{\"items\":[{\"field\":\"instance\",\"operator\":\"equals\",\"value\":\"one\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street"
+      ]
+    },
+    {
+      "name": "invalid_items_null",
+      "public": "{\"items\":null}",
+      "canonical": null,
+      "status": 400,
+      "fingerprints": null
+    },
+    {
+      "name": "invalid_anyof_ignored",
+      "public": "{\"items\": [{\"field\": \"ignore_field\", \"operator\": \"isAnyOf\", \"value\": \"bad\"}], \"logicOperator\": \"and\"}",
+      "canonical": null,
+      "status": 400,
+      "fingerprints": null
+    },
+    {
+      "name": "ticketing_top",
+      "public": "{\"items\": [], \"logicOperator\": \"and\", \"ticketing_states\": \"open\"}",
+      "canonical": null,
+      "status": 422,
+      "fingerprints": null
+    },
+    {
+      "name": "ticketing_incomplete",
+      "public": "{\"items\": [{\"field\": \"ticketing_state\"}]}",
+      "canonical": null,
+      "status": 422,
+      "fingerprints": null
+    },
+    {
+      "name": "invalid_operator",
+      "public": "{\"items\": [{\"field\": \"alertname\", \"operator\": \"bad\", \"value\": \"x\"}], \"logicOperator\": \"and\"}",
+      "canonical": null,
+      "status": 400,
+      "fingerprints": null
+    },
+    {
+      "name": "invalid_field",
+      "public": "{\"items\": [{\"field\": \"unsupported\", \"operator\": \"equals\", \"value\": \"x\"}], \"logicOperator\": \"and\"}",
+      "canonical": null,
+      "status": 400,
+      "fingerprints": null
+    },
+    {
+      "name": "invalid_date",
+      "public": "{\"items\": [{\"field\": \"starts_at\", \"operator\": \"after\", \"value\": \"not-a-date\"}], \"logicOperator\": \"and\"}",
+      "canonical": null,
+      "status": 400,
+      "fingerprints": null
+    }
+  ]
+}

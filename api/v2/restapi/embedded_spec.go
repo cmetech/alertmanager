@@ -287,6 +287,16 @@ func init() {
             "in": "query"
           },
           {
+            "type": "string",
+            "name": "grid_filter",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "base_filter",
+            "in": "query"
+          },
+          {
             "type": "array",
             "items": {
               "type": "string"
@@ -790,12 +800,17 @@ func init() {
     "oscarAlertPage": {
       "type": "object",
       "required": [
+        "contract_version",
         "records",
         "total_records",
         "total_pages",
         "timing_by_fingerprint"
       ],
       "properties": {
+        "contract_version": {
+          "type": "integer",
+          "format": "int64"
+        },
         "records": {
           "$ref": "#/definitions/gettableAlerts"
         },
@@ -1390,6 +1405,16 @@ func init() {
             "in": "query"
           },
           {
+            "type": "string",
+            "name": "grid_filter",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "name": "base_filter",
+            "in": "query"
+          },
+          {
             "type": "array",
             "items": {
               "type": "string"
@@ -1931,12 +1956,17 @@ func init() {
     "oscarAlertPage": {
       "type": "object",
       "required": [
+        "contract_version",
         "records",
         "total_records",
         "total_pages",
         "timing_by_fingerprint"
       ],
       "properties": {
+        "contract_version": {
+          "type": "integer",
+          "format": "int64"
+        },
         "records": {
           "$ref": "#/definitions/gettableAlerts"
         },

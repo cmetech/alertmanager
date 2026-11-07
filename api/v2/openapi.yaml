@@ -193,6 +193,12 @@ paths:
           name: quick_search
           type: string
         - in: query
+          name: grid_filter
+          type: string
+        - in: query
+          name: base_filter
+          type: string
+        - in: query
           name: filter
           type: array
           collectionFormat: multi
@@ -513,6 +519,9 @@ definitions:
   oscarAlertPage:
     type: object
     properties:
+      contract_version:
+        type: integer
+        format: int64
       records:
         $ref: '#/definitions/gettableAlerts'
       total_records:
@@ -526,6 +535,7 @@ definitions:
         additionalProperties:
           $ref: '#/definitions/oscarAlertTiming'
     required:
+      - contract_version
       - records
       - total_records
       - total_pages

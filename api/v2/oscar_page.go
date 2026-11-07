@@ -20,6 +20,7 @@ import (
 	models "github.com/prometheus/alertmanager/api/v2/models"
 	ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	model "github.com/prometheus/common/model"
+	"golang.org/x/text/cases"
 )
 
 type pageCandidate struct {
@@ -61,7 +62,7 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 	if err != nil {
 		return bad(err)
 	}
-	allowed := map[string]bool{"page": true, "perPage": true, "column": true, "order": true, "active": true, "silenced": true, "inhibited": true, "unprocessed": true, "receiver": true, "severity": true, "quick_search": true, "filter": true, "receiver_matchers": true}
+	allowed := map[string]bool{"page": true, "perPage": true, "column": true, "order": true, "active": true, "silenced": true, "inhibited": true, "unprocessed": true, "receiver": true, "severity": true, "quick_search": true, "filter": true, "receiver_matchers": true, "grid_filter": true, "base_filter": true}
 	for k, v := range q {
 		if !allowed[k] || ((k != "filter" && k != "receiver_matchers") && (len(v) != 1 || v[0] == "")) {
 			return bad(fmt.Errorf("invalid query parameter %q", k))
@@ -147,6 +148,14 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 	if e != nil {
 		return bad(e)
 	}
+	grid, e := parseOscarGridModel(q.Get("grid_filter"))
+	if e != nil {
+		return bad(e)
+	}
+	base, e := parseOscarGridModel(q.Get("base_filter"))
+	if e != nil {
+		return bad(e)
+	}
 	var receiver *regexp.Regexp
 	if s := q.Get("receiver"); s != "" {
 		receiver, e = regexp.Compile("^(?:" + s + ")$")
@@ -166,8 +175,9 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 	h := &pageHeap{desc: order == "desc", timeKey: column == "startsAt" || column == "starts_at" || column == "ends_at"}
 	now := time.Now()
 	total := 0
-	severity := strings.ToLower(q.Get("severity"))
-	search := strings.ToLower(q.Get("quick_search"))
+	fold := cases.Fold()
+	severity := fold.String(q.Get("severity"))
+	search := fold.String(q.Get("quick_search"))
 	for {
 		select {
 		case <-ctx.Done():
@@ -198,11 +208,14 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 			if (!active && status.State == alert.AlertStateActive) || (!silenced && len(status.SilencedBy) > 0) || (!inhibited && len(status.InhibitedBy) > 0) {
 				continue
 			}
-			if severity != "" && strings.ToLower(string(a.Labels["severity"])) != severity {
+			if severity != "" && fold.String(string(a.Labels["severity"])) != severity {
 				continue
 			}
 			fp := a.Fingerprint().String()
-			if search != "" && !strings.Contains(strings.ToLower(string(a.Labels["alertname"])), search) && !strings.Contains(strings.ToLower(string(status.State)), search) && !strings.Contains(strings.ToLower(string(a.Labels["severity"])), search) && !strings.Contains(strings.ToLower(string(a.Annotations["summary"])), search) && !strings.Contains(strings.ToLower(fp), search) {
+			if search != "" && !strings.Contains(fold.String(string(a.Labels["alertname"])), search) && !strings.Contains(fold.String(string(status.State)), search) && !strings.Contains(fold.String(string(a.Labels["severity"])), search) && !strings.Contains(fold.String(string(a.Annotations["summary"])), search) && !strings.Contains(fold.String(fp), search) {
+				continue
+			}
+			if !base.matchesWithFold(a, status, fp, now, fold) || !grid.matchesWithFold(a, status, fp, now, fold) {
 				continue
 			}
 			c := pageCandidate{a: a, status: status, receivers: receivers, fingerprint: fp}
@@ -212,13 +225,13 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 			case "ends_at":
 				c.instant = a.EndsAt.UTC().Truncate(time.Millisecond)
 			case "summary":
-				c.key = strings.ToLower(string(a.Annotations["summary"]))
+				c.key = fold.String(string(a.Annotations["summary"]))
 			case "alert_status":
-				c.key = strings.ToLower(string(status.State))
+				c.key = fold.String(string(status.State))
 			case "fingerprint":
-				c.key = strings.ToLower(fp)
+				c.key = fold.String(fp)
 			default:
-				c.key = strings.ToLower(string(a.Labels[model.LabelName(column)]))
+				c.key = fold.String(string(a.Labels[model.LabelName(column)]))
 			}
 			total++
 			if h.Len() < k {
@@ -265,5 +278,6 @@ done:
 	}
 	count := int64(total)
 	pages := int64((total + per - 1) / per)
-	return ops.NewGetOscarAlertsPageOK().WithPayload(&models.OscarAlertPage{Records: records, TotalRecords: &count, TotalPages: &pages, TimingByFingerprint: timingByFingerprint})
+	version := int64(2)
+	return ops.NewGetOscarAlertsPageOK().WithPayload(&models.OscarAlertPage{ContractVersion: &version, Records: records, TotalRecords: &count, TotalPages: &pages, TimingByFingerprint: timingByFingerprint})
 }

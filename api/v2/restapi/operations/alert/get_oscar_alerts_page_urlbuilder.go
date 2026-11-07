@@ -30,8 +30,10 @@ import (
 // GetOscarAlertsPageURL generates an URL for the get oscar alerts page operation
 type GetOscarAlertsPageURL struct {
 	Active           *string
+	BaseFilter       *string
 	Column           *string
 	Filter           []string
+	GridFilter       *string
 	Inhibited        *string
 	Order            *string
 	Page             *string
@@ -85,6 +87,14 @@ func (o *GetOscarAlertsPageURL) Build() (*url.URL, error) {
 		qs.Set("active", activeQ)
 	}
 
+	var baseFilterQ string
+	if o.BaseFilter != nil {
+		baseFilterQ = *o.BaseFilter
+	}
+	if baseFilterQ != "" {
+		qs.Set("base_filter", baseFilterQ)
+	}
+
 	var columnQ string
 	if o.Column != nil {
 		columnQ = *o.Column
@@ -105,6 +115,14 @@ func (o *GetOscarAlertsPageURL) Build() (*url.URL, error) {
 
 	for _, qsv := range filter {
 		qs.Add("filter", qsv)
+	}
+
+	var gridFilterQ string
+	if o.GridFilter != nil {
+		gridFilterQ = *o.GridFilter
+	}
+	if gridFilterQ != "" {
+		qs.Set("grid_filter", gridFilterQ)
 	}
 
 	var inhibitedQ string

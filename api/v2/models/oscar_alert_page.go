@@ -34,6 +34,10 @@ import (
 // swagger:model oscarAlertPage
 type OscarAlertPage struct {
 
+	// contract version
+	// Required: true
+	ContractVersion *int64 `json:"contract_version"`
+
 	// records
 	// Required: true
 	Records GettableAlerts `json:"records"`
@@ -55,6 +59,10 @@ type OscarAlertPage struct {
 func (m *OscarAlertPage) Validate(formats strfmt.Registry) error {
 	var res []error
 
+	if err := m.validateContractVersion(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.validateRecords(formats); err != nil {
 		res = append(res, err)
 	}
@@ -74,6 +82,15 @@ func (m *OscarAlertPage) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *OscarAlertPage) validateContractVersion(formats strfmt.Registry) error {
+
+	if err := validate.Required("contract_version", "body", m.ContractVersion); err != nil {
+		return err
+	}
+
 	return nil
 }
 
