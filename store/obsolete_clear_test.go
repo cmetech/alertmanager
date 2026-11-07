@@ -18,14 +18,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/alertmanager/alert"
 )
 
 func intervalAlert(now time.Time, start, end time.Duration) *alert.Alert {
 	return alert.New(model.Alert{Labels: model.LabelSet{"alertname": "same", "instance": "one"}, StartsAt: now.Add(start), EndsAt: now.Add(end)}, now, false)
 }
+
 func TestSetUnlessObsoleteResolved(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
@@ -68,6 +70,7 @@ func TestSetUnlessObsoleteResolved(t *testing.T) {
 		})
 	}
 }
+
 func TestSetUnlessObsoleteResolvedLimitAndDestroyed(t *testing.T) {
 	now := time.Now()
 	a := NewAlerts().WithPerAlertLimit(1)
@@ -103,6 +106,7 @@ func TestSetUnlessObsoleteResolvedLimitAndDestroyed(t *testing.T) {
 	require.False(t, applied)
 	require.True(t, a.Empty())
 }
+
 func TestSetRemainsUnconditional(t *testing.T) {
 	now := time.Now()
 	a := NewAlerts()
@@ -114,6 +118,7 @@ func TestSetRemainsUnconditional(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, old, got)
 }
+
 func TestSetUnlessObsoleteResolvedConcurrentFlush(t *testing.T) {
 	now := time.Now()
 	a := NewAlerts()

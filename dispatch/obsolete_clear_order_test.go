@@ -66,8 +66,10 @@ func TestDispatcherQueuedObsoleteClearKeepsLaterInterval(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			now := time.Now()
-			old := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "same", "instance": "one"},
-				StartsAt: now.Add(-3 * time.Hour), EndsAt: now.Add(-2 * time.Hour)}, now, false)
+			old := alert.New(model.Alert{
+				Labels:   model.LabelSet{"alertname": "same", "instance": "one"},
+				StartsAt: now.Add(-3 * time.Hour), EndsAt: now.Add(-2 * time.Hour),
+			}, now, false)
 			current := alert.New(model.Alert{Labels: old.Labels, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now.Add(time.Second), false)
 			hold := &obsoleteClearLogHold{old: old, entered: make(chan struct{}), release: make(chan struct{})}
 			var releaseOnce sync.Once

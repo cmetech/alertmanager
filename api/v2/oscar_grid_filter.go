@@ -7,9 +7,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/prometheus/alertmanager/alert"
 	model "github.com/prometheus/common/model"
 	"golang.org/x/text/cases"
+
+	"github.com/prometheus/alertmanager/alert"
 )
 
 type oscarGridRule struct {
@@ -109,8 +110,8 @@ func parseOscarGridModel(raw string) (oscarGridModel, error) {
 		}
 		if isLabel {
 			var parts []string
-			if strings.HasPrefix(r.field, "label_any:") {
-				parts = strings.Split(strings.TrimPrefix(r.field, "label_any:"), ",")
+			if names, ok := strings.CutPrefix(r.field, "label_any:"); ok {
+				parts = strings.Split(names, ",")
 			} else {
 				parts = []string{strings.TrimPrefix(r.field, "label:")}
 			}

@@ -132,10 +132,12 @@ func (f *parityFixture) start() {
 		return r.StatusCode == 200
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
 func (f *parityFixture) stop() {
 	f.t.Helper()
 	require.NoError(f.t, f.runtime.Stop(context.Background()))
 }
+
 func (f *parityFixture) request(method, path string, body []byte) []byte {
 	f.t.Helper()
 	req, err := http.NewRequest(method, "http://"+f.runtime.Addr()+path, bytes.NewReader(body))
@@ -149,16 +151,19 @@ func (f *parityFixture) request(method, path string, body []byte) []byte {
 	require.Equal(f.t, 200, res.StatusCode, "%s %s: %s", method, path, data)
 	return data
 }
+
 func (f *parityFixture) native(path string) []parityNative {
 	f.t.Helper()
 	var rows []parityNative
 	require.NoError(f.t, json.Unmarshal(f.request("GET", path, nil), &rows))
 	return rows
 }
+
 func (f *parityFixture) config(receiver string) {
 	f.t.Helper()
-	require.NoError(f.t, os.WriteFile(f.opts.ConfigFile, []byte(strings.ReplaceAll(f.catalogue.Config, "$receiver", receiver)), 0600))
+	require.NoError(f.t, os.WriteFile(f.opts.ConfigFile, []byte(strings.ReplaceAll(f.catalogue.Config, "$receiver", receiver)), 0o600))
 }
+
 func (f *parityFixture) expand(body []byte) []byte {
 	var value any
 	require.NoError(f.t, json.Unmarshal(body, &value))
@@ -168,8 +173,8 @@ func (f *parityFixture) expand(body []byte) []byte {
 		switch v := v.(type) {
 		case string:
 			for prefix, base := range map[string]time.Time{"$base": f.base, "$now": now} {
-				if strings.HasPrefix(v, prefix) {
-					d, e := time.ParseDuration(strings.TrimPrefix(strings.TrimPrefix(v, prefix), "+"))
+				if suffix, ok := strings.CutPrefix(v, prefix); ok {
+					d, e := time.ParseDuration(strings.TrimPrefix(suffix, "+"))
 					require.NoError(f.t, e)
 					return base.Add(d).UTC().Format(time.RFC3339Nano)
 				}
@@ -193,6 +198,7 @@ func (f *parityFixture) expand(body []byte) []byte {
 	require.NoError(f.t, err)
 	return out
 }
+
 func (f *parityFixture) action(a parityAction) {
 	f.t.Helper()
 	if a.WaitMS > 0 {
@@ -223,6 +229,7 @@ func (f *parityFixture) action(a parityAction) {
 		}
 	}
 }
+
 func newParityFixture(t *testing.T, c parityCatalogue, gc time.Duration) *parityFixture {
 	dir := t.TempDir()
 	logger := promslog.NewNopLogger()
@@ -245,6 +252,7 @@ func newParityFixture(t *testing.T, c parityCatalogue, gc time.Duration) *parity
 	t.Cleanup(f.stop)
 	return f
 }
+
 func parityTarget(rows []parityNative, target string) *parityNative {
 	for i := range rows {
 		if rows[i].Labels["instance"] == target {
@@ -253,6 +261,7 @@ func parityTarget(rows []parityNative, target string) *parityNative {
 	}
 	return nil
 }
+
 func parityRaw(rows map[string]*alert.Alert, target string) *alert.Alert {
 	for _, a := range rows {
 		if string(a.Labels["instance"]) == target {
@@ -261,10 +270,12 @@ func parityRaw(rows map[string]*alert.Alert, target string) *alert.Alert {
 	}
 	return nil
 }
+
 func paritySameTime(t *testing.T, want, got time.Time, field string) {
 	t.Helper()
 	require.True(t, want.Truncate(time.Millisecond).Equal(got.Truncate(time.Millisecond)), "%s: raw=%s native=%s", field, want, got)
 }
+
 func parityFields(t *testing.T, n parityNative, a *alert.Alert) {
 	t.Helper()
 	require.NotNil(t, a, "missing raw alert %s", n.Fingerprint)

@@ -53,6 +53,7 @@ func clearProvider(t *testing.T, callback *clearCallback) *Alerts {
 	t.Cleanup(a.Close)
 	return a
 }
+
 func clearInput(now time.Time, start, end time.Duration) *alert.Alert {
 	return alert.New(model.Alert{
 		Labels:      model.LabelSet{"alertname": "same", "instance": "one"},

@@ -16,10 +16,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-openapi/runtime/middleware"
+	model "github.com/prometheus/common/model"
+
 	"github.com/prometheus/alertmanager/alert"
 	models "github.com/prometheus/alertmanager/api/v2/models"
 	ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
-	model "github.com/prometheus/common/model"
 )
 
 type pageCandidate struct {

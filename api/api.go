@@ -358,8 +358,10 @@ func (api *API) Update(cfg *config.Config, setAlertStatus func(ctx context.Conte
 
 // TimingIntegration identifies a loaded receiver integration for the OSCAR
 // native paged alert view.
-type TimingIntegration = apiv2.TimingIntegration
-type TimingLookupFunc = apiv2.TimingLookupFunc
+type (
+	TimingIntegration = apiv2.TimingIntegration
+	TimingLookupFunc  = apiv2.TimingLookupFunc
+)
 
 func (api *API) PauseTiming() {
 	if api.v2 != nil {

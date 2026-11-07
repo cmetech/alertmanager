@@ -10,15 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	model "github.com/prometheus/common/model"
+	"github.com/prometheus/common/promslog"
+	"github.com/stretchr/testify/require"
+
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/provider/mem"
-	"github.com/prometheus/client_golang/prometheus"
-	model "github.com/prometheus/common/model"
-	"github.com/prometheus/common/promslog"
-	"github.com/stretchr/testify/require"
 )
 
 func TestOscarGridFilterBeforeCountAndPage(t *testing.T) {
@@ -33,9 +34,10 @@ func TestOscarGridFilterBeforeCountAndPage(t *testing.T) {
 	now := time.Now().UTC()
 	for i, name := range []string{"Straße", "STRASSE", "Ꭰ"} {
 		severity := model.LabelValue("critical")
-		if i == 1 {
+		switch i {
+		case 1:
 			severity = "warning"
-		} else if i == 2 {
+		case 2:
 			severity = "Ꭰ"
 		}
 		a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": model.LabelValue(name), "instance": model.LabelValue(string(rune('a' + i))), "severity": severity, "site": "west"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)

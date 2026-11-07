@@ -62,7 +62,7 @@ func TestOSCARProbeMain(t *testing.T) {
 	require.NoError(t, err)
 	resp.Body.Close()
 	require.Contains(t, string(body), "oscar_probe_heartbeat_cadence_seconds_count")
-	for _, line := range strings.Split(string(body), "\n") {
+	for line := range strings.SplitSeq(string(body), "\n") {
 		if strings.HasPrefix(line, "oscar_probe_heartbeat_cadence_seconds_sum ") || strings.HasPrefix(line, "oscar_probe_heartbeat_cadence_seconds_count ") {
 			t.Log(line)
 		}
