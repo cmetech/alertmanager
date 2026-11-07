@@ -197,3 +197,46 @@ func TestReloaderTimingUnavailableFromPreStopThroughPrePublish(t *testing.T) {
 	require.NoError(t, <-done)
 	require.Equal(t, "ready", state())
 }
+
+func TestReloaderTimingFollowsNativeIntegrationIndexesAfterReorder(t *testing.T) {
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	configFor := func(first, second string) *config.Config {
+		t.Helper()
+		cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\n  repeat_interval: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: %s\n  - url: %s\n", first, second))
+		require.NoError(t, err)
+		return cfg
+	}
+	first := configFor("http://127.0.0.1:65531/", "http://127.0.0.1:65532/")
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, r.alerts.Put(t.Context(), a))
+	require.NoError(t, r.reload(first))
+	key := dispatch.GroupKeyForAlert(a, dispatch.NewRoute(first.Route, nil).Match(a.Labels)[0])
+	log := r.notificationLog.(*nflog.Log)
+	require.NoError(t, log.Log(&nflogpb.Receiver{GroupName: "team", Integration: "webhook", Idx: 0}, key, []uint64{notify.HashAlert(a)}, nil, nil, nil, 2*time.Hour))
+	require.NoError(t, log.Log(&nflogpb.Receiver{GroupName: "team", Integration: "webhook", Idx: 1}, key, nil, nil, nil, nil, 2*time.Hour))
+	states := func() map[string]string {
+		w := httptest.NewRecorder()
+		r.apih.Register(route.New(), "").ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+		require.Equal(t, 200, w.Code, w.Body.String())
+		var page struct {
+			Timing map[string]struct {
+				Schedules []struct {
+					Integration string `json:"integration"`
+					State       string `json:"state"`
+				} `json:"repeat_schedules"`
+			} `json:"timing_by_fingerprint"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+		out := map[string]string{}
+		for _, step := range page.Timing[a.Fingerprint().String()].Schedules {
+			out[step.Integration] = step.State
+		}
+		return out
+	}
+	want := map[string]string{"webhook/0": "estimated", "webhook/1": "no_repeat_baseline"}
+	require.Equal(t, want, states())
+	require.NoError(t, r.reload(configFor("http://127.0.0.1:65532/", "http://127.0.0.1:65531/")))
+	require.Equal(t, want, states(), "native log keys follow integration indices after destination reorder")
+}
