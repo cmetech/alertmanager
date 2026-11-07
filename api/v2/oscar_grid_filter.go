@@ -86,10 +86,11 @@ func parseOscarGridModel(raw string) (oscarGridModel, error) {
 			return result, fmt.Errorf("invalid operator for grid field %q", r.field)
 		}
 		if isLabel {
-			names := strings.TrimPrefix(strings.TrimPrefix(r.field, "label_any:"), "label:")
-			parts := []string{names}
+			var parts []string
 			if strings.HasPrefix(r.field, "label_any:") {
-				parts = strings.Split(names, ",")
+				parts = strings.Split(strings.TrimPrefix(r.field, "label_any:"), ",")
+			} else {
+				parts = []string{strings.TrimPrefix(r.field, "label:")}
 			}
 			r.labelNames = map[string]bool{}
 			validNames := 0

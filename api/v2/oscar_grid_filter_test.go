@@ -36,7 +36,7 @@ func TestOscarGridFilterBeforeCountAndPage(t *testing.T) {
 		if i == 1 {
 			severity = "warning"
 		}
-		a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": model.LabelValue(name), "instance": model.LabelValue(string(rune('a' + i))), "severity": severity}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+		a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": model.LabelValue(name), "instance": model.LabelValue(string(rune('a' + i))), "severity": severity, "site": "west"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 		require.NoError(t, alerts.Put(t.Context(), a))
 	}
 	query := url.Values{"grid_filter": {`{"items":[{"field":"alertname","operator":"equals","value":"STRASSE"}],"logicOperator":"and"}`}, "perPage": {"1"}}
@@ -66,6 +66,12 @@ func TestOscarGridFilterBeforeCountAndPage(t *testing.T) {
 		w = httptest.NewRecorder()
 		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page?"+bad.Encode(), nil))
 		require.Equal(t, 400, w.Code, key+": "+w.Body.String())
+		unmatched := url.Values{key: {`{"items":[{"field":"label_any:label:site","operator":"equals","value":"west"}]}`}}
+		w = httptest.NewRecorder()
+		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page?"+unmatched.Encode(), nil))
+		require.Equal(t, 200, w.Code, key+": "+w.Body.String())
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+		require.Equal(t, 0, page.TotalRecords, key)
 	}
 }
 
@@ -88,14 +94,16 @@ func TestOscarGridModelBoundaries(t *testing.T) {
 		filter string
 		match  bool
 	}{
-		"empty OR":               {`{"items":[],"logicOperator":"or"}`, true},
-		"casefold":               {`{"items":[{"field":"alertname","operator":"equals","value":"STRASSE"}]}`, true},
-		"absent negative":        {`{"items":[{"field":"severity","operator":"doesNotContain","value":"critical"}]}`, true},
-		"present empty":          {`{"items":[{"field":"summary","operator":"isEmpty"}]}`, false},
-		"present empty notEmpty": {`{"items":[{"field":"summary","operator":"isNotEmpty"}]}`, true},
-		"label negative present": {`{"items":[{"field":"label_any:site,missing","operator":"doesNotContain","value":"east"}]}`, true},
-		"label negative absent":  {`{"items":[{"field":"label_any:missing,other","operator":"doesNotContain","value":"east"}]}`, false},
-		"OR":                     {`{"items":[{"field":"instance","operator":"equals","value":"wrong"},{"field":"alertname","operator":"equals","value":"strasse"}],"logicOperator":"or"}`, true},
+		"empty OR":                {`{"items":[],"logicOperator":"or"}`, true},
+		"casefold":                {`{"items":[{"field":"alertname","operator":"equals","value":"STRASSE"}]}`, true},
+		"absent negative":         {`{"items":[{"field":"severity","operator":"doesNotContain","value":"critical"}]}`, true},
+		"present empty":           {`{"items":[{"field":"summary","operator":"isEmpty"}]}`, false},
+		"present empty notEmpty":  {`{"items":[{"field":"summary","operator":"isNotEmpty"}]}`, true},
+		"label negative present":  {`{"items":[{"field":"label_any:site,missing","operator":"doesNotContain","value":"east"}]}`, true},
+		"label negative absent":   {`{"items":[{"field":"label_any:missing,other","operator":"doesNotContain","value":"east"}]}`, false},
+		"label any nested prefix": {`{"items":[{"field":"label_any:label:site","operator":"equals","value":"west"}]}`, false},
+		"label any nested first":  {`{"items":[{"field":"label_any:label:site,missing","operator":"equals","value":"west"}]}`, false},
+		"OR":                      {`{"items":[{"field":"instance","operator":"equals","value":"wrong"},{"field":"alertname","operator":"equals","value":"strasse"}],"logicOperator":"or"}`, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.match, folded(tc.filter).matches(a, status, fp, now))
