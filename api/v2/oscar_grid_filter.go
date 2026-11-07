@@ -14,7 +14,7 @@ import (
 
 type oscarGridRule struct {
 	field, operator, value string
-	values                 []string
+	valueSet               map[string]struct{}
 	dates                  []time.Time
 	duration               time.Duration
 	labelNames             map[string]bool
@@ -32,6 +32,9 @@ func parseOscarGridModel(raw string) (oscarGridModel, error) {
 	}
 	if len(raw) > 65536 || !utf8.ValidString(raw) {
 		return result, fmt.Errorf("invalid grid filter size or encoding")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
+		return result, fmt.Errorf("grid filter must be an object")
 	}
 	var wire struct {
 		Items         json.RawMessage `json:"items"`
@@ -113,11 +116,13 @@ func parseOscarGridModel(raw string) (oscarGridModel, error) {
 			continue
 		}
 		if r.operator == "isAnyOf" {
-			if err := json.Unmarshal(item.Value, &r.values); err != nil {
+			var values []string
+			if err := json.Unmarshal(item.Value, &values); err != nil {
 				return result, fmt.Errorf("isAnyOf requires text values")
 			}
-			for i, v := range r.values {
-				r.values[i] = fold.String(v)
+			r.valueSet = make(map[string]struct{}, len(values))
+			for _, v := range values {
+				r.valueSet[fold.String(v)] = struct{}{}
 			}
 			result.rules = append(result.rules, r)
 			continue
@@ -262,11 +267,8 @@ func (r oscarGridRule) matchText(actual string, present bool) bool {
 	case "endsWith":
 		return present && strings.HasSuffix(actual, r.value)
 	case "isAnyOf":
-		for _, v := range r.values {
-			if present && actual == v {
-				return true
-			}
-		}
+		_, found := r.valueSet[actual]
+		return present && found
 	}
 	return false
 }

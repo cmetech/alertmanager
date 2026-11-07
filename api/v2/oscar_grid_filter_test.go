@@ -61,6 +61,12 @@ func TestOscarGridFilterBeforeCountAndPage(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 	require.Equal(t, 1, page.TotalRecords)
 	require.Equal(t, 1, page.TotalPages)
+	for _, key := range []string{"grid_filter", "base_filter"} {
+		bad := url.Values{key: {"null"}}
+		w = httptest.NewRecorder()
+		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page?"+bad.Encode(), nil))
+		require.Equal(t, 400, w.Code, key+": "+w.Body.String())
+	}
 }
 
 func TestOscarGridModelBoundaries(t *testing.T) {
@@ -99,7 +105,7 @@ func TestOscarGridModelBoundaries(t *testing.T) {
 	require.True(t, folded(`{"items":[{"field":"starts_at","operator":"onOrBefore","value":"`+date+`"}]}`).matches(a, status, fp, now))
 	require.False(t, folded(`{"items":[{"field":"starts_at","operator":"after","value":"`+date+`"}]}`).matches(a, status, fp, now))
 	require.True(t, folded(`{"items":[{"field":"starts_at","operator":"between","value":["`+now.Add(time.Second).Format(time.RFC3339Nano)+`","`+date+`"]}]}`).matches(a, status, fp, now))
-	for _, raw := range []string{`{"items":null}`, `{"items":[{"field":"incident_id","operator":"equals","value":"x"}]}`, `{"items":[{"field":"starts_at","operator":"contains","value":"x"}]}`, `{"items":[{"field":"label:","operator":"isEmpty"}]}`} {
+	for _, raw := range []string{`null`, `{"items":null}`, `{"items":[{"field":"incident_id","operator":"equals","value":"x"}]}`, `{"items":[{"field":"starts_at","operator":"contains","value":"x"}]}`, `{"items":[{"field":"label:","operator":"isEmpty"}]}`} {
 		_, err := parseOscarGridModel(raw)
 		require.Error(t, err, raw)
 	}

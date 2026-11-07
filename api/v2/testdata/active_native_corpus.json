@@ -1,6 +1,6 @@
 {
-  "oracle_commit": "0673761b76aae998515f0dfad446fe234d9d692a",
-  "source_sha256": "35a67dd61085c47dde80f7a344c72de88bc3a452d6baf0db32064183a9254890",
+  "oracle_commit": "ee6a7d4549a90ce320b95fa74476112e43e87aa3",
+  "source_sha256": "3f2ad16ceb6b72ac8f7fdd802da190b6263d67bf8648ab068026b09210b345be",
   "python": "3.13.15",
   "pydantic": "2.14.3",
   "unicode": "15.1.0",
@@ -184,6 +184,24 @@
       "name": "label_fold",
       "public": "{\"items\": [{\"field\": \"label:Site\", \"operator\": \"equals\", \"value\": \"west\"}], \"logicOperator\": \"and\"}",
       "canonical": "{\"items\":[{\"field\":\"label:Site\",\"operator\":\"equals\",\"value\":\"west\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street"
+      ]
+    },
+    {
+      "name": "label_control_whitespace",
+      "public": "{\"items\": [{\"field\": \"label:\\u001csite\\u001f\", \"operator\": \"equals\", \"value\": \"west\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"label:site\",\"operator\":\"equals\",\"value\":\"west\"}],\"logicOperator\":\"and\"}",
+      "status": 200,
+      "fingerprints": [
+        "fp-street"
+      ]
+    },
+    {
+      "name": "label_any_control_whitespace",
+      "public": "{\"items\": [{\"field\": \"label_any:\\u001csite\\u001f,, missing \", \"operator\": \"equals\", \"value\": \"west\"}], \"logicOperator\": \"and\"}",
+      "canonical": "{\"items\":[{\"field\":\"label_any:site,missing\",\"operator\":\"equals\",\"value\":\"west\"}],\"logicOperator\":\"and\"}",
       "status": 200,
       "fingerprints": [
         "fp-street"
