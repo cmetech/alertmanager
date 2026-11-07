@@ -19,6 +19,7 @@ import (
 	"time"
 
 	pb "github.com/prometheus/alertmanager/nflog/nflogpb"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -56,6 +57,24 @@ func TestLookupTimingBatchesSelectedHashesAndBoundsEntryScan(t *testing.T) {
 	l.mtx.Unlock()
 	updated := l.LookupTiming("group", recv, []uint64{11, 44}, 3)
 	require.Equal(t, map[uint64]bool{44: true}, updated.Firing)
+}
+
+func TestLookupTimingReflectsHAGossipMerge(t *testing.T) {
+	l, err := New(Options{Retention: 2 * time.Hour, Metrics: prometheus.NewRegistry()})
+	require.NoError(t, err)
+	recv := &pb.Receiver{GroupName: "team", Integration: "webhook"}
+	require.NoError(t, l.Log(recv, "group", []uint64{1}, nil, nil, nil, time.Hour))
+	before := l.LookupTiming("group", recv, []uint64{1, 2}, 2)
+	require.True(t, before.Firing[1])
+	now := time.Now().Add(time.Second)
+	remote := &pb.MeshEntry{Entry: &pb.Entry{Receiver: recv, GroupKey: []byte("group"), Timestamp: timestamppb.New(now), FiringAlerts: []uint64{2}}, ExpiresAt: timestamppb.New(now.Add(time.Hour))}
+	b, err := marshalMeshEntry(remote)
+	require.NoError(t, err)
+	require.NoError(t, l.Merge(b))
+	after := l.LookupTiming("group", recv, []uint64{1, 2}, 2)
+	require.False(t, after.Firing[1])
+	require.True(t, after.Firing[2])
+	require.Equal(t, now.UnixNano(), after.Timestamp.UnixNano())
 }
 
 func TestLookupTimingConcurrentImmutableEntryReplacement(t *testing.T) {

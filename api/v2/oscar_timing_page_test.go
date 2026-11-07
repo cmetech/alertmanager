@@ -123,7 +123,8 @@ func TestOscarPageTimingConcurrentNativeLogReplacement(t *testing.T) {
 	api.Update(cfg, func(context.Context, labelset.LabelSet) {})
 	now := time.Now()
 	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
-	require.NoError(t, alerts.Put(t.Context(), a))
+	b := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown", "instance": "node-2"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, alerts.Put(t.Context(), a, b))
 	log, err := nflog.New(nflog.Options{Retention: 4 * time.Hour, Metrics: prometheus.NewRegistry()})
 	require.NoError(t, err)
 	route := dispatch.NewRoute(cfg.Route, nil).Match(a.Labels)[0]
@@ -135,7 +136,7 @@ func TestOscarPageTimingConcurrentNativeLogReplacement(t *testing.T) {
 		for i := 0; i < 100; i++ {
 			firing := []uint64{notify.HashAlert(a)}
 			if i%2 == 0 {
-				firing = nil
+				firing = []uint64{notify.HashAlert(b)}
 			}
 			if err := log.Log(recv, key, firing, nil, nil, nil, 2*time.Hour); err != nil {
 				done <- err
@@ -157,8 +158,49 @@ func TestOscarPageTimingConcurrentNativeLogReplacement(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 		require.Len(t, page.Timing[a.Fingerprint().String()].Schedules, 1)
-		state := page.Timing[a.Fingerprint().String()].Schedules[0].State
-		require.Contains(t, []string{"estimated", "no_repeat_baseline"}, state)
+		require.Len(t, page.Timing[b.Fingerprint().String()].Schedules, 1)
+		first := page.Timing[a.Fingerprint().String()].Schedules[0].State
+		second := page.Timing[b.Fingerprint().String()].Schedules[0].State
+		require.Contains(t, []string{"estimated", "no_repeat_baseline"}, first)
+		require.Contains(t, []string{"estimated", "no_repeat_baseline"}, second)
+		require.False(t, first == "estimated" && second == "estimated", "shared native log key must use one entry snapshot")
 	}
 	require.NoError(t, <-done)
+}
+
+func TestOscarPageTimingDropsCapturedEstimateWhenReloadPausesMidRequest(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	alerts, err := mem.NewAlerts(t.Context(), time.Minute, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), reg, nil)
+	require.NoError(t, err)
+	t.Cleanup(alerts.Close)
+	api, err := NewAPI(alerts, nil, nil, nil, promslog.NewNopLogger(), reg)
+	require.NoError(t, err)
+	cfg, err := config.Load("route:\n  receiver: team\nreceivers:\n- name: team\n")
+	require.NoError(t, err)
+	entered, release := make(chan struct{}), make(chan struct{})
+	api.Update(cfg, func(context.Context, labelset.LabelSet) { close(entered); <-release })
+	api.PublishTiming(cfg, map[string][]TimingIntegration{}, nil, nil)
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, alerts.Put(t.Context(), a))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+		done <- w
+	}()
+	<-entered
+	api.PauseTiming()
+	close(release)
+	w := <-done
+	require.Equal(t, 200, w.Code, w.Body.String())
+	var page struct {
+		Timing map[string]struct {
+			LookupState string            `json:"repeat_lookup_state"`
+			Schedules   []json.RawMessage `json:"repeat_schedules"`
+		} `json:"timing_by_fingerprint"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	require.Equal(t, "unavailable", page.Timing[a.Fingerprint().String()].LookupState)
+	require.Empty(t, page.Timing[a.Fingerprint().String()].Schedules)
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestFailedFirstAndRepeatDeliveryDoNotAdvanceNativeTimingBaseline(t *testing.T) {
@@ -56,4 +57,14 @@ func TestFailedFirstAndRepeatDeliveryDoNotAdvanceNativeTimingBaseline(t *testing
 	require.Error(t, err)
 	after := log.LookupTiming("group", recv, []uint64{hash}, 1)
 	require.Equal(t, baseline.Timestamp, after.Timestamp, "failed repeat must preserve previous baseline")
+}
+
+func TestNativeRepeatIsStrictlyAfterEstimatedThreshold(t *testing.T) {
+	baseline := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	interval := time.Hour
+	entry := &nflogpb.Entry{Timestamp: timestamppb.New(baseline), FiringAlerts: []uint64{1}}
+	stage := &DedupStage{rs: sendResolved(false)}
+	firing := map[uint64]struct{}{1: {}}
+	require.Equal(t, ReasonDoNotNotify, stage.needsUpdate(entry, firing, nil, interval, baseline.Add(interval)))
+	require.Equal(t, ReasonRepeatIntervalElapsed, stage.needsUpdate(entry, firing, nil, interval, baseline.Add(interval).Add(time.Nanosecond)))
 }

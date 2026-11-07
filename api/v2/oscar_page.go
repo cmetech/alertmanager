@@ -246,6 +246,17 @@ done:
 	}
 	timingStart := time.Now()
 	timingByFingerprint, timingStats := timingForPageWithStats(selected, route, timing, timingStart.UTC())
+	api.mtx.RLock()
+	timingGenerationChanged := api.timing != timing
+	api.mtx.RUnlock()
+	if timingGenerationChanged {
+		for fingerprint, meta := range timingByFingerprint {
+			state := timingLookupUnavailable
+			meta.RepeatLookupState = &state
+			meta.RepeatSchedules = []*models.OscarRepeatSchedule{}
+			timingByFingerprint[fingerprint] = meta
+		}
+	}
 	if api.timingLookups != nil {
 		api.timingLookups.Add(float64(timingStats.lookups))
 		api.timingInspected.Add(float64(timingStats.inspected))
