@@ -2,7 +2,8 @@ ARG ARCH="amd64"
 ARG OS="linux"
 FROM quay.io/prometheus/busybox-${OS}-${ARCH}:latest
 LABEL maintainer="The Prometheus Authors <prometheus-developers@googlegroups.com>"
-LABEL org.opencontainers.image.source="https://github.com/prometheus/alertmanager"
+LABEL org.opencontainers.image.source="https://github.com/cmetech/alertmanager"
+LABEL org.oscar.alertmanager.page-contract="2"
 
 ARG ARCH="amd64"
 ARG OS="linux"
@@ -10,8 +11,8 @@ COPY .build/${OS}-${ARCH}/amtool       /bin/amtool
 COPY .build/${OS}-${ARCH}/alertmanager /bin/alertmanager
 COPY examples/ha/alertmanager.yml      /etc/alertmanager/alertmanager.yml
 
-RUN mkdir -p /alertmanager && \
-    chown -R nobody:nobody /etc/alertmanager /alertmanager && \
+RUN mkdir -p /alertmanager /home && \
+    chown -R nobody:nobody /etc/alertmanager /alertmanager /home && \
     chmod -R g+w /alertmanager
 
 USER       nobody
