@@ -461,3 +461,9 @@ func hashAlert(a *alert.Alert) uint64 {
 
 	return hash
 }
+
+// HashAlert returns the hash used for alert membership in the notification log.
+// It differs from Alert.Fingerprint, which is used by the alerts API.
+func HashAlert(a *alert.Alert) uint64 {
+	return hashAlert(a)
+}

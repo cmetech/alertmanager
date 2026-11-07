@@ -31,6 +31,8 @@ import (
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/inhibit"
 	"github.com/prometheus/alertmanager/labelset"
+	"github.com/prometheus/alertmanager/nflog"
+	"github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/silence"
@@ -151,6 +153,7 @@ func (r *reloader) reload(conf *config.Config) error {
 	if err := r.tracingMgr.ApplyConfig(conf.TracingConfig); err != nil {
 		return fmt.Errorf("failed to apply tracing config: %w", err)
 	}
+	r.apih.PauseTiming()
 
 	// Reload event recorder outputs before stopping the old dispatcher so
 	// events emitted while it shuts down go to the new outputs.
@@ -236,6 +239,20 @@ func (r *reloader) reload(conf *config.Config) error {
 	go newDispatcher.Run(r.startTime.Add(r.dispatchStartDelay))
 	newDispatcher.WaitForLoading()
 	r.dispatcher.Store(newDispatcher)
+
+	timingIntegrations := make(map[string][]api.TimingIntegration, len(receivers))
+	for name, integrations := range receivers {
+		for i := range integrations {
+			timingIntegrations[name] = append(timingIntegrations[name], api.TimingIntegration{Name: integrations[i].Name(), Index: uint32(integrations[i].Index())})
+		}
+	}
+	var timingLookup api.TimingLookupFunc
+	if log, ok := r.notificationLog.(interface {
+		LookupTiming(string, *nflogpb.Receiver, []uint64, int) nflog.TimingLookup
+	}); ok {
+		timingLookup = log.LookupTiming
+	}
+	r.apih.PublishTiming(conf, timingIntegrations, intervener, timingLookup)
 
 	return nil
 }

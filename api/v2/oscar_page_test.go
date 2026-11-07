@@ -41,7 +41,7 @@ func TestOscarPageHTTP(t *testing.T) {
 	w := httptest.NewRecorder()
 	api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
 	require.Equal(t, 200, w.Code, w.Body.String())
-	require.JSONEq(t, `{"records":[],"total_records":0,"total_pages":0}`, w.Body.String())
+	require.JSONEq(t, `{"records":[],"total_records":0,"total_pages":0,"timing_by_fingerprint":{}}`, w.Body.String())
 }
 
 func TestOscarPageValidationAndParity(t *testing.T) {

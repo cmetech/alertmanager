@@ -42,6 +42,7 @@ import (
 	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/silence"
+	"github.com/prometheus/alertmanager/timeinterval"
 )
 
 // API represents all APIs of Alertmanager.
@@ -352,6 +353,23 @@ func (api *API) Update(cfg *config.Config, setAlertStatus func(ctx context.Conte
 	}
 	if api.connect != nil {
 		api.connect.Update(cfg)
+	}
+}
+
+// TimingIntegration identifies a loaded receiver integration for the OSCAR
+// native paged alert view.
+type TimingIntegration = apiv2.TimingIntegration
+type TimingLookupFunc = apiv2.TimingLookupFunc
+
+func (api *API) PauseTiming() {
+	if api.v2 != nil {
+		api.v2.PauseTiming()
+	}
+}
+
+func (api *API) PublishTiming(cfg *config.Config, integrations map[string][]TimingIntegration, muter *timeinterval.Intervener, lookup TimingLookupFunc) {
+	if api.v2 != nil {
+		api.v2.PublishTiming(cfg, integrations, muter, lookup)
 	}
 }
 

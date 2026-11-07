@@ -521,10 +521,60 @@ definitions:
       total_pages:
         type: integer
         format: int64
+      timing_by_fingerprint:
+        type: object
+        additionalProperties:
+          $ref: '#/definitions/oscarAlertTiming'
     required:
       - records
       - total_records
       - total_pages
+      - timing_by_fingerprint
+  oscarAlertTiming:
+    type: object
+    properties:
+      end_time_source:
+        type: string
+      resolve_timeout_duration:
+        type: string
+        x-nullable: true
+      timing_as_of:
+        type: string
+        format: date-time
+      repeat_lookup_state:
+        type: string
+      repeat_schedules:
+        type: array
+        items:
+          $ref: '#/definitions/oscarRepeatSchedule'
+    required:
+      - end_time_source
+      - timing_as_of
+      - repeat_lookup_state
+      - repeat_schedules
+  oscarRepeatSchedule:
+    type: object
+    properties:
+      route_id:
+        type: string
+      receiver:
+        type: string
+      integration:
+        type: string
+      repeat_interval_duration:
+        type: string
+      next_repeat_eligible_at:
+        type: string
+        format: date-time
+        x-nullable: true
+      state:
+        type: string
+    required:
+      - route_id
+      - receiver
+      - integration
+      - repeat_interval_duration
+      - state
   gettableAlerts:
     type: array
     items:

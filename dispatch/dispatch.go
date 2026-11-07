@@ -661,6 +661,16 @@ func getGroupLabels(alrt *alert.Alert, route *Route) model.LabelSet {
 	return groupLabels
 }
 
+// GroupKeyForAlert returns the native notification-log group key for an alert
+// on a matched route. Distinct routes may intentionally share this key.
+func GroupKeyForAlert(alrt *alert.Alert, route *Route) string {
+	return groupKey(route, getGroupLabels(alrt, route))
+}
+
+func groupKey(route *Route, labels model.LabelSet) string {
+	return fmt.Sprintf("%s:%s", route.Key(), labels)
+}
+
 // aggrGroup aggregates alert fingerprints into groups to which a
 // common set of routing options applies.
 // It emits notifications in the specified intervals.
@@ -720,7 +730,7 @@ func newAggrGroup(
 	}
 	ag := &aggrGroup{
 		labels:   labels,
-		groupKey: fmt.Sprintf("%s:%s", r.Key(), labels),
+		groupKey: groupKey(r, labels),
 		matchers: r.Matchers,
 		opts:     &r.RouteOpts,
 		timeout:  to,

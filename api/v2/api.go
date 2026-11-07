@@ -77,6 +77,7 @@ type API struct {
 	alertmanagerConfig *config.Config
 	route              *dispatch.Route
 	setAlertStatus     setAlertStatusFn
+	timing             *TimingSource
 
 	logger *slog.Logger
 	m      *metrics.Alerts
@@ -171,6 +172,7 @@ func (api *API) Update(cfg *config.Config, setAlertStatus setAlertStatusFn) {
 	api.alertmanagerConfig = cfg
 	api.route = dispatch.NewRoute(cfg.Route, nil)
 	api.setAlertStatus = setAlertStatus
+	api.timing = nil
 }
 
 func (api *API) getStatusHandler(params general_ops.GetStatusParams) middleware.Responder {

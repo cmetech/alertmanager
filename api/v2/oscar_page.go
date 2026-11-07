@@ -158,6 +158,7 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 	route := api.route
 	labels := api.receiverLabelsMap()
 	statusFn := api.setAlertStatus
+	timing := api.timing
 	api.mtx.RUnlock()
 	ctx := p.HTTPRequest.Context()
 	iter := api.alerts.GetPending()
@@ -234,14 +235,17 @@ done:
 	}
 	start := (page - 1) * per
 	records := models.GettableAlerts{}
+	selected := []pageCandidate{}
 	if start < len(h.rows) {
 		sort.Slice(h.rows, func(i, j int) bool { return h.better(h.rows[i], h.rows[j]) })
 		end := min(start+per, len(h.rows))
-		for _, c := range h.rows[start:end] {
+		selected = h.rows[start:end]
+		for _, c := range selected {
 			records = append(records, AlertToOpenAPIAlert(c.a, c.status, c.receivers, nil))
 		}
 	}
+	timingByFingerprint := timingForPage(selected, route, timing, time.Now().UTC())
 	count := int64(total)
 	pages := int64((total + per - 1) / per)
-	return ops.NewGetOscarAlertsPageOK().WithPayload(&models.OscarAlertPage{Records: records, TotalRecords: &count, TotalPages: &pages})
+	return ops.NewGetOscarAlertsPageOK().WithPayload(&models.OscarAlertPage{Records: records, TotalRecords: &count, TotalPages: &pages, TimingByFingerprint: timingByFingerprint})
 }

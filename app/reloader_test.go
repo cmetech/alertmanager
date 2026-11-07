@@ -76,6 +76,7 @@ func newTestReloader(t *testing.T) *reloader {
 
 	nflogger, err := nflog.New(nflog.Options{
 		SnapshotFile: filepath.Join(dir, "nflog"),
+		Retention:    120 * time.Hour,
 		Logger:       logger,
 		Metrics:      reg,
 	})

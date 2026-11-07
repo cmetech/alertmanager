@@ -792,11 +792,18 @@ func init() {
       "required": [
         "records",
         "total_records",
-        "total_pages"
+        "total_pages",
+        "timing_by_fingerprint"
       ],
       "properties": {
         "records": {
           "$ref": "#/definitions/gettableAlerts"
+        },
+        "timing_by_fingerprint": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/oscarAlertTiming"
+          }
         },
         "total_pages": {
           "type": "integer",
@@ -805,6 +812,69 @@ func init() {
         "total_records": {
           "type": "integer",
           "format": "int64"
+        }
+      }
+    },
+    "oscarAlertTiming": {
+      "type": "object",
+      "required": [
+        "end_time_source",
+        "timing_as_of",
+        "repeat_lookup_state",
+        "repeat_schedules"
+      ],
+      "properties": {
+        "end_time_source": {
+          "type": "string"
+        },
+        "repeat_lookup_state": {
+          "type": "string"
+        },
+        "repeat_schedules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarRepeatSchedule"
+          }
+        },
+        "resolve_timeout_duration": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "timing_as_of": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "oscarRepeatSchedule": {
+      "type": "object",
+      "required": [
+        "route_id",
+        "receiver",
+        "integration",
+        "repeat_interval_duration",
+        "state"
+      ],
+      "properties": {
+        "integration": {
+          "type": "string"
+        },
+        "next_repeat_eligible_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-nullable": true
+        },
+        "receiver": {
+          "type": "string"
+        },
+        "repeat_interval_duration": {
+          "type": "string"
+        },
+        "route_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
         }
       }
     },
@@ -1848,11 +1918,18 @@ func init() {
       "required": [
         "records",
         "total_records",
-        "total_pages"
+        "total_pages",
+        "timing_by_fingerprint"
       ],
       "properties": {
         "records": {
           "$ref": "#/definitions/gettableAlerts"
+        },
+        "timing_by_fingerprint": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/oscarAlertTiming"
+          }
         },
         "total_pages": {
           "type": "integer",
@@ -1861,6 +1938,69 @@ func init() {
         "total_records": {
           "type": "integer",
           "format": "int64"
+        }
+      }
+    },
+    "oscarAlertTiming": {
+      "type": "object",
+      "required": [
+        "end_time_source",
+        "timing_as_of",
+        "repeat_lookup_state",
+        "repeat_schedules"
+      ],
+      "properties": {
+        "end_time_source": {
+          "type": "string"
+        },
+        "repeat_lookup_state": {
+          "type": "string"
+        },
+        "repeat_schedules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarRepeatSchedule"
+          }
+        },
+        "resolve_timeout_duration": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "timing_as_of": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "oscarRepeatSchedule": {
+      "type": "object",
+      "required": [
+        "route_id",
+        "receiver",
+        "integration",
+        "repeat_interval_duration",
+        "state"
+      ],
+      "properties": {
+        "integration": {
+          "type": "string"
+        },
+        "next_repeat_eligible_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-nullable": true
+        },
+        "receiver": {
+          "type": "string"
+        },
+        "repeat_interval_duration": {
+          "type": "string"
+        },
+        "route_id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
         }
       }
     },

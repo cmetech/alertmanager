@@ -38,6 +38,10 @@ type OscarAlertPage struct {
 	// Required: true
 	Records GettableAlerts `json:"records"`
 
+	// timing by fingerprint
+	// Required: true
+	TimingByFingerprint map[string]OscarAlertTiming `json:"timing_by_fingerprint"`
+
 	// total pages
 	// Required: true
 	TotalPages *int64 `json:"total_pages"`
@@ -52,6 +56,10 @@ func (m *OscarAlertPage) Validate(formats strfmt.Registry) error {
 	var res []error
 
 	if err := m.validateRecords(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateTimingByFingerprint(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -91,6 +99,37 @@ func (m *OscarAlertPage) validateRecords(formats strfmt.Registry) error {
 	return nil
 }
 
+func (m *OscarAlertPage) validateTimingByFingerprint(formats strfmt.Registry) error {
+
+	if err := validate.Required("timing_by_fingerprint", "body", m.TimingByFingerprint); err != nil {
+		return err
+	}
+
+	for k := range m.TimingByFingerprint {
+
+		if err := validate.Required("timing_by_fingerprint"+"."+k, "body", m.TimingByFingerprint[k]); err != nil {
+			return err
+		}
+		if val, ok := m.TimingByFingerprint[k]; ok {
+			if err := val.Validate(formats); err != nil {
+				ve := new(errors.Validation)
+				if stderrors.As(err, &ve) {
+					return ve.ValidateName("timing_by_fingerprint" + "." + k)
+				}
+				ce := new(errors.CompositeError)
+				if stderrors.As(err, &ce) {
+					return ce.ValidateName("timing_by_fingerprint" + "." + k)
+				}
+
+				return err
+			}
+		}
+
+	}
+
+	return nil
+}
+
 func (m *OscarAlertPage) validateTotalPages(formats strfmt.Registry) error {
 
 	if err := validate.Required("total_pages", "body", m.TotalPages); err != nil {
@@ -117,6 +156,10 @@ func (m *OscarAlertPage) ContextValidate(ctx context.Context, formats strfmt.Reg
 		res = append(res, err)
 	}
 
+	if err := m.contextValidateTimingByFingerprint(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
@@ -136,6 +179,25 @@ func (m *OscarAlertPage) contextValidateRecords(ctx context.Context, formats str
 		}
 
 		return err
+	}
+
+	return nil
+}
+
+func (m *OscarAlertPage) contextValidateTimingByFingerprint(ctx context.Context, formats strfmt.Registry) error {
+
+	if err := validate.Required("timing_by_fingerprint", "body", m.TimingByFingerprint); err != nil {
+		return err
+	}
+
+	for k := range m.TimingByFingerprint {
+
+		if val, ok := m.TimingByFingerprint[k]; ok {
+			if err := val.ContextValidate(ctx, formats); err != nil {
+				return err
+			}
+		}
+
 	}
 
 	return nil
