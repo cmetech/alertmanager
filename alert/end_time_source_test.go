@@ -22,7 +22,7 @@ import (
 
 func TestEndTimeProvenanceFollowsEffectiveDeadline(t *testing.T) {
 	now := time.Now()
-	makeAlert := func(updated time.Time, end time.Time, timeout bool, source EndTimeSource, applied time.Duration) *Alert {
+	makeAlert := func(updated, end time.Time, timeout bool, source EndTimeSource, applied time.Duration) *Alert {
 		a := New(model.Alert{Labels: model.LabelSet{"alertname": "same"}, StartsAt: now.Add(-time.Hour), EndsAt: end}, updated, timeout)
 		a.EndTimeSource = source
 		a.ResolveTimeout = applied

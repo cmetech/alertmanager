@@ -18,12 +18,13 @@ import (
 	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/require"
 
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestFailedFirstAndRepeatDeliveryDoNotAdvanceNativeTimingBaseline(t *testing.T) {

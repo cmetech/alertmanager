@@ -133,7 +133,7 @@ func TestOscarPageTimingConcurrentNativeLogReplacement(t *testing.T) {
 	api.PublishTiming(cfg, map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}}}, nil, log.LookupTiming)
 	done := make(chan error, 1)
 	go func() {
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			firing := []uint64{notify.HashAlert(a)}
 			if i%2 == 0 {
 				firing = []uint64{notify.HashAlert(b)}
@@ -145,7 +145,7 @@ func TestOscarPageTimingConcurrentNativeLogReplacement(t *testing.T) {
 		}
 		done <- nil
 	}()
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		w := httptest.NewRecorder()
 		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
 		require.Equal(t, 200, w.Code, w.Body.String())

@@ -18,10 +18,11 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	pb "github.com/prometheus/alertmanager/nflog/nflogpb"
 )
 
 func TestLookupTimingBatchesSelectedHashesAndBoundsEntryScan(t *testing.T) {
@@ -85,16 +86,14 @@ func TestLookupTimingConcurrentImmutableEntryReplacement(t *testing.T) {
 	}
 	l := &Log{st: state{stateKey("group", recv): entry(1)}}
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 1000; i++ {
+	wg.Go(func() {
+		for i := range 1000 {
 			l.mtx.Lock()
 			l.st[stateKey("group", recv)] = entry(uint64(i%2 + 1))
 			l.mtx.Unlock()
 		}
-	}()
-	for i := 0; i < 1000; i++ {
+	})
+	for range 1000 {
 		got := l.LookupTiming("group", recv, []uint64{1, 2}, 1)
 		require.True(t, got.Found)
 		require.Equal(t, 1, got.Inspected)
