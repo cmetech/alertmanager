@@ -825,10 +825,19 @@ func init() {
       ],
       "properties": {
         "end_time_source": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "unknown",
+            "sender_ends_at",
+            "alertmanager_timeout"
+          ]
         },
         "repeat_lookup_state": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "ready",
+            "unavailable"
+          ]
         },
         "repeat_schedules": {
           "type": "array",
@@ -874,7 +883,13 @@ func init() {
           "type": "string"
         },
         "state": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "estimated",
+            "no_repeat_baseline",
+            "suppressed",
+            "unavailable"
+          ]
         }
       }
     },
@@ -1951,10 +1966,19 @@ func init() {
       ],
       "properties": {
         "end_time_source": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "unknown",
+            "sender_ends_at",
+            "alertmanager_timeout"
+          ]
         },
         "repeat_lookup_state": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "ready",
+            "unavailable"
+          ]
         },
         "repeat_schedules": {
           "type": "array",
@@ -2000,7 +2024,13 @@ func init() {
           "type": "string"
         },
         "state": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "estimated",
+            "no_repeat_baseline",
+            "suppressed",
+            "unavailable"
+          ]
         }
       }
     },

@@ -21,6 +21,7 @@ package models
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/strfmt"
@@ -55,6 +56,7 @@ type OscarRepeatSchedule struct {
 
 	// state
 	// Required: true
+	// Enum: ["estimated","no_repeat_baseline","suppressed","unavailable"]
 	State *string `json:"state"`
 }
 
@@ -140,9 +142,49 @@ func (m *OscarRepeatSchedule) validateRouteID(formats strfmt.Registry) error {
 	return nil
 }
 
+var oscarRepeatScheduleTypeStatePropEnum []any
+
+func init() {
+	var res []string
+	if err := json.Unmarshal([]byte(`["estimated","no_repeat_baseline","suppressed","unavailable"]`), &res); err != nil {
+		panic(err)
+	}
+	for _, v := range res {
+		oscarRepeatScheduleTypeStatePropEnum = append(oscarRepeatScheduleTypeStatePropEnum, v)
+	}
+}
+
+const (
+
+	// OscarRepeatScheduleStateEstimated captures enum value "estimated"
+	OscarRepeatScheduleStateEstimated string = "estimated"
+
+	// OscarRepeatScheduleStateNoRepeatBaseline captures enum value "no_repeat_baseline"
+	OscarRepeatScheduleStateNoRepeatBaseline string = "no_repeat_baseline"
+
+	// OscarRepeatScheduleStateSuppressed captures enum value "suppressed"
+	OscarRepeatScheduleStateSuppressed string = "suppressed"
+
+	// OscarRepeatScheduleStateUnavailable captures enum value "unavailable"
+	OscarRepeatScheduleStateUnavailable string = "unavailable"
+)
+
+// prop value enum
+func (m *OscarRepeatSchedule) validateStateEnum(path, location string, value string) error {
+	if err := validate.EnumCase(path, location, value, oscarRepeatScheduleTypeStatePropEnum, true); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (m *OscarRepeatSchedule) validateState(formats strfmt.Registry) error {
 
 	if err := validate.Required("state", "body", m.State); err != nil {
+		return err
+	}
+
+	// value enum
+	if err := m.validateStateEnum("state", "body", *m.State); err != nil {
 		return err
 	}
 

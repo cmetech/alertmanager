@@ -16,7 +16,6 @@ package v2
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/go-openapi/strfmt"
@@ -31,6 +30,15 @@ import (
 )
 
 const oscarTimingScanBudget = 200000
+
+const (
+	timingLookupReady       = "ready"
+	timingLookupUnavailable = "unavailable"
+	timingStateEstimated    = "estimated"
+	timingStateNoBaseline   = "no_repeat_baseline"
+	timingStateSuppressed   = "suppressed"
+	timingStateUnavailable  = "unavailable"
+)
 
 // TimingIntegration identifies one integration in the loaded notification
 // pipeline. Its name and index use the same key as native deduplication.
@@ -98,14 +106,15 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 	out := make(map[string]models.OscarAlertTiming, len(rows))
 	stats := timingPageStats{}
 	groups := make(map[string]*timingGroup)
+	keys := make([]string, 0)
 	for _, c := range rows {
 		endSource := string(c.a.EndTimeSource)
 		if endSource == "" {
 			endSource = string(alert.EndTimeSourceUnknown)
 		}
-		lookupState := "unavailable"
+		lookupState := timingLookupUnavailable
 		if source != nil && route != nil {
-			lookupState = "ready"
+			lookupState = timingLookupReady
 		}
 		stamp := strfmt.DateTime(asOf)
 		meta := models.OscarAlertTiming{
@@ -126,7 +135,7 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 					integrationID := fmt.Sprintf("%s/%d", integration.Name, integration.Index)
 					interval := matched.RouteOpts.RepeatInterval
 					intervalString := interval.String()
-					state := "no_repeat_baseline"
+					state := timingStateNoBaseline
 					step := &models.OscarRepeatSchedule{
 						RouteID:                &routeID,
 						Receiver:               &receiverName,
@@ -136,26 +145,26 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 					}
 					meta.RepeatSchedules = append(meta.RepeatSchedules, step)
 					if c.status.State == alert.AlertStateSuppressed || len(c.status.SilencedBy) > 0 || len(c.status.InhibitedBy) > 0 {
-						*step.State = "suppressed"
+						*step.State = timingStateSuppressed
 						continue
 					}
 					if len(matched.RouteOpts.ActiveTimeIntervals) > 0 || len(matched.RouteOpts.MuteTimeIntervals) > 0 {
 						if source.Muter == nil {
-							*step.State = "unavailable"
+							*step.State = timingStateUnavailable
 							continue
 						}
 						active, muted, err := notify.MutedByTimeIntervals(source.Muter, matched.RouteOpts.ActiveTimeIntervals, matched.RouteOpts.MuteTimeIntervals, asOf)
 						if err != nil {
-							*step.State = "unavailable"
+							*step.State = timingStateUnavailable
 							continue
 						}
 						if len(active) > 0 || len(muted) > 0 {
-							*step.State = "suppressed"
+							*step.State = timingStateSuppressed
 							continue
 						}
 					}
 					if source.Lookup == nil {
-						*step.State = "unavailable"
+						*step.State = timingStateUnavailable
 						continue
 					}
 					groupKey := dispatch.GroupKeyForAlert(c.a, matched)
@@ -165,6 +174,7 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 					if group == nil {
 						group = &timingGroup{key: groupKey, receiver: recv, hashes: make(map[uint64]struct{})}
 						groups[key] = group
+						keys = append(keys, key)
 					}
 					hash := notify.HashAlert(c.a)
 					group.hashes[hash] = struct{}{}
@@ -175,11 +185,6 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 		out[c.fingerprint] = meta
 	}
 
-	keys := make([]string, 0, len(groups))
-	for key := range groups {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
 	remaining := oscarTimingScanBudget
 	for _, key := range keys {
 		group := groups[key]
@@ -193,8 +198,8 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 		stats.inspected += result.Inspected
 		remaining -= result.Inspected
 		for _, target := range group.targets {
-			if result.Capped || !result.Found && result.Inspected != 0 {
-				*target.step.State = "unavailable"
+			if result.Capped {
+				*target.step.State = timingStateUnavailable
 				stats.cappedPaths++
 				continue
 			}
@@ -203,10 +208,10 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 			}
 			threshold := result.Timestamp.Add(target.interval)
 			if !result.ExpiresAt.After(asOf) || !result.ExpiresAt.After(threshold) {
-				*target.step.State = "unavailable"
+				*target.step.State = timingStateUnavailable
 				continue
 			}
-			*target.step.State = "estimated"
+			*target.step.State = timingStateEstimated
 			date := strfmt.DateTime(threshold)
 			target.step.NextRepeatEligibleAt = &date
 		}

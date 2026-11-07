@@ -120,19 +120,30 @@ func TestOscarTimingSuppressedAlertDoesNotInspectLog(t *testing.T) {
 	now := time.Now().UTC()
 	rows, route := timingTestRows(now)
 	rows = rows[:1]
-	rows[0].status = alert.AlertStatus{State: alert.AlertStateSuppressed, SilencedBy: []string{"silence-1"}}
-	source := &TimingSource{Integrations: map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}}}, Lookup: func(string, *nflogpb.Receiver, []uint64, int) nflog.TimingLookup {
-		t.Fatal("suppressed path queried notification log")
-		return nflog.TimingLookup{}
-	}}
-	step := timingForPage(rows, route, source, now)[rows[0].fingerprint].RepeatSchedules[0]
-	require.Equal(t, "suppressed", *step.State)
-	require.Nil(t, step.NextRepeatEligibleAt)
+	for _, tc := range []struct {
+		name   string
+		status alert.AlertStatus
+	}{
+		{"silenced", alert.AlertStatus{State: alert.AlertStateSuppressed, SilencedBy: []string{"silence-1"}}},
+		{"inhibited", alert.AlertStatus{State: alert.AlertStateSuppressed, InhibitedBy: []string{"inhibitor-1"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows[0].status = tc.status
+			source := &TimingSource{Integrations: map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}}}, Lookup: func(string, *nflogpb.Receiver, []uint64, int) nflog.TimingLookup {
+				t.Fatal("suppressed path queried notification log")
+				return nflog.TimingLookup{}
+			}}
+			step := timingForPage(rows, route, source, now)[rows[0].fingerprint].RepeatSchedules[0]
+			require.Equal(t, "suppressed", *step.State)
+			require.Nil(t, step.NextRepeatEligibleAt)
+		})
+	}
 }
 
 func TestOscarTimingTotalLookupBudgetCapsLaterGroup(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	rows, _ := timingTestRows(now)
+	rows[0], rows[1] = rows[1], rows[0] // Page rank is opposite native key order.
 	cfg, err := config.Load("route:\n  receiver: team\n  group_by: [instance]\n  repeat_interval: 1h\nreceivers:\n- name: team\n")
 	require.NoError(t, err)
 	route := dispatch.NewRoute(cfg.Route, nil)
@@ -146,8 +157,8 @@ func TestOscarTimingTotalLookupBudgetCapsLaterGroup(t *testing.T) {
 	}}
 	got := timingForPage(rows, route, source, now)
 	require.Equal(t, []int{oscarTimingScanBudget, 0}, budgets)
-	states := []string{*got[rows[0].fingerprint].RepeatSchedules[0].State, *got[rows[1].fingerprint].RepeatSchedules[0].State}
-	require.ElementsMatch(t, []string{"estimated", "unavailable"}, states)
+	require.Equal(t, "estimated", *got[rows[0].fingerprint].RepeatSchedules[0].State)
+	require.Equal(t, "unavailable", *got[rows[1].fingerprint].RepeatSchedules[0].State)
 }
 
 func TestOscarTimingReportsLookupWorkAndCappedPaths(t *testing.T) {
@@ -225,4 +236,17 @@ func TestOscarTimingInactiveIntervalSuppressesPath(t *testing.T) {
 	}}
 	step := timingForPage(rows, dispatch.NewRoute(cfg.Route, nil), source, now)[rows[0].fingerprint].RepeatSchedules[0]
 	require.Equal(t, "suppressed", *step.State)
+}
+
+func TestOscarTimingThresholdEqualityIsEstimateNotConfirmedSend(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	rows, route := timingTestRows(now)
+	rows = rows[:1]
+	hash := notify.HashAlert(rows[0].a)
+	source := &TimingSource{Integrations: map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}}}, Lookup: func(string, *nflogpb.Receiver, []uint64, int) nflog.TimingLookup {
+		return nflog.TimingLookup{Found: true, Timestamp: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour), Firing: map[uint64]bool{hash: true}, Inspected: 1}
+	}}
+	step := timingForPage(rows, route, source, now)[rows[0].fingerprint].RepeatSchedules[0]
+	require.Equal(t, "estimated", *step.State)
+	require.Equal(t, now, time.Time(*step.NextRepeatEligibleAt))
 }

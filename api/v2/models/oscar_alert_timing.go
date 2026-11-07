@@ -21,6 +21,7 @@ package models
 
 import (
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"strconv"
 
@@ -37,10 +38,12 @@ type OscarAlertTiming struct {
 
 	// end time source
 	// Required: true
+	// Enum: ["unknown","sender_ends_at","alertmanager_timeout"]
 	EndTimeSource *string `json:"end_time_source"`
 
 	// repeat lookup state
 	// Required: true
+	// Enum: ["ready","unavailable"]
 	RepeatLookupState *string `json:"repeat_lookup_state"`
 
 	// repeat schedules
@@ -82,18 +85,89 @@ func (m *OscarAlertTiming) Validate(formats strfmt.Registry) error {
 	return nil
 }
 
+var oscarAlertTimingTypeEndTimeSourcePropEnum []any
+
+func init() {
+	var res []string
+	if err := json.Unmarshal([]byte(`["unknown","sender_ends_at","alertmanager_timeout"]`), &res); err != nil {
+		panic(err)
+	}
+	for _, v := range res {
+		oscarAlertTimingTypeEndTimeSourcePropEnum = append(oscarAlertTimingTypeEndTimeSourcePropEnum, v)
+	}
+}
+
+const (
+
+	// OscarAlertTimingEndTimeSourceUnknown captures enum value "unknown"
+	OscarAlertTimingEndTimeSourceUnknown string = "unknown"
+
+	// OscarAlertTimingEndTimeSourceSenderEndsAt captures enum value "sender_ends_at"
+	OscarAlertTimingEndTimeSourceSenderEndsAt string = "sender_ends_at"
+
+	// OscarAlertTimingEndTimeSourceAlertmanagerTimeout captures enum value "alertmanager_timeout"
+	OscarAlertTimingEndTimeSourceAlertmanagerTimeout string = "alertmanager_timeout"
+)
+
+// prop value enum
+func (m *OscarAlertTiming) validateEndTimeSourceEnum(path, location string, value string) error {
+	if err := validate.EnumCase(path, location, value, oscarAlertTimingTypeEndTimeSourcePropEnum, true); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (m *OscarAlertTiming) validateEndTimeSource(formats strfmt.Registry) error {
 
 	if err := validate.Required("end_time_source", "body", m.EndTimeSource); err != nil {
 		return err
 	}
 
+	// value enum
+	if err := m.validateEndTimeSourceEnum("end_time_source", "body", *m.EndTimeSource); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+var oscarAlertTimingTypeRepeatLookupStatePropEnum []any
+
+func init() {
+	var res []string
+	if err := json.Unmarshal([]byte(`["ready","unavailable"]`), &res); err != nil {
+		panic(err)
+	}
+	for _, v := range res {
+		oscarAlertTimingTypeRepeatLookupStatePropEnum = append(oscarAlertTimingTypeRepeatLookupStatePropEnum, v)
+	}
+}
+
+const (
+
+	// OscarAlertTimingRepeatLookupStateReady captures enum value "ready"
+	OscarAlertTimingRepeatLookupStateReady string = "ready"
+
+	// OscarAlertTimingRepeatLookupStateUnavailable captures enum value "unavailable"
+	OscarAlertTimingRepeatLookupStateUnavailable string = "unavailable"
+)
+
+// prop value enum
+func (m *OscarAlertTiming) validateRepeatLookupStateEnum(path, location string, value string) error {
+	if err := validate.EnumCase(path, location, value, oscarAlertTimingTypeRepeatLookupStatePropEnum, true); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (m *OscarAlertTiming) validateRepeatLookupState(formats strfmt.Registry) error {
 
 	if err := validate.Required("repeat_lookup_state", "body", m.RepeatLookupState); err != nil {
+		return err
+	}
+
+	// value enum
+	if err := m.validateRepeatLookupStateEnum("repeat_lookup_state", "body", *m.RepeatLookupState); err != nil {
 		return err
 	}
 

@@ -15,6 +15,8 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -50,6 +52,62 @@ func TestReloaderPublishesTimingAfterDispatcherLoads(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 	require.Equal(t, "ready", page.Timing[a.Fingerprint().String()].LookupState)
 	require.Empty(t, page.Timing[a.Fingerprint().String()].Schedules)
+	require.NoError(t, r.stop())
+	w = httptest.NewRecorder()
+	r.apih.Register(route.New(), "").ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	require.Equal(t, "unavailable", page.Timing[a.Fingerprint().String()].LookupState)
+}
+
+func TestReloaderSuccessfulNativeDeliveryAppearsAsEstimatedTiming(t *testing.T) {
+	webhookCalled := make(chan struct{}, 1)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case webhookCalled <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(webhook.Close)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1ms\n  group_interval: 1h\n  repeat_interval: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: %s\n", webhook.URL))
+	require.NoError(t, err)
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, r.alerts.Put(t.Context(), a))
+	require.NoError(t, r.reload(cfg))
+	select {
+	case <-webhookCalled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("native webhook was not called")
+	}
+	key := dispatch.GroupKeyForAlert(a, dispatch.NewRoute(cfg.Route, nil).Match(a.Labels)[0])
+	recv := &nflogpb.Receiver{GroupName: "team", Integration: "webhook", Idx: 0}
+	log := r.notificationLog.(*nflog.Log)
+	var baseline time.Time
+	require.Eventually(t, func() bool {
+		lookup := log.LookupTiming(key, recv, []uint64{notify.HashAlert(a)}, 1)
+		baseline = lookup.Timestamp
+		return lookup.Found && lookup.Firing[notify.HashAlert(a)]
+	}, 5*time.Second, 10*time.Millisecond)
+	w := httptest.NewRecorder()
+	r.apih.Register(route.New(), "").ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+	require.Equal(t, 200, w.Code, w.Body.String())
+	var page struct {
+		Timing map[string]struct {
+			Schedules []struct {
+				State string    `json:"state"`
+				Next  time.Time `json:"next_repeat_eligible_at"`
+			} `json:"repeat_schedules"`
+		} `json:"timing_by_fingerprint"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	steps := page.Timing[a.Fingerprint().String()].Schedules
+	require.Len(t, steps, 1)
+	require.Equal(t, "estimated", steps[0].State)
+	require.True(t, steps[0].Next.Equal(baseline.Add(time.Hour).Truncate(time.Millisecond)))
 }
 
 func TestReloaderTimingUsesLoadedWebhookIntegrationAndNativeLog(t *testing.T) {
@@ -61,6 +119,10 @@ func TestReloaderTimingUsesLoadedWebhookIntegrationAndNativeLog(t *testing.T) {
 	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown", "instance": "node-1"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
 	require.NoError(t, r.alerts.Put(t.Context(), a))
 	require.NoError(t, r.reload(cfg))
+	beforeSend := httptest.NewRecorder()
+	r.apih.Register(route.New(), "").ServeHTTP(beforeSend, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+	require.Equal(t, 200, beforeSend.Code, beforeSend.Body.String())
+	require.Contains(t, beforeSend.Body.String(), `"state":"no_repeat_baseline"`)
 	key := dispatch.GroupKeyForAlert(a, dispatch.NewRoute(cfg.Route, nil).Match(a.Labels)[0])
 	log := r.notificationLog.(*nflog.Log)
 	require.NoError(t, log.Log(&nflogpb.Receiver{GroupName: "team", Integration: "webhook", Idx: 0}, key, []uint64{notify.HashAlert(a)}, nil, nil, nil, 2*time.Hour))
@@ -89,6 +151,14 @@ func TestReloaderTimingUsesLoadedWebhookIntegrationAndNativeLog(t *testing.T) {
 	require.Equal(t, "estimated", timing.Schedules[0].State)
 	require.Equal(t, "1h0m0s", timing.Schedules[0].Repeat)
 	require.NotEmpty(t, timing.Schedules[0].Next)
+	changed, err := config.Load("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\n  repeat_interval: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: http://127.0.0.1:65533/\n")
+	require.NoError(t, err)
+	require.NoError(t, r.reload(changed))
+	w = httptest.NewRecorder()
+	r.apih.Register(route.New(), "").ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	require.Equal(t, "estimated", page.Timing[a.Fingerprint().String()].Schedules[0].State, "native log key is reused after destination change")
 }
 
 func TestReloaderTimingUnavailableFromPreStopThroughPrePublish(t *testing.T) {

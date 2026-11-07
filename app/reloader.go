@@ -271,6 +271,7 @@ func (r *reloader) reload(conf *config.Config) error {
 // registered on the App's cleanup stack and is safe to call when no
 // config has been applied yet (both pointers nil).
 func (r *reloader) stop() error {
+	r.apih.PauseTiming()
 	if i := r.inhibitor.Load(); i != nil {
 		i.Stop()
 	}

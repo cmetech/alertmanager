@@ -535,6 +535,7 @@ definitions:
     properties:
       end_time_source:
         type: string
+        enum: [unknown, sender_ends_at, alertmanager_timeout]
       resolve_timeout_duration:
         type: string
         x-nullable: true
@@ -543,6 +544,7 @@ definitions:
         format: date-time
       repeat_lookup_state:
         type: string
+        enum: [ready, unavailable]
       repeat_schedules:
         type: array
         items:
@@ -569,6 +571,7 @@ definitions:
         x-nullable: true
       state:
         type: string
+        enum: [estimated, no_repeat_baseline, suppressed, unavailable]
     required:
       - route_id
       - receiver

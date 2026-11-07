@@ -25,10 +25,7 @@ import (
 	"github.com/prometheus/alertmanager/labelset"
 )
 
-// Alert wraps a model.Alert with additional information relevant
-// to internal of the Alertmanager.
-// The type is never exposed to external communication and the
-// embedded alert has to be sanitized beforehand.
+// EndTimeSource records where the currently effective EndsAt came from.
 type EndTimeSource string
 
 const (
@@ -37,6 +34,10 @@ const (
 	EndTimeSourceAlertmanagerTimeout EndTimeSource = "alertmanager_timeout"
 )
 
+// Alert wraps a model.Alert with additional information relevant
+// to internal of the Alertmanager.
+// The type is never exposed to external communication and the
+// embedded alert has to be sanitized beforehand.
 type Alert struct {
 	model.Alert
 

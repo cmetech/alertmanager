@@ -42,3 +42,12 @@ func TestOscarTimingUnavailableDatesAreOptional(t *testing.T) {
 	stepJSON := schedules[0].(map[string]any)
 	require.NotContains(t, stepJSON, "next_repeat_eligible_at")
 }
+
+func TestOscarTimingModelsRejectUnknownStates(t *testing.T) {
+	stamp := strfmt.DateTime(time.Now())
+	source, lookup, bad := "typo", "ready", "typo"
+	routeID, receiver, integration, interval := "r", "team", "webhook/0", "1h0m0s"
+	step := &models.OscarRepeatSchedule{RouteID: &routeID, Receiver: &receiver, Integration: &integration, RepeatIntervalDuration: &interval, State: &bad}
+	meta := models.OscarAlertTiming{EndTimeSource: &source, RepeatLookupState: &lookup, TimingAsOf: &stamp, RepeatSchedules: []*models.OscarRepeatSchedule{step}}
+	require.Error(t, meta.Validate(strfmt.Default))
+}
