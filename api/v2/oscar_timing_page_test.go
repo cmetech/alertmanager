@@ -28,6 +28,7 @@ import (
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/config"
+	"github.com/prometheus/alertmanager/dispatch"
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/nflog"
@@ -108,4 +109,56 @@ func TestOscarPageTimingUsesSelectedNativeAlertAndNotificationLog(t *testing.T) 
 	require.Equal(t, float64(1), testutil.ToFloat64(api.timingLookups))
 	require.Equal(t, float64(1), testutil.ToFloat64(api.timingInspected))
 	require.Equal(t, float64(0), testutil.ToFloat64(api.timingCappedPaths))
+}
+
+func TestOscarPageTimingConcurrentNativeLogReplacement(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	alerts, err := mem.NewAlerts(t.Context(), time.Minute, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), reg, nil)
+	require.NoError(t, err)
+	t.Cleanup(alerts.Close)
+	api, err := NewAPI(alerts, nil, nil, nil, promslog.NewNopLogger(), reg)
+	require.NoError(t, err)
+	cfg, err := config.Load("route:\n  receiver: team\n  group_by: [alertname]\n  repeat_interval: 1h\nreceivers:\n- name: team\n")
+	require.NoError(t, err)
+	api.Update(cfg, func(context.Context, labelset.LabelSet) {})
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, alerts.Put(t.Context(), a))
+	log, err := nflog.New(nflog.Options{Retention: 4 * time.Hour, Metrics: prometheus.NewRegistry()})
+	require.NoError(t, err)
+	route := dispatch.NewRoute(cfg.Route, nil).Match(a.Labels)[0]
+	key := dispatch.GroupKeyForAlert(a, route)
+	recv := &nflogpb.Receiver{GroupName: "team", Integration: "webhook", Idx: 0}
+	api.PublishTiming(cfg, map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}}}, nil, log.LookupTiming)
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 100; i++ {
+			firing := []uint64{notify.HashAlert(a)}
+			if i%2 == 0 {
+				firing = nil
+			}
+			if err := log.Log(recv, key, firing, nil, nil, nil, 2*time.Hour); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for i := 0; i < 100; i++ {
+		w := httptest.NewRecorder()
+		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+		require.Equal(t, 200, w.Code, w.Body.String())
+		var page struct {
+			Timing map[string]struct {
+				Schedules []struct {
+					State string `json:"state"`
+				} `json:"repeat_schedules"`
+			} `json:"timing_by_fingerprint"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+		require.Len(t, page.Timing[a.Fingerprint().String()].Schedules, 1)
+		state := page.Timing[a.Fingerprint().String()].Schedules[0].State
+		require.Contains(t, []string{"estimated", "no_repeat_baseline"}, state)
+	}
+	require.NoError(t, <-done)
 }

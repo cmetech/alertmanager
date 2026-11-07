@@ -250,3 +250,20 @@ func TestOscarTimingThresholdEqualityIsEstimateNotConfirmedSend(t *testing.T) {
 	require.Equal(t, "estimated", *step.State)
 	require.Equal(t, now, time.Time(*step.NextRepeatEligibleAt))
 }
+
+func TestOscarTimingKeepsMultipleIntegrationIndexesDistinct(t *testing.T) {
+	now := time.Now().UTC()
+	rows, route := timingTestRows(now)
+	rows = rows[:1]
+	hash := notify.HashAlert(rows[0].a)
+	indexes := make([]uint32, 0, 2)
+	source := &TimingSource{Integrations: map[string][]TimingIntegration{"team": {{Name: "webhook", Index: 0}, {Name: "webhook", Index: 1}}}, Lookup: func(_ string, recv *nflogpb.Receiver, _ []uint64, _ int) nflog.TimingLookup {
+		indexes = append(indexes, recv.Idx)
+		return nflog.TimingLookup{Found: true, Timestamp: now, ExpiresAt: now.Add(2 * time.Hour), Firing: map[uint64]bool{hash: true}, Inspected: 1}
+	}}
+	steps := timingForPage(rows, route, source, now)[rows[0].fingerprint].RepeatSchedules
+	require.Equal(t, []uint32{0, 1}, indexes)
+	require.Len(t, steps, 2)
+	require.Equal(t, "webhook/0", *steps[0].Integration)
+	require.Equal(t, "webhook/1", *steps[1].Integration)
+}
