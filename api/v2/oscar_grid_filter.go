@@ -25,6 +25,28 @@ type oscarGridModel struct {
 	or    bool
 }
 
+// Python's Unicode casefold keeps Cherokee in uppercase, while x/text's Fold
+// can map the same uppercase rune to its lowercase counterpart. Normalize the
+// two Cherokee lowercase ranges back to Python's stable fold form.
+type oscarCaseFolder struct{ caser cases.Caser }
+
+func newOscarCaseFolder() *oscarCaseFolder {
+	return &oscarCaseFolder{caser: cases.Fold()}
+}
+
+func (f *oscarCaseFolder) String(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 0xAB70 && r <= 0xABBF:
+			return r - 0xAB70 + 0x13A0
+		case r >= 0x13F8 && r <= 0x13FD:
+			return r - 0x13F8 + 0x13F0
+		default:
+			return r
+		}
+	}, f.caser.String(value))
+}
+
 func parseOscarGridModel(raw string) (oscarGridModel, error) {
 	var result oscarGridModel
 	if raw == "" {
@@ -64,7 +86,7 @@ func parseOscarGridModel(raw string) (oscarGridModel, error) {
 	if len(items) > 100 {
 		return result, fmt.Errorf("too many grid filter items")
 	}
-	fold := cases.Fold()
+	fold := newOscarCaseFolder()
 	textFields := map[string]bool{"alertname": true, "summary": true, "severity": true, "alert_status": true, "instance": true, "fingerprint": true, "generatorURL": true}
 	dateFields := map[string]bool{"starts_at": true, "ends_at": true, "modified_at": true}
 	dateOps := map[string]bool{"before": true, "onOrBefore": true, "after": true, "onOrAfter": true, "between": true, "inTheLast": true}
@@ -186,10 +208,10 @@ func parseOscarGridModel(raw string) (oscarGridModel, error) {
 }
 
 func (m oscarGridModel) matches(a *alert.Alert, status alert.AlertStatus, fingerprint string, now time.Time) bool {
-	return m.matchesWithFold(a, status, fingerprint, now, cases.Fold())
+	return m.matchesWithFold(a, status, fingerprint, now, newOscarCaseFolder())
 }
 
-func (m oscarGridModel) matchesWithFold(a *alert.Alert, status alert.AlertStatus, fingerprint string, now time.Time, fold cases.Caser) bool {
+func (m oscarGridModel) matchesWithFold(a *alert.Alert, status alert.AlertStatus, fingerprint string, now time.Time, fold *oscarCaseFolder) bool {
 	if len(m.rules) == 0 {
 		return true
 	}
@@ -209,7 +231,7 @@ func (m oscarGridModel) matchesWithFold(a *alert.Alert, status alert.AlertStatus
 	return true
 }
 
-func (r oscarGridRule) matches(a *alert.Alert, status alert.AlertStatus, fingerprint string, now time.Time, fold cases.Caser) bool {
+func (r oscarGridRule) matches(a *alert.Alert, status alert.AlertStatus, fingerprint string, now time.Time, fold *oscarCaseFolder) bool {
 	if r.labelNames != nil {
 		for name, value := range a.Labels {
 			if r.labelNames[fold.String(string(name))] && r.matchText(fold.String(string(value)), true) {

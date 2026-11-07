@@ -31,10 +31,12 @@ func TestOscarGridFilterBeforeCountAndPage(t *testing.T) {
 	require.NoError(t, err)
 	api.Update(cfg, func(context.Context, labelset.LabelSet) {})
 	now := time.Now().UTC()
-	for i, name := range []string{"Straße", "STRASSE", "other"} {
+	for i, name := range []string{"Straße", "STRASSE", "Ꭰ"} {
 		severity := model.LabelValue("critical")
 		if i == 1 {
 			severity = "warning"
+		} else if i == 2 {
+			severity = "Ꭰ"
 		}
 		a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": model.LabelValue(name), "instance": model.LabelValue(string(rune('a' + i))), "severity": severity, "site": "west"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 		require.NoError(t, alerts.Put(t.Context(), a))
@@ -72,6 +74,28 @@ func TestOscarGridFilterBeforeCountAndPage(t *testing.T) {
 		require.Equal(t, 200, w.Code, key+": "+w.Body.String())
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
 		require.Equal(t, 0, page.TotalRecords, key)
+	}
+	for _, key := range []string{"quick_search", "severity"} {
+		cherokee := url.Values{key: {"ꭰ"}}
+		w = httptest.NewRecorder()
+		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page?"+cherokee.Encode(), nil))
+		require.Equal(t, 200, w.Code, key+": "+w.Body.String())
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+		require.Equal(t, 1, page.TotalRecords, key)
+	}
+}
+
+func TestOscarCherokeeCasefoldMatchesPython(t *testing.T) {
+	now := time.Now().UTC()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Ꭰ", "Ꭰ": "West"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	status := alert.AlertStatus{State: alert.AlertStateActive}
+	for _, raw := range []string{
+		`{"items":[{"field":"alertname","operator":"equals","value":"ꭰ"}]}`,
+		`{"items":[{"field":"label:ꭰ","operator":"equals","value":"west"}]}`,
+	} {
+		filter, err := parseOscarGridModel(raw)
+		require.NoError(t, err)
+		require.True(t, filter.matches(a, status, a.Fingerprint().String(), now), raw)
 	}
 }
 

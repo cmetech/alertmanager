@@ -20,7 +20,6 @@ import (
 	models "github.com/prometheus/alertmanager/api/v2/models"
 	ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	model "github.com/prometheus/common/model"
-	"golang.org/x/text/cases"
 )
 
 type pageCandidate struct {
@@ -175,7 +174,7 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 	h := &pageHeap{desc: order == "desc", timeKey: column == "startsAt" || column == "starts_at" || column == "ends_at"}
 	now := time.Now()
 	total := 0
-	fold := cases.Fold()
+	fold := newOscarCaseFolder()
 	severity := fold.String(q.Get("severity"))
 	search := fold.String(q.Get("quick_search"))
 	for {
