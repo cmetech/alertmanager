@@ -393,6 +393,7 @@ func (a *App) setup() error {
 		ConnectReadMaxBytes:        opts.ConnectReadMaxBytes,
 		ConnectSendMaxBytes:        opts.ConnectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: opts.ConnectMaxRequestBodyBytes,
+		SilenceMutationKey:         opts.SilenceMutationKey,
 		CORSHandler:                opts.CORSHandler,
 		Logger:                     logger.With("component", "api"),
 		Registry:                   reg,

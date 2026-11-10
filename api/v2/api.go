@@ -107,6 +107,7 @@ func NewAPI(
 	peer cluster.ClusterPeer,
 	l *slog.Logger,
 	r prometheus.Registerer,
+	silenceMutationKey ...[]byte,
 ) (*API, error) {
 	api := API{
 		alerts:      alerts,
@@ -154,6 +155,9 @@ func NewAPI(
 	openAPI.SilencePostSilencesHandler = silence_ops.PostSilencesHandlerFunc(api.postSilencesHandler)
 
 	api.Handler = setResponseHeaders(openAPI.Serve(nil))
+	if len(silenceMutationKey) > 0 {
+		api.Handler = oscarSilenceMutationGuard(api.Handler, silenceMutationKey[0])
+	}
 
 	return &api, nil
 }

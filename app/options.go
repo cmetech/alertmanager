@@ -80,6 +80,7 @@ type Options struct {
 	ConnectReadMaxBytes        int
 	ConnectSendMaxBytes        int
 	ConnectMaxRequestBodyBytes int64
+	SilenceMutationKey         []byte
 
 	// Cluster.
 	ClusterBindAddr        string

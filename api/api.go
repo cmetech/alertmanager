@@ -62,6 +62,8 @@ type API struct {
 // Options for the creation of an API object. Alerts, Silences and GroupFunc
 // are mandatory. The zero value for everything else is a safe default.
 type Options struct {
+	// SilenceMutationKey enables OSCAR's native silence-write guard when set.
+	SilenceMutationKey []byte
 	// Alerts to be used by the API. Mandatory.
 	Alerts provider.Alerts
 	// Silences to be used by the API. Mandatory.
@@ -197,6 +199,7 @@ func New(opts Options) (*API, error) {
 		opts.Peer,
 		effective.logger.With("version", "v2"),
 		opts.Registry,
+		opts.SilenceMutationKey,
 	)
 	if err != nil {
 		return nil, err

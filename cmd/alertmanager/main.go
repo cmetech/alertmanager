@@ -51,6 +51,7 @@ func run() int {
 	var (
 		configFile                  = kingpin.Flag("config.file", "Alertmanager configuration file name.").Default("alertmanager.yml").String()
 		dataDir                     = kingpin.Flag("storage.path", "Base path for data storage.").Default("data/").String()
+		oscarSilenceKeyFile         = kingpin.Flag("oscar.silence-mutation-key-file", "OSCAR secret file required for native silence writes.").String()
 		retention                   = kingpin.Flag("data.retention", "How long to keep data for.").Default("120h").Duration()
 		maintenanceInterval         = kingpin.Flag("data.maintenance-interval", "Interval between garbage collection and snapshotting to disk of the silences and the notification logs.").Default("15m").Duration()
 		maxSilences                 = kingpin.Flag("silences.max-silences", "Maximum number of silences, including expired silences. If negative or zero, no limit is set.").Default("0").Int()
@@ -110,6 +111,15 @@ func run() int {
 	kingpin.Version(version.Print("alertmanager"))
 	kingpin.CommandLine.GetFlag("help").Short('h')
 	kingpin.Parse()
+	var oscarSilenceKey []byte
+	if *oscarSilenceKeyFile != "" {
+		var keyErr error
+		oscarSilenceKey, keyErr = readOscarSilenceMutationKey(*oscarSilenceKeyFile)
+		if keyErr != nil {
+			fmt.Fprintf(os.Stderr, "invalid OSCAR silence mutation key file: %v\n", keyErr)
+			return 1
+		}
+	}
 
 	logger := promslog.New(&promslogConfig)
 
@@ -205,6 +215,7 @@ func run() int {
 		ConnectReadMaxBytes:        *connectReadMaxBytes,
 		ConnectSendMaxBytes:        *connectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: *connectMaxRequestBodyBytes,
+		SilenceMutationKey:         oscarSilenceKey,
 
 		ClusterBindAddr:        *clusterBindAddr,
 		ClusterAdvertiseAddr:   *clusterAdvertiseAddr,
@@ -236,4 +247,16 @@ func run() int {
 	}
 	logger.Info("Received shutdown signal, exiting gracefully...")
 	return 0
+}
+
+func readOscarSilenceMutationKey(path string) ([]byte, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	key := []byte(strings.TrimSpace(string(contents)))
+	if len(key) < 32 {
+		return nil, fmt.Errorf("key must contain at least 32 bytes")
+	}
+	return key, nil
 }
