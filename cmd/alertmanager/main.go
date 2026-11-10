@@ -111,6 +111,10 @@ func run() int {
 	kingpin.Version(version.Print("alertmanager"))
 	kingpin.CommandLine.GetFlag("help").Short('h')
 	kingpin.Parse()
+	if *oscarSilenceKeyFile == "" {
+		fmt.Fprintln(os.Stderr, "--oscar.silence-mutation-key-file is required")
+		return 1
+	}
 	var oscarSilenceKey []byte
 	if *oscarSilenceKeyFile != "" {
 		var keyErr error

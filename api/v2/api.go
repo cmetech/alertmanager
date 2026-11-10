@@ -28,6 +28,7 @@ import (
 
 	"github.com/go-openapi/analysis"
 	"github.com/go-openapi/loads"
+	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/runtime/server-middleware/docui"
 	"github.com/go-openapi/strfmt"
@@ -87,7 +88,8 @@ type API struct {
 	timingCappedPaths prometheus.Counter
 	timingDuration    prometheus.Observer
 
-	Handler http.Handler
+	Handler            http.Handler
+	silenceMutationKey []byte
 
 	// beforeAlertsConfigLock is nil in production; tests use it to force a reload
 	// at the otherwise unobservable boundary before the legacy read lock.
@@ -155,7 +157,8 @@ func NewAPI(
 	openAPI.SilencePostSilencesHandler = silence_ops.PostSilencesHandlerFunc(api.postSilencesHandler)
 
 	api.Handler = setResponseHeaders(openAPI.Serve(nil))
-	if len(silenceMutationKey) > 0 {
+	if len(silenceMutationKey) > 0 && len(silenceMutationKey[0]) > 0 {
+		api.silenceMutationKey = silenceMutationKey[0]
 		api.Handler = oscarSilenceMutationGuard(api.Handler, silenceMutationKey[0])
 	}
 
@@ -899,6 +902,9 @@ func (api *API) getSilenceHandler(params silence_ops.GetSilenceParams) middlewar
 }
 
 func (api *API) deleteSilenceHandler(params silence_ops.DeleteSilenceParams) middleware.Responder {
+	if denied := api.denySilenceMutation(params.HTTPRequest); denied != nil {
+		return denied
+	}
 	logger := api.requestLogger(params.HTTPRequest)
 
 	ctx, span := tracer.Start(eventrecorder.WithEventRecording(params.HTTPRequest.Context()), "api.deleteSilenceHandler")
@@ -916,6 +922,9 @@ func (api *API) deleteSilenceHandler(params silence_ops.DeleteSilenceParams) mid
 }
 
 func (api *API) postSilencesHandler(params silence_ops.PostSilencesParams) middleware.Responder {
+	if denied := api.denySilenceMutation(params.HTTPRequest); denied != nil {
+		return denied
+	}
 	logger := api.requestLogger(params.HTTPRequest)
 
 	ctx, span := tracer.Start(eventrecorder.WithEventRecording(params.HTTPRequest.Context()), "api.postSilencesHandler")
@@ -951,6 +960,15 @@ func (api *API) postSilencesHandler(params silence_ops.PostSilencesParams) middl
 
 	return silence_ops.NewPostSilencesOK().WithPayload(&silence_ops.PostSilencesOKBody{
 		SilenceID: sil.Id,
+	})
+}
+
+func (api *API) denySilenceMutation(req *http.Request) middleware.Responder {
+	if len(api.silenceMutationKey) == 0 || silenceMutationAuthorized(req, api.silenceMutationKey) {
+		return nil
+	}
+	return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+		http.Error(w, "silence mutation forbidden", http.StatusForbidden)
 	})
 }
 

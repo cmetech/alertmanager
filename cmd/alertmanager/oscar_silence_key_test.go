@@ -2,9 +2,18 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestOscarCliRequiresSilenceMutationKey(t *testing.T) {
+	output, err := exec.Command("go", "run", ".", "--config.file=/definitely/missing/alertmanager.yml").CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "--oscar.silence-mutation-key-file is required") {
+		t.Fatalf("CLI accepted missing mutation key or failed for another reason: %s", output)
+	}
+}
 
 func TestReadOscarSilenceMutationKey(t *testing.T) {
 	dir := t.TempDir()
