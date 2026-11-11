@@ -121,6 +121,14 @@ describe('createQueryFn', () => {
     await expect(qfn('/test')({ signal: signal() })).rejects.toThrow('Service Unavailable');
   });
 
+  it('includes the HTTP code when a non-JSON error has an empty status text', async () => {
+    setHandler((_req, res) => {
+      res.writeHead(403, '', { 'Content-Type': 'text/plain' });
+      res.end();
+    });
+    await expect(qfn('/test')({ signal: signal() })).rejects.toThrow('HTTP 403');
+  });
+
   it('parses a JSON error envelope for non-OK responses with application/json content type', async () => {
     setHandler((_req, res) =>
       jsonResponse(res, 422, { status: 'error', error: 'invalid request' })

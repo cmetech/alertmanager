@@ -58,6 +58,7 @@ it('shows native silence status, name, reason, creator, and matcher operators', 
   expect(screen.getByText('environment != "production"')).toBeInTheDocument();
   expect(screen.getByText('team !~ "(security|infra)"')).toBeInTheDocument();
   expect(screen.getByText('External maintenance')).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Unnamed silence' })).toBeInTheDocument();
   expect(screen.getByText('Expired')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /create|delete|edit|end/i })).not.toBeInTheDocument();
 });

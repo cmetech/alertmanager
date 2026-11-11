@@ -68,7 +68,7 @@ export const createQueryFn =
         // For example, Alertmanager may send a 503 Service Unavailable response
         // with a "text/plain" content type when it's starting up. But the API
         // may also respond with a JSON error message and the same error code.
-        throw new Error(res.statusText);
+        throw new Error(res.statusText || `HTTP ${res.status}`);
       }
 
       const parsed = await res.json();

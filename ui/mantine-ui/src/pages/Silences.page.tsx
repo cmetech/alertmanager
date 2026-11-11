@@ -4,13 +4,13 @@ import { useSilences } from '@/data/silences';
 
 const commentParts = (comment: string) => {
   const prefix = 'OSCAR ingest suppression v1\nName: ';
-  if (!comment.startsWith(prefix)) return { name: 'External silence', reason: comment };
+  if (!comment.startsWith(prefix)) return { name: 'Unnamed silence', reason: comment };
   const remainder = comment.slice(prefix.length);
   const separator = remainder.indexOf('\nReason: ');
   const name = separator < 0 ? '' : remainder.slice(0, separator);
   const reason = separator < 0 ? '' : remainder.slice(separator + '\nReason: '.length);
   if (!name?.trim() || !reason?.trim() || /[\r\n]/.test(name))
-    return { name: 'External silence', reason: comment };
+    return { name: 'Unnamed silence', reason: comment };
   return { name, reason };
 };
 
