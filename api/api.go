@@ -192,6 +192,10 @@ func New(opts Options) (*API, error) {
 	effective := opts.resolve()
 
 	// The Connect API is always mounted alongside API v2.
+	var silenceKeyArg [][]byte
+	if opts.SilenceMutationKey != nil {
+		silenceKeyArg = append(silenceKeyArg, opts.SilenceMutationKey)
+	}
 	v2, err := apiv2.NewAPI(
 		opts.Alerts,
 		opts.GroupFunc,
@@ -199,7 +203,7 @@ func New(opts Options) (*API, error) {
 		opts.Peer,
 		effective.logger.With("version", "v2"),
 		opts.Registry,
-		opts.SilenceMutationKey,
+		silenceKeyArg...,
 	)
 	if err != nil {
 		return nil, err

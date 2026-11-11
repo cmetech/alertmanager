@@ -88,8 +88,9 @@ type API struct {
 	timingCappedPaths prometheus.Counter
 	timingDuration    prometheus.Observer
 
-	Handler            http.Handler
-	silenceMutationKey []byte
+	Handler                     http.Handler
+	silenceMutationKey          []byte
+	silenceMutationGuardEnabled bool
 
 	// beforeAlertsConfigLock is nil in production; tests use it to force a reload
 	// at the otherwise unobservable boundary before the legacy read lock.
@@ -157,8 +158,9 @@ func NewAPI(
 	openAPI.SilencePostSilencesHandler = silence_ops.PostSilencesHandlerFunc(api.postSilencesHandler)
 
 	api.Handler = setResponseHeaders(openAPI.Serve(nil))
-	if len(silenceMutationKey) > 0 && len(silenceMutationKey[0]) > 0 {
+	if len(silenceMutationKey) > 0 {
 		api.silenceMutationKey = silenceMutationKey[0]
+		api.silenceMutationGuardEnabled = true
 		api.Handler = oscarSilenceMutationGuard(api.Handler, silenceMutationKey[0])
 	}
 
@@ -964,7 +966,7 @@ func (api *API) postSilencesHandler(params silence_ops.PostSilencesParams) middl
 }
 
 func (api *API) denySilenceMutation(req *http.Request) middleware.Responder {
-	if len(api.silenceMutationKey) == 0 || silenceMutationAuthorized(req, api.silenceMutationKey) {
+	if !api.silenceMutationGuardEnabled || silenceMutationAuthorized(req, api.silenceMutationKey) {
 		return nil
 	}
 	return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {

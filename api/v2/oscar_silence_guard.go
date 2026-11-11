@@ -14,7 +14,7 @@ func silenceMutationAuthorized(r *http.Request, key []byte) bool {
 }
 
 // oscarSilenceMutationGuard protects native silence writes. The caller must
-// provide a nonempty key; deployment supplies it through a mounted secret.
+// provide a nonempty key for writes; an absent key denies all mutations.
 func oscarSilenceMutationGuard(next http.Handler, key []byte) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cleanPath := path.Clean(r.URL.Path)

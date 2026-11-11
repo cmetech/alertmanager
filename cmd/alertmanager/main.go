@@ -111,11 +111,9 @@ func run() int {
 	kingpin.Version(version.Print("alertmanager"))
 	kingpin.CommandLine.GetFlag("help").Short('h')
 	kingpin.Parse()
-	if *oscarSilenceKeyFile == "" {
-		fmt.Fprintln(os.Stderr, "--oscar.silence-mutation-key-file is required")
-		return 1
-	}
-	var oscarSilenceKey []byte
+	// An old OSCAR compose omits the key flag. Keep alert ingestion running,
+	// while an explicitly empty key makes all silence mutations fail closed.
+	oscarSilenceKey := []byte{}
 	if *oscarSilenceKeyFile != "" {
 		var keyErr error
 		oscarSilenceKey, keyErr = readOscarSilenceMutationKey(*oscarSilenceKeyFile)

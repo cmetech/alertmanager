@@ -8,10 +8,10 @@ import (
 	"testing"
 )
 
-func TestOscarCliRequiresSilenceMutationKey(t *testing.T) {
+func TestOscarCliWithoutKeyReachesConfigValidation(t *testing.T) {
 	output, err := exec.Command("go", "run", ".", "--config.file=/definitely/missing/alertmanager.yml").CombinedOutput()
-	if err == nil || !strings.Contains(string(output), "--oscar.silence-mutation-key-file is required") {
-		t.Fatalf("CLI accepted missing mutation key or failed for another reason: %s", output)
+	if err == nil || !strings.Contains(string(output), "/definitely/missing/alertmanager.yml") {
+		t.Fatalf("CLI did not reach config validation without the key flag: %s", output)
 	}
 }
 

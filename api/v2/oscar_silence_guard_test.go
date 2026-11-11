@@ -95,7 +95,7 @@ func TestOscarNativeAPIHTTPGuard(t *testing.T) {
 }
 
 func TestOscarSilenceMutationHandlersRejectWithoutKey(t *testing.T) {
-	api := &API{silenceMutationKey: []byte("0123456789abcdef0123456789abcdef")}
+	api := &API{silenceMutationKey: []byte("0123456789abcdef0123456789abcdef"), silenceMutationGuardEnabled: true}
 	post := httptest.NewRecorder()
 	api.postSilencesHandler(silence_ops.PostSilencesParams{HTTPRequest: httptest.NewRequest(http.MethodPost, "/api/v2/silences/", nil)}).WriteResponse(post, runtime.JSONProducer())
 	if post.Code != http.StatusForbidden {
@@ -105,5 +105,22 @@ func TestOscarSilenceMutationHandlersRejectWithoutKey(t *testing.T) {
 	api.deleteSilenceHandler(silence_ops.DeleteSilenceParams{HTTPRequest: httptest.NewRequest(http.MethodDelete, "/api/v2/silence/id/", nil)}).WriteResponse(deleteResp, runtime.JSONProducer())
 	if deleteResp.Code != http.StatusForbidden {
 		t.Fatalf("delete status=%d, want forbidden", deleteResp.Code)
+	}
+}
+
+func TestOscarSilenceMutationGuardWithoutConfiguredKeyFailsClosed(t *testing.T) {
+	api, err := NewAPI(nil, nil, nil, nil, promslog.NewNopLogger(), prometheus.NewRegistry(), []byte{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v2/silences"},
+		{http.MethodDelete, "/api/v2/silence/abc"},
+	} {
+		response := httptest.NewRecorder()
+		api.Handler.ServeHTTP(response, httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}")))
+		if response.Code != http.StatusForbidden {
+			t.Errorf("%s %s returned %d, want 403", tc.method, tc.path, response.Code)
+		}
 	}
 }
