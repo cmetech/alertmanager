@@ -1,6 +1,7 @@
 .header {
-  color: var(--mantine-color-white);
-  background-color: var(--mantine-color-dark-6);
+  color: var(--mantine-color-text);
+  background-color: var(--mantine-color-body);
+  border-bottom: 1px solid var(--mantine-color-default-border);
 }
 
 .navMain {
@@ -13,25 +14,25 @@
   padding: rem(8px) rem(12px);
   border-radius: var(--mantine-radius-sm);
   text-decoration: none;
-  color: var(--mantine-color-gray-0);
+  color: var(--mantine-color-text);
   font-size: var(--mantine-font-size-sm);
   font-weight: 500;
   background-color: transparent;
 
   @mixin hover {
-    background-color: var(--mantine-color-gray-6);
-    color: var(--mantine-color-gray-0);
+    background-color: var(--mantine-color-default-hover);
+    color: var(--mantine-color-text);
   }
 
   [data-mantine-color-scheme] &[aria-current="page"] {
-    background-color: var(--mantine-color-blue-filled);
-    color: var(--mantine-color-white);
+    background-color: var(--mantine-color-blue-light);
+    color: var(--mantine-color-blue-light-color);
   }
 }
 
 .menuItem {
   &[aria-current="page"] {
-    background-color: var(--mantine-color-blue-filled);
-    color: var(--mantine-color-white);
+    background-color: var(--mantine-color-blue-light);
+    color: var(--mantine-color-blue-light-color);
   }
 }

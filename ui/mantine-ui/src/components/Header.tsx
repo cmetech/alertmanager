@@ -113,7 +113,7 @@ export const Header = () => {
       <Menu.Target>
         <Burger
           opened={mobileMenuOpened}
-          color="var(--mantine-color-white)"
+          color="var(--mantine-color-text)"
           aria-label="Toggle navigation menu"
         />
       </Menu.Target>
@@ -143,7 +143,7 @@ export const Header = () => {
       <Group h="100%" px="md" wrap="nowrap">
         <Group className={classes.navMain} justify="space-between" wrap="nowrap">
           <Group gap={40} wrap="nowrap">
-            <Link to="/" style={{ textDecoration: 'none', color: 'var(--mantine-color-white)' }}>
+            <Link to="/" style={{ textDecoration: 'none', color: 'var(--mantine-color-text)' }}>
               <Group gap={10} wrap="nowrap">
                 {/* <img src={PrometheusLogo} height={30} /> */}
                 <Text fz={20}>Alertmanager</Text>

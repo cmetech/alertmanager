@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import App from './App';
@@ -6,15 +6,35 @@ import headerClasses from './components/Header.module.css';
 
 afterEach(() => {
   window.location.hash = '';
+  document.cookie = 'oscar-ui-mode=; Max-Age=0; Path=/';
+  vi.unstubAllGlobals();
+});
+
+beforeEach(() => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => Response.json([]))
+  );
 });
 
 describe('App routing', () => {
-  it('renders routes from the URL hash', () => {
+  it('renders native alert records from the URL hash', async () => {
     window.location.hash = '#/alerts';
 
     render(<App />);
 
-    expect(screen.getByText('Alerts List')).toBeInTheDocument();
+    expect(await screen.findByText('No native alerts are currently active.')).toBeInTheDocument();
+  });
+
+  it('uses OSCAR mode when opened and follows changes from the OSCAR tab', () => {
+    document.cookie = 'oscar-ui-mode=light; Path=/';
+    render(<App />);
+    expect(document.documentElement).toHaveAttribute('data-mantine-color-scheme', 'light');
+
+    document.cookie = 'oscar-ui-mode=dark; Path=/';
+    window.localStorage.setItem('settings', JSON.stringify({ mode: 'dark' }));
+    fireEvent(window, new StorageEvent('storage', { key: 'settings' }));
+    expect(document.documentElement).toHaveAttribute('data-mantine-color-scheme', 'dark');
   });
 
   it('applies the header style class', () => {

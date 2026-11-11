@@ -1,6 +1,6 @@
 import { useSuspenseAPIQuery } from '@/data/api';
 
-type Group = {
+export type Group = {
   alerts: Alert[];
   labels: Record<string, string>;
   routeLabels: Record<string, string>;
@@ -11,14 +11,14 @@ type Receiver = {
   name: string;
 };
 
-type AlertStatus = {
+export type AlertStatus = {
   inhibitedBy: string[];
   silencedBy: string[];
   mutedBy: string[];
-  state: 'active';
+  state: 'active' | 'suppressed' | 'unprocessed';
 };
 
-type Alert = {
+export type Alert = {
   annotations: Record<string, string>;
   endsAt: string;
   fingerprint: string;
@@ -32,5 +32,6 @@ type Alert = {
 export const useGroups = () => {
   return useSuspenseAPIQuery<Array<Group>>({
     path: '/alerts/groups',
+    params: { active: 'true', silenced: 'true', inhibited: 'true', muted: 'true' },
   });
 };

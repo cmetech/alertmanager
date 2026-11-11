@@ -13,6 +13,7 @@ import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
 import ErrorBoundary from './components/ErrorBoundary';
 import { Header } from './components/Header';
 import { apiTransport } from './data/connect';
+import { useOscarMode } from './oscarMode';
 import { AlertsPage } from './pages/Alerts.page';
 import { ConfigPage } from './pages/Config.page';
 import { SilencesPage } from './pages/Silences.page';
@@ -29,9 +30,10 @@ const highlightJsAdapter = createHighlightJsAdapter(hljs);
 const queryClient = new QueryClient();
 
 export default function App() {
+  const oscarMode = useOscarMode();
   return (
     <HashRouter>
-      <MantineProvider theme={theme}>
+      <MantineProvider theme={theme} forceColorScheme={oscarMode}>
         <CodeHighlightAdapterProvider adapter={highlightJsAdapter}>
           <QueryClientProvider client={queryClient}>
             <TransportProvider transport={apiTransport}>
