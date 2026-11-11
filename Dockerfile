@@ -19,7 +19,7 @@ RUN mkdir -p /data /home && \
 USER       nobody
 EXPOSE     9093
 VOLUME     [ "/data" ]
-WORKDIR    /data
+WORKDIR    /
 ENTRYPOINT [ "/bin/alertmanager" ]
 CMD        [ "--config.file=/etc/alertmanager/alertmanager.yml", \
              "--storage.path=/data" ]

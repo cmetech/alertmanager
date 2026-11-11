@@ -507,3 +507,21 @@ func TestRPCAdmission(t *testing.T) {
 		require.PanicsWithValue(t, "missing Connect unary request state", func() { unaryRequestStateFromContext(t.Context()) })
 	})
 }
+
+// Any new RPC requires review of the silence-mutation authentication boundary.
+func TestConnectSurfaceHasNoSilenceMutation(t *testing.T) {
+	api := NewAPI(Options{})
+	require.ElementsMatch(t, []string{
+		"/status.v3alpha.StatusService/GetStatus",
+		"/grpc.health.v1.Health/Check", "/grpc.health.v1.Health/Watch",
+		"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+		"/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+	}, api.Procedures())
+	for _, path := range []string{"/silence.v3alpha.SilenceService/CreateSilence", "/silence.v3alpha.SilenceService/DeleteSilence"} {
+		request := httptest.NewRequest(http.MethodPost, path, nil)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		api.Handler().ServeHTTP(response, request)
+		require.Equal(t, http.StatusNotImplemented, response.Code)
+	}
+}
