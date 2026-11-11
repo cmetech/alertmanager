@@ -12,14 +12,14 @@ COPY .build/${OS}-${ARCH}/amtool       /bin/amtool
 COPY .build/${OS}-${ARCH}/alertmanager /bin/alertmanager
 COPY examples/ha/alertmanager.yml      /etc/alertmanager/alertmanager.yml
 
-RUN mkdir -p /alertmanager /home && \
-    chown -R nobody:nobody /etc/alertmanager /alertmanager /home && \
-    chmod -R g+w /alertmanager
+RUN mkdir -p /data /home && \
+    chown -R nobody:nobody /etc/alertmanager /data /home && \
+    chmod -R g+w /data
 
 USER       nobody
 EXPOSE     9093
-VOLUME     [ "/alertmanager" ]
-WORKDIR    /alertmanager
+VOLUME     [ "/data" ]
+WORKDIR    /data
 ENTRYPOINT [ "/bin/alertmanager" ]
 CMD        [ "--config.file=/etc/alertmanager/alertmanager.yml", \
-             "--storage.path=/alertmanager" ]
+             "--storage.path=/data" ]
