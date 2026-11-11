@@ -559,6 +559,11 @@ definitions:
         type: array
         items:
           $ref: '#/definitions/oscarRepeatSchedule'
+      muted_by:
+        type: array
+        description: Names of time intervals muting at least one matched route; alert status remains the global silence/inhibition status.
+        items:
+          type: string
     required:
       - end_time_source
       - timing_as_of

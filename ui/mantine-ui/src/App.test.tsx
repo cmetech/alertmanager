@@ -13,7 +13,19 @@ afterEach(() => {
 beforeEach(() => {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => Response.json([]))
+    vi.fn(async (input: RequestInfo | URL) =>
+      Response.json(
+        String(input).includes('/oscar/alerts/page')
+          ? {
+              contract_version: 2,
+              records: [],
+              total_records: 0,
+              total_pages: 0,
+              timing_by_fingerprint: {},
+            }
+          : []
+      )
+    )
   );
 });
 

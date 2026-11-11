@@ -136,6 +136,20 @@ describe('createQueryFn', () => {
     await expect(qfn('/test')({ signal: signal() })).rejects.toThrow('invalid request');
   });
 
+  it('throws the message from a native JSON string error response', async () => {
+    setHandler((_req, res) => jsonResponse(res, 400, 'invalid label matcher'));
+    await expect(qfn('/oscar/alerts/page')({ signal: signal() })).rejects.toThrow(
+      'invalid label matcher'
+    );
+  });
+
+  it('does not treat a native JSON server error as a successful silence list', async () => {
+    setHandler((_req, res) => jsonResponse(res, 503, { detail: 'native service unavailable' }));
+    await expect(qfn('/silences')({ signal: signal() })).rejects.toThrow(
+      'native service unavailable'
+    );
+  });
+
   it('throws "Invalid JSON response" for malformed JSON bodies', async () => {
     setHandler((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });

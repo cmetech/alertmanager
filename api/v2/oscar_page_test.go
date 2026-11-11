@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +43,55 @@ func TestOscarPageHTTP(t *testing.T) {
 	api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
 	require.Equal(t, 200, w.Code, w.Body.String())
 	require.JSONEq(t, `{"contract_version":2,"records":[],"total_records":0,"total_pages":0,"timing_by_fingerprint":{}}`, w.Body.String())
+}
+
+func TestOscarPageReportsTimeMuteOnOneOfMultipleRoutes(t *testing.T) {
+	alerts, err := mem.NewAlerts(t.Context(), time.Minute, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	t.Cleanup(alerts.Close)
+	api, err := NewAPI(alerts, nil, nil, nil, promslog.NewNopLogger(), prometheus.NewRegistry())
+	require.NoError(t, err)
+	cfg, err := config.Load("route:\n  receiver: fallback\n  routes:\n  - receiver: team\n    matchers: [instance=\"a\"]\n    continue: true\n    mute_time_intervals: [quiet]\n  - receiver: team\n    matchers: [instance=\"a\"]\nreceivers:\n- name: fallback\n- name: team\ntime_intervals:\n- name: quiet\n  time_intervals:\n  - weekdays: [sunday]\n")
+	require.NoError(t, err)
+	api.Update(cfg, func(ctx context.Context, ls labelset.LabelSet) {
+		m, _ := marker.FromContext(ctx)
+		m.SetSilenced(ls.Fingerprint(), nil)
+	})
+	api.PublishTiming(cfg, nil, timingMuter{}, nil)
+	now := time.Now().UTC()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown", "instance": "a"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, alerts.Put(t.Context(), a))
+	w := httptest.NewRecorder()
+	api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page", nil))
+	require.Equal(t, 200, w.Code, w.Body.String())
+	var page struct {
+		Records []struct {
+			Status struct {
+				State string `json:"state"`
+			} `json:"status"`
+		} `json:"records"`
+		Timing map[string]struct {
+			MutedBy []string `json:"muted_by"`
+		} `json:"timing_by_fingerprint"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	require.Len(t, page.Records, 1)
+	require.Equal(t, "active", page.Records[0].Status.State)
+	require.Equal(t, []string{"quiet"}, page.Timing[a.Fingerprint().String()].MutedBy)
+	for _, tc := range []struct {
+		state string
+		count int
+	}{{"active", 1}, {"suppressed", 0}} {
+		filter := fmt.Sprintf(`{"items":[{"field":"alert_status","operator":"equals","value":"%s"}]}`, tc.state)
+		w := httptest.NewRecorder()
+		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page?grid_filter="+url.QueryEscape(filter), nil))
+		require.Equal(t, 200, w.Code, w.Body.String())
+		var got struct {
+			Total int `json:"total_records"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+		require.Equal(t, tc.count, got.Total)
+	}
 }
 
 func TestOscarPageValidationAndParity(t *testing.T) {

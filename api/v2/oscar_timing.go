@@ -128,7 +128,26 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 			meta.ResolveTimeoutDuration = &duration
 		}
 		if source != nil && route != nil {
+			seenMuteNames := make(map[string]struct{})
+			muteStateKnown := true
 			for _, matched := range route.Match(c.a.Labels) {
+				if len(matched.RouteOpts.ActiveTimeIntervals) > 0 || len(matched.RouteOpts.MuteTimeIntervals) > 0 {
+					if source.Muter == nil {
+						muteStateKnown = false
+					} else {
+						active, muted, err := notify.MutedByTimeIntervals(source.Muter, matched.RouteOpts.ActiveTimeIntervals, matched.RouteOpts.MuteTimeIntervals, asOf)
+						if err != nil {
+							muteStateKnown = false
+						} else {
+							for _, name := range slices.Concat(active, muted) {
+								if _, seen := seenMuteNames[name]; !seen {
+									seenMuteNames[name] = struct{}{}
+									meta.MutedBy = append(meta.MutedBy, name)
+								}
+							}
+						}
+					}
+				}
 				receiverName := matched.RouteOpts.Receiver
 				for _, integration := range source.Integrations[receiverName] {
 					routeID := matched.ID()
@@ -180,6 +199,11 @@ func timingForPageWithStats(rows []pageCandidate, route *dispatch.Route, source 
 					group.hashes[hash] = struct{}{}
 					group.targets = append(group.targets, timingTarget{hash: hash, step: step, interval: interval})
 				}
+			}
+			if !muteStateKnown {
+				meta.MutedBy = nil
+			} else if meta.MutedBy == nil {
+				meta.MutedBy = []string{}
 			}
 		}
 		out[c.fingerprint] = meta

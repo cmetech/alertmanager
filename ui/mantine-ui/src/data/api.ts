@@ -1,4 +1,4 @@
-import { type QueryKey, useQuery, useSuspenseQuery } from '@tanstack/react-query';
+import { keepPreviousData, type QueryKey, useQuery, useSuspenseQuery } from '@tanstack/react-query';
 
 // TODO(@sysadmind): Infer this from the current location.
 // We don't have a good strategy for storing global settings yet.
@@ -83,8 +83,19 @@ export const createQueryFn =
             parsed.error !== undefined ? parsed.error : 'missing "error" field in response JSON'
           );
         }
+        if (res.ok) return parsed.data;
+      }
 
-        return parsed.data;
+      if (!res.ok) {
+        const message =
+          typeof parsed === 'string'
+            ? parsed
+            : typeof parsed === 'object' && parsed !== null
+              ? [parsed.detail, parsed.error, parsed.message].find(
+                  (value): value is string => typeof value === 'string' && value.length > 0
+                )
+              : undefined;
+        throw new Error(message || res.statusText || `HTTP ${res.status}`);
       }
 
       return parsed as T;
@@ -111,6 +122,7 @@ type QueryOptions = {
   enabled?: boolean;
   refetchInterval?: false | number;
   recordResponseTime?: (time: number) => void;
+  preservePreviousData?: boolean;
 };
 
 export const useAPIQuery = <T>({
@@ -120,6 +132,7 @@ export const useAPIQuery = <T>({
   enabled,
   refetchInterval,
   recordResponseTime,
+  preservePreviousData,
 }: QueryOptions) => {
   return useQuery<T>({
     queryKey: key ?? [API_PATH, path, params],
@@ -128,6 +141,7 @@ export const useAPIQuery = <T>({
     refetchInterval,
     gcTime: 0,
     enabled,
+    placeholderData: preservePreviousData ? keepPreviousData : undefined,
     queryFn: createQueryFn<T>({ pathPrefix, path, params, recordResponseTime }),
   });
 };

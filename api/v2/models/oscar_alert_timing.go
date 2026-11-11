@@ -41,6 +41,9 @@ type OscarAlertTiming struct {
 	// Enum: ["unknown","sender_ends_at","alertmanager_timeout"]
 	EndTimeSource *string `json:"end_time_source"`
 
+	// Names of time intervals muting at least one matched route; alert status remains the global silence/inhibition status.
+	MutedBy []string `json:"muted_by"`
+
 	// repeat lookup state
 	// Required: true
 	// Enum: ["ready","unavailable"]

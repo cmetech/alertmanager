@@ -847,6 +847,13 @@ func init() {
             "alertmanager_timeout"
           ]
         },
+        "muted_by": {
+          "description": "Names of time intervals muting at least one matched route; alert status remains the global silence/inhibition status.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "repeat_lookup_state": {
           "type": "string",
           "enum": [
@@ -2002,6 +2009,13 @@ func init() {
             "sender_ends_at",
             "alertmanager_timeout"
           ]
+        },
+        "muted_by": {
+          "description": "Names of time intervals muting at least one matched route; alert status remains the global silence/inhibition status.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "repeat_lookup_state": {
           "type": "string",

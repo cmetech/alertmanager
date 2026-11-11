@@ -1,7 +1,8 @@
 import { Suspense } from 'react';
 
 import { render } from '@test-utils';
-import { screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import { SilencesPage } from './Silences.page';
 
@@ -59,7 +60,9 @@ it('shows native silence status, name, reason, creator, and matcher operators', 
   expect(screen.getByText('team !~ "(security|infra)"')).toBeInTheDocument();
   expect(screen.getByText('External maintenance')).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: 'Unnamed silence' })).toBeInTheDocument();
-  expect(screen.getByText('Expired')).toBeInTheDocument();
+  expect(
+    screen.getAllByText('Expired').some((element) => element.closest('.mantine-Badge-root'))
+  ).toBe(true);
   expect(screen.queryByRole('button', { name: /create|delete|edit|end/i })).not.toBeInTheDocument();
 });
 
@@ -74,4 +77,40 @@ it('explains an empty native silence list', async () => {
     </Suspense>
   );
   expect(await screen.findByText('No native silences found.')).toBeInTheDocument();
+});
+
+it('renders one page from 1,000 silences and filters by text and native status', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json(
+        Array.from({ length: 1000 }, (_, i) => ({
+          id: `silence-${i}`,
+          status: { state: i === 999 ? 'expired' : 'active' },
+          startsAt: '2026-11-11T17:23:01Z',
+          endsAt: '2026-11-14T17:23:01Z',
+          updatedAt: '2026-11-11T17:23:01Z',
+          createdBy: 'oscar',
+          comment: `Maintenance ${i}`,
+          matchers: [{ name: 'instance', value: `db-${i}`, isRegex: false, isEqual: true }],
+        }))
+      )
+    )
+  );
+  render(<SilencesPage />);
+
+  expect(await screen.findByText('1,000 matching native silences')).toBeInTheDocument();
+  expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(20);
+  expect(screen.getByText('Page 1 of 50')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Next page' }));
+  expect(screen.getByText('silence-20')).toBeInTheDocument();
+  expect(screen.queryByText('silence-0')).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Search silences' }), {
+    target: { value: 'db-999' },
+  });
+  expect(screen.getByText('silence-999')).toBeInTheDocument();
+  expect(screen.getByText('Page 1 of 1')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('combobox', { name: 'Status' }));
+  await userEvent.click(screen.getByRole('option', { name: 'Active' }));
+  expect(screen.getByText('No silences match these filters.')).toBeInTheDocument();
 });

@@ -1,4 +1,17 @@
-import { Badge, Card, Code, Group, Stack, Text, Title } from '@mantine/core';
+import { useEffect, useMemo, useState } from 'react';
+
+import {
+  Badge,
+  Card,
+  Code,
+  Group,
+  Pagination,
+  Select,
+  Stack,
+  Text,
+  TextInput,
+  Title,
+} from '@mantine/core';
 
 import { useSilences } from '@/data/silences';
 
@@ -26,19 +39,85 @@ const matcherText = (matcher: {
 
 export function SilencesPage() {
   const { data: silences } = useSilences();
-  const stateOrder = { active: 0, pending: 1, expired: 2 };
-  const sorted = [...silences].sort(
-    (left, right) => stateOrder[left.status.state] - stateOrder[right.status.state]
-  );
+  const [search, setSearch] = useState('');
+  const [status, setStatus] = useState('all');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState('20');
+  const filtered = useMemo(() => {
+    const stateOrder = { active: 0, pending: 1, expired: 2 };
+    const needle = search.trim().toLocaleLowerCase();
+    return silences
+      .filter((silence) => {
+        if (status !== 'all' && silence.status.state !== status) return false;
+        if (!needle) return true;
+        const { name, reason } = commentParts(silence.comment);
+        const content = [
+          silence.id,
+          name,
+          reason,
+          silence.createdBy,
+          ...silence.matchers.map(matcherText),
+        ]
+          .join(' ')
+          .toLocaleLowerCase();
+        return content.includes(needle);
+      })
+      .sort(
+        (left, right) =>
+          (stateOrder[left.status.state] ?? 3) - (stateOrder[right.status.state] ?? 3)
+      );
+  }, [silences, search, status]);
+  const totalPages = Math.ceil(filtered.length / Number(pageSize));
+  useEffect(() => {
+    if (page > Math.max(1, totalPages)) setPage(Math.max(1, totalPages));
+  }, [page, totalPages]);
+  const visible = filtered.slice((page - 1) * Number(pageSize), page * Number(pageSize));
 
   return (
     <Stack maw={1100} mx="auto" mt="xs" gap="md">
       <Group justify="space-between">
         <Title order={2}>Silences</Title>
-        <Badge variant="light">{sorted.length} native silences</Badge>
+        <Badge variant="light">{filtered.length.toLocaleString()} matching native silences</Badge>
       </Group>
-      {sorted.length === 0 && <Text>No native silences found.</Text>}
-      {sorted.map((silence) => {
+      <Group align="end">
+        <TextInput
+          label="Search silences"
+          placeholder="Name, reason, ID, creator or matcher"
+          value={search}
+          onChange={(event) => {
+            setSearch(event.currentTarget.value);
+            setPage(1);
+          }}
+        />
+        <Select
+          label="Status"
+          value={status}
+          data={[
+            { value: 'all', label: 'All' },
+            { value: 'active', label: 'Active' },
+            { value: 'pending', label: 'Pending' },
+            { value: 'expired', label: 'Expired' },
+          ]}
+          onChange={(value) => {
+            setStatus(value || 'all');
+            setPage(1);
+          }}
+        />
+        <Select
+          label="Per page"
+          value={pageSize}
+          data={['20', '50', '100']}
+          onChange={(value) => {
+            setPageSize(value || '20');
+            setPage(1);
+          }}
+        />
+      </Group>
+      {silences.length === 0 && <Text>No native silences found.</Text>}
+      {silences.length > 0 && filtered.length === 0 && (
+        <Text>No silences match these filters.</Text>
+      )}
+      {visible.map((silence) => {
         const { name, reason } = commentParts(silence.comment);
         return (
           <Card key={silence.id} withBorder shadow="xs" p="md">
@@ -78,6 +157,24 @@ export function SilencesPage() {
           </Card>
         );
       })}
+      {filtered.length > 0 && (
+        <Group justify="space-between">
+          <Text size="sm">
+            Page {page} of {totalPages}
+          </Text>
+          {totalPages > 1 && (
+            <Pagination
+              total={totalPages}
+              value={page}
+              onChange={setPage}
+              withEdges
+              getControlProps={(control) => ({
+                'aria-label': `${control[0].toUpperCase()}${control.slice(1)} page`,
+              })}
+            />
+          )}
+        </Group>
+      )}
     </Stack>
   );
 }

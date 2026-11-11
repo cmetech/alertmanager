@@ -184,6 +184,20 @@ func (timingMuter) Mutes(names []string, _ time.Time) (bool, []string, error) {
 }
 func (timingMuter) ContainsTime([]string, time.Time) (bool, error) { return false, nil }
 
+func TestOscarTimingDistinguishesKnownNoMuteFromUnavailableMuteState(t *testing.T) {
+	now := time.Now().UTC()
+	rows, plainRoute := timingTestRows(now)
+	rows = rows[:1]
+	source := &TimingSource{Integrations: map[string][]TimingIntegration{}}
+	plain := timingForPage(rows, plainRoute, source, now)[rows[0].fingerprint]
+	require.NotNil(t, plain.MutedBy)
+	require.Empty(t, plain.MutedBy)
+	cfg, err := config.Load("route:\n  receiver: fallback\n  routes:\n  - receiver: team\n    matchers: [instance=\"a\"]\n    mute_time_intervals: [quiet]\nreceivers:\n- name: fallback\n- name: team\ntime_intervals:\n- name: quiet\n  time_intervals:\n  - weekdays: [sunday]\n")
+	require.NoError(t, err)
+	unknown := timingForPage(rows, dispatch.NewRoute(cfg.Route, nil), source, now)[rows[0].fingerprint]
+	require.Nil(t, unknown.MutedBy)
+}
+
 func TestOscarTimingRouteMuteSuppressesOnlyItsPath(t *testing.T) {
 	now := time.Now().UTC()
 	rows, _ := timingTestRows(now)

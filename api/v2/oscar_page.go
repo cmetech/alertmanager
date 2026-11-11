@@ -267,6 +267,7 @@ done:
 			state := timingLookupUnavailable
 			meta.RepeatLookupState = &state
 			meta.RepeatSchedules = []*models.OscarRepeatSchedule{}
+			meta.MutedBy = nil
 			timingByFingerprint[fingerprint] = meta
 		}
 	}
