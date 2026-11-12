@@ -29,6 +29,7 @@ func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Ale
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	owned := make([]*alert.Alert, 0, len(alerts))
+	nativeNow := time.Now()
 	for _, incoming := range alerts {
 		old, err := a.alerts.Get(incoming.Fingerprint())
 		supplied := *incoming
@@ -36,11 +37,16 @@ func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Ale
 		receipt := string(supplied.Annotations["__oscar_fingerprint_conversion_resolution"])
 		delete(supplied.Annotations, "__oscar_fingerprint_conversion_resolution")
 		incoming = &supplied
+		// This actor authenticates resolve-only intent. Bound host clock skew,
+		// then end at native now; a caller timestamp can never extend firing.
+		if incoming.EndsAt.After(nativeNow) && !incoming.EndsAt.After(nativeNow.Add(5*time.Second)) {
+			incoming.EndsAt = nativeNow
+		}
 		reason := ""
 		switch {
 		case err != nil:
 			reason = "missing"
-		case incoming.Timeout || !incoming.Resolved() || incoming.EndsAt.Before(old.StartsAt):
+		case incoming.Timeout || incoming.EndsAt.IsZero() || incoming.EndsAt.After(nativeNow) || incoming.EndsAt.Before(old.StartsAt):
 			reason = "lifecycle"
 		case receipt != alert.ConversionResolutionReceipt(old):
 			reason = "receipt"

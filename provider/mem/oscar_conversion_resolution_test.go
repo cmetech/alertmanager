@@ -16,6 +16,7 @@ package mem
 import (
 	"context"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/common/model"
@@ -111,6 +112,49 @@ func TestConversionResolutionCannotResurrectReplacedOrDeletedState(t *testing.T)
 				require.Equal(t, replacement.Annotations, current.Annotations)
 				require.False(t, current.Resolved())
 			}
+		})
+	}
+}
+
+func TestConversionResolutionClockTolerance(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		requested time.Duration
+		accepted  bool
+	}{
+		{"past", -time.Nanosecond, true}, {"now", 0, true}, {"future-clamped", time.Nanosecond, true},
+		{"five-seconds-clamped", 5 * time.Second, true}, {"beyond-five-seconds", 5*time.Second + time.Nanosecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now()
+				p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), nil, nil)
+				require.NoError(t, err)
+				defer p.Close()
+				old := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}, Annotations: model.LabelSet{conversionAnnotation: "owned"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+				require.NoError(t, p.Put(t.Context(), old))
+				incoming := *old
+				incoming.Annotations = old.Annotations.Clone()
+				incoming.Annotations["__oscar_fingerprint_conversion_resolution"] = model.LabelValue(alert.ConversionResolutionReceipt(old))
+				incoming.EndsAt = now.Add(tc.requested)
+				err = p.PutResolvedConversion(t.Context(), &incoming)
+				current, lookup := p.Get(old.Fingerprint())
+				require.NoError(t, lookup)
+				if !tc.accepted {
+					require.Error(t, err)
+					require.Equal(t, old.EndsAt, current.EndsAt)
+					return
+				}
+				require.NoError(t, err)
+				require.False(t, current.EndsAt.After(now))
+				require.Equal(t, old.StartsAt, current.StartsAt)
+				require.Equal(t, old.Annotations, current.Annotations)
+				if tc.requested > 0 {
+					require.Equal(t, now, current.EndsAt)
+				} else {
+					require.Equal(t, incoming.EndsAt, current.EndsAt)
+				}
+			})
 		})
 	}
 }
