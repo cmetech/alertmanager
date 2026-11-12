@@ -81,6 +81,8 @@ type Options struct {
 	ConnectSendMaxBytes        int
 	ConnectMaxRequestBodyBytes int64
 	SilenceMutationKey         []byte
+	ConversionAdmissionKeys    map[string][]byte
+	ConversionCallbackKey      []byte
 
 	// Cluster.
 	ClusterBindAddr        string

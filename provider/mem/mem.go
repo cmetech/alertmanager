@@ -394,6 +394,10 @@ func (a *Alerts) Put(ctx context.Context, alerts ...*alert.Alert) error {
 	observeDuration(a.putWait, wait)
 	defer func() { observeDuration(a.putHold, start); a.mtx.Unlock() }()
 
+	return a.putLocked(ctx, alerts...)
+}
+
+func (a *Alerts) putLocked(ctx context.Context, alerts ...*alert.Alert) error {
 	ctx, span := tracer.Start(ctx, "provider.mem.Put",
 		trace.WithAttributes(
 			attribute.Int("alerting.alerts.count", len(alerts)),

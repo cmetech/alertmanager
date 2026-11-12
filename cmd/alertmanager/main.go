@@ -51,6 +51,8 @@ func run() int {
 	var (
 		configFile                  = kingpin.Flag("config.file", "Alertmanager configuration file name.").Default("alertmanager.yml").String()
 		dataDir                     = kingpin.Flag("storage.path", "Base path for data storage.").Default("data/").String()
+		oscarConversionKeys         = kingpin.Flag("oscar.conversion-ingress-key", "Confined producer/key-id:secret-file admission binding; repeat for each actor.").Strings()
+		oscarConversionCallbackKey  = kingpin.Flag("oscar.conversion-callback-key-file", "Expected native callback credential for conversion admission readiness.").String()
 		oscarSilenceKeyFile         = kingpin.Flag("oscar.silence-mutation-key-file", "OSCAR secret file required for native silence writes.").String()
 		retention                   = kingpin.Flag("data.retention", "How long to keep data for.").Default("120h").Duration()
 		maintenanceInterval         = kingpin.Flag("data.maintenance-interval", "Interval between garbage collection and snapshotting to disk of the silences and the notification logs.").Default("15m").Duration()
@@ -131,6 +133,46 @@ func run() int {
 	if err != nil {
 		logger.Error("error parsing the feature flag list", "err", err)
 		return 1
+	}
+	conversionKeys := map[string][]byte{}
+	for _, binding := range *oscarConversionKeys {
+		name, path, ok := strings.Cut(binding, ":")
+		parts := strings.Split(name, "/")
+		if !ok || len(parts) != 2 || parts[1] != "v1" || (parts[0] != "webhookreceiver" && parts[0] != "trapreceiver" && parts[0] != "alertmanager-resolution") {
+			logger.Error("invalid confined conversion admission binding")
+			return 1
+		}
+		if _, duplicate := conversionKeys[name]; duplicate {
+			logger.Error("duplicate conversion admission binding")
+			return 1
+		}
+		key, err := readOscarSilenceMutationKey(path)
+		if err != nil {
+			logger.Error("conversion admission key unavailable")
+			return 1
+		}
+		for _, other := range conversionKeys {
+			if string(other) == string(key) {
+				logger.Error("conversion admission keys must differ")
+				return 1
+			}
+		}
+		conversionKeys[name] = key
+	}
+	var conversionCallbackKey []byte
+	if len(conversionKeys) > 0 {
+		var err error
+		conversionCallbackKey, err = readOscarSilenceMutationKey(*oscarConversionCallbackKey)
+		if err != nil {
+			logger.Error("conversion callback key unavailable")
+			return 1
+		}
+		for _, key := range conversionKeys {
+			if string(key) == string(conversionCallbackKey) {
+				logger.Error("conversion callback/admission keys must differ")
+				return 1
+			}
+		}
 	}
 	compat.InitFromFlags(logger, ff)
 
@@ -218,6 +260,8 @@ func run() int {
 		ConnectSendMaxBytes:        *connectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: *connectMaxRequestBodyBytes,
 		SilenceMutationKey:         oscarSilenceKey,
+		ConversionAdmissionKeys:    conversionKeys,
+		ConversionCallbackKey:      conversionCallbackKey,
 
 		ClusterBindAddr:        *clusterBindAddr,
 		ClusterAdvertiseAddr:   *clusterAdvertiseAddr,

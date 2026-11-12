@@ -89,6 +89,8 @@ type API struct {
 	timingDuration    prometheus.Observer
 
 	Handler                     http.Handler
+	conversionAdmissionHandler  http.Handler
+	conversionCallbackKey       []byte
 	silenceMutationKey          []byte
 	silenceMutationGuardEnabled bool
 
@@ -164,6 +166,7 @@ func NewAPI(
 		api.Handler = oscarSilenceMutationGuard(api.Handler, silenceMutationKey[0])
 	}
 
+	api.InstallConversionAdmission(nil)
 	return &api, nil
 }
 
@@ -382,6 +385,18 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 	defer span.End()
 
 	alerts := OpenAPIAlertsToAlerts(ctx, params.Alerts)
+	actor := conversionActor(params.HTTPRequest.Context())
+	for i := range alerts {
+		capsule := string(alerts[i].Annotations[conversionAnnotation])
+		if actor != "alertmanager-resolution" {
+			delete(alerts[i].Annotations, "__oscar_fingerprint_conversion_resolution")
+		}
+		if actor == "" {
+			delete(alerts[i].Annotations, conversionAnnotation)
+		} else if actor != "alertmanager-resolution" && capsule != "" && capsuleProducer(capsule) != actor {
+			return alert_ops.NewPostAlertsBadRequest().WithPayload("conversion producer mismatch")
+		}
+	}
 
 	now := time.Now()
 
@@ -435,7 +450,22 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 		}
 		validAlerts = append(validAlerts, storedAlert)
 	}
-	if err := api.alerts.Put(ctx, validAlerts...); err != nil {
+	var putErr error
+	if actor == "alertmanager-resolution" {
+		if validationErrs != nil {
+			return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid conversion resolution batch")
+		}
+		resolver, ok := api.alerts.(interface {
+			PutResolvedConversion(context.Context, ...*alert.Alert) error
+		})
+		if !ok {
+			return alert_ops.NewPostAlertsBadRequest().WithPayload("conversion resolution unavailable")
+		}
+		putErr = resolver.PutResolvedConversion(ctx, validAlerts...)
+	} else {
+		putErr = api.alerts.Put(ctx, validAlerts...)
+	}
+	if err := putErr; err != nil {
 		message := "Failed to create alerts"
 		logger.Error(message, "err", err)
 		span.SetStatus(codes.Error, message)
