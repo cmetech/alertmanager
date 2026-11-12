@@ -36,6 +36,7 @@ import (
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroup"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/general"
+	"github.com/prometheus/alertmanager/api/v2/restapi/operations/oscar_inhibition"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/receiver"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/silence"
 )
@@ -86,6 +87,12 @@ func NewAlertmanagerAPI(spec *loads.Document) *AlertmanagerAPI {
 			return middleware.NotImplemented("operation alert.GetOscarAlertsPage has not yet been implemented")
 		}),
 
+		OscarInhibitionGetOscarInhibitionStatusHandler: oscar_inhibition.GetOscarInhibitionStatusHandlerFunc(func(params oscar_inhibition.GetOscarInhibitionStatusParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation oscar_inhibition.GetOscarInhibitionStatus has not yet been implemented")
+		}),
+
 		ReceiverGetReceiversHandler: receiver.GetReceiversHandlerFunc(func(params receiver.GetReceiversParams) middleware.Responder {
 			_ = params
 
@@ -120,6 +127,18 @@ func NewAlertmanagerAPI(spec *loads.Document) *AlertmanagerAPI {
 			_ = params
 
 			return middleware.NotImplemented("operation silence.PostSilences has not yet been implemented")
+		}),
+
+		OscarInhibitionPutOscarInhibitionRulesHandler: oscar_inhibition.PutOscarInhibitionRulesHandlerFunc(func(params oscar_inhibition.PutOscarInhibitionRulesParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation oscar_inhibition.PutOscarInhibitionRules has not yet been implemented")
+		}),
+
+		OscarInhibitionValidateOscarInhibitionHandler: oscar_inhibition.ValidateOscarInhibitionHandlerFunc(func(params oscar_inhibition.ValidateOscarInhibitionParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation oscar_inhibition.ValidateOscarInhibition has not yet been implemented")
 		}),
 	}
 }
@@ -165,6 +184,8 @@ type AlertmanagerAPI struct {
 	AlertGetAlertsHandler alert.GetAlertsHandler
 	// AlertGetOscarAlertsPageHandler sets the operation handler for the get oscar alerts page operation
 	AlertGetOscarAlertsPageHandler alert.GetOscarAlertsPageHandler
+	// OscarInhibitionGetOscarInhibitionStatusHandler sets the operation handler for the get oscar inhibition status operation
+	OscarInhibitionGetOscarInhibitionStatusHandler oscar_inhibition.GetOscarInhibitionStatusHandler
 	// ReceiverGetReceiversHandler sets the operation handler for the get receivers operation
 	ReceiverGetReceiversHandler receiver.GetReceiversHandler
 	// SilenceGetSilenceHandler sets the operation handler for the get silence operation
@@ -177,6 +198,10 @@ type AlertmanagerAPI struct {
 	AlertPostAlertsHandler alert.PostAlertsHandler
 	// SilencePostSilencesHandler sets the operation handler for the post silences operation
 	SilencePostSilencesHandler silence.PostSilencesHandler
+	// OscarInhibitionPutOscarInhibitionRulesHandler sets the operation handler for the put oscar inhibition rules operation
+	OscarInhibitionPutOscarInhibitionRulesHandler oscar_inhibition.PutOscarInhibitionRulesHandler
+	// OscarInhibitionValidateOscarInhibitionHandler sets the operation handler for the validate oscar inhibition operation
+	OscarInhibitionValidateOscarInhibitionHandler oscar_inhibition.ValidateOscarInhibitionHandler
 
 	// ServeError is called when an error is received, there is a default handler
 	// but you can set your own with this
@@ -266,6 +291,9 @@ func (o *AlertmanagerAPI) Validate() error {
 	if o.AlertGetOscarAlertsPageHandler == nil {
 		unregistered = append(unregistered, "alert.GetOscarAlertsPageHandler")
 	}
+	if o.OscarInhibitionGetOscarInhibitionStatusHandler == nil {
+		unregistered = append(unregistered, "oscar_inhibition.GetOscarInhibitionStatusHandler")
+	}
 	if o.ReceiverGetReceiversHandler == nil {
 		unregistered = append(unregistered, "receiver.GetReceiversHandler")
 	}
@@ -283,6 +311,12 @@ func (o *AlertmanagerAPI) Validate() error {
 	}
 	if o.SilencePostSilencesHandler == nil {
 		unregistered = append(unregistered, "silence.PostSilencesHandler")
+	}
+	if o.OscarInhibitionPutOscarInhibitionRulesHandler == nil {
+		unregistered = append(unregistered, "oscar_inhibition.PutOscarInhibitionRulesHandler")
+	}
+	if o.OscarInhibitionValidateOscarInhibitionHandler == nil {
+		unregistered = append(unregistered, "oscar_inhibition.ValidateOscarInhibitionHandler")
 	}
 
 	if len(unregistered) > 0 {
@@ -393,6 +427,10 @@ func (o *AlertmanagerAPI) initHandlerCache() {
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
+	o.handlers["GET"]["/oscar/inhibition/status"] = oscar_inhibition.NewGetOscarInhibitionStatus(o.context, o.OscarInhibitionGetOscarInhibitionStatusHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
 	o.handlers["GET"]["/receivers"] = receiver.NewGetReceivers(o.context, o.ReceiverGetReceiversHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
@@ -414,6 +452,14 @@ func (o *AlertmanagerAPI) initHandlerCache() {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}
 	o.handlers["POST"]["/silences"] = silence.NewPostSilences(o.context, o.SilencePostSilencesHandler)
+	if o.handlers["PUT"] == nil {
+		o.handlers["PUT"] = make(map[string]http.Handler)
+	}
+	o.handlers["PUT"]["/oscar/inhibition/rules"] = oscar_inhibition.NewPutOscarInhibitionRules(o.context, o.OscarInhibitionPutOscarInhibitionRulesHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/oscar/inhibition/validate"] = oscar_inhibition.NewValidateOscarInhibition(o.context, o.OscarInhibitionValidateOscarInhibitionHandler)
 }
 
 // Serve creates a http handler to serve the API over HTTP

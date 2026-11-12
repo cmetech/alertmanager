@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -37,7 +38,8 @@ import (
 
 const (
 	// Maximum number of events buffered before new events are dropped.
-	// At ~500 bytes per event this caps memory usage at roughly 4 MB.
+	// Observation snapshots have separate field/byte bounds; queue slots alone
+	// are not a four-megabyte memory guarantee.
 	eventQueueSize = 8192
 )
 
@@ -78,10 +80,17 @@ type writeRequest struct {
 // exclusively by the writeLoop goroutine and updated via the
 // cfgUpdate channel, eliminating the need for a mutex.
 type sharedRecorder struct {
-	instance string
-	logger   *slog.Logger
-	metrics  *metrics
-	peer     atomic.Pointer[cluster.Peer]
+	instance                                  string
+	logger                                    *slog.Logger
+	metrics                                   *metrics
+	peer                                      atomic.Pointer[cluster.Peer]
+	runtimeEpoch                              string
+	interest                                  atomic.Uint32
+	admissions                                admissionCache
+	observation                               observationCounters
+	observationEnabled, observationConfigured bool
+	observationStarted                        int64
+	observationOutput                         atomic.Pointer[WebhookOutput]
 
 	// Async write queue.  nil for NopRecorder, non-nil for active.
 	events    chan writeRequest
@@ -142,14 +151,16 @@ func NewRecorderFromConfig(cfg Config, instance string, logger *slog.Logger, r p
 		logger = slog.New(slog.DiscardHandler)
 	}
 	core := &sharedRecorder{
-		instance:  instance,
-		logger:    logger,
-		metrics:   newMetrics(r),
-		events:    make(chan writeRequest, eventQueueSize),
-		cfgUpdate: make(chan cfgUpdateMsg),
-		done:      make(chan struct{}),
+		instance:     boundedString(instance, 256),
+		runtimeEpoch: newRuntimeEpoch(),
+		logger:       logger,
+		metrics:      newMetrics(r),
+		events:       make(chan writeRequest, eventQueueSize),
+		cfgUpdate:    make(chan cfgUpdateMsg),
+		done:         make(chan struct{}),
 	}
-	initialOutputs := buildOutputs(cfg, instance, core.metrics, logger)
+	initialOutputs := buildOutputs(cfg, instance, core.metrics, logger, core.recordObservationReceipt)
+	core.setOutputs(initialOutputs)
 
 	if r != nil {
 		r.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
@@ -167,7 +178,7 @@ func NewRecorderFromConfig(cfg Config, instance string, logger *slog.Logger, r p
 }
 
 // buildOutputs creates Destination implementations from the given config.
-func buildOutputs(cfg Config, instance string, m *metrics, logger *slog.Logger) []Destination {
+func buildOutputs(cfg Config, instance string, m *metrics, logger *slog.Logger, observationReceipt ...func(int64)) []Destination {
 	if err := cfg.validate(); err != nil {
 		logger.Error("Invalid event recorder output configuration")
 		return nil
@@ -182,6 +193,9 @@ func buildOutputs(cfg Config, instance string, m *metrics, logger *slog.Logger) 
 		outputs = append(outputs, fo)
 	}
 	for _, wc := range cfg.WebhookOutputs {
+		if wc.observationKey != "" && len(observationReceipt) > 0 {
+			wc.observationReceipt = observationReceipt[0]
+		}
 		wo, err := NewWebhookOutput(wc, m.outputDrops, logger)
 		if err != nil {
 			logger.Error("Failed to create webhook event recorder output", "output", safeOutputIdentifier("webhook", wc.Name))
@@ -219,6 +233,7 @@ func buildOutputs(cfg Config, instance string, m *metrics, logger *slog.Logger) 
 // events and closes all outputs before returning.
 func (c *sharedRecorder) writeLoop(outputs []Destination, currentCfg Config) {
 	defer c.wg.Done()
+	defer c.setOutputs(nil)
 	defer func() {
 		for _, out := range outputs {
 			if err := out.Close(); err != nil && c.logger != nil {
@@ -233,12 +248,34 @@ func (c *sharedRecorder) writeLoop(outputs []Destination, currentCfg Config) {
 			c.marshalAndSend(req, outputs)
 		case update := <-c.cfgUpdate:
 			if !configEqual(update.cfg, currentCfg) {
-				newOutputs := buildOutputs(update.cfg, c.instance, c.metrics, c.logger)
+				buildCfg := update.cfg
+				var retained *WebhookOutput
+				if current := c.observationOutput.Load(); current != nil {
+					for _, before := range currentCfg.WebhookOutputs {
+						if before.observationKey == "" {
+							continue
+						}
+						for i, after := range buildCfg.WebhookOutputs {
+							if before.equal(after) {
+								retained = current
+								buildCfg.WebhookOutputs = append(append([]WebhookOutputConfig{}, buildCfg.WebhookOutputs[:i]...), buildCfg.WebhookOutputs[i+1:]...)
+								break
+							}
+						}
+					}
+				}
+				newOutputs := buildOutputs(buildCfg, c.instance, c.metrics, c.logger, c.recordObservationReceipt)
+				if retained != nil {
+					newOutputs = append(newOutputs, retained)
+				}
 				if len(newOutputs) != update.cfg.totalOutputs() {
 					// Some outputs failed to initialize.  Keep the existing
 					// (known-good) set rather than risking partial coverage.
 					c.logger.Error("Failed to reload event recorder outputs; keeping existing outputs")
 					for _, out := range newOutputs {
+						if out == retained {
+							continue
+						}
 						if err := out.Close(); err != nil {
 							c.logger.Error("Failed to close partially-built event recorder output", "output", out.Name())
 						}
@@ -249,7 +286,11 @@ func (c *sharedRecorder) writeLoop(outputs []Destination, currentCfg Config) {
 				oldOutputs := outputs
 				outputs = newOutputs
 				currentCfg = update.cfg
+				c.setOutputs(outputs)
 				for _, out := range oldOutputs {
+					if out == retained {
+						continue
+					}
 					if err := out.Close(); err != nil {
 						c.logger.Error("Failed to close old event recorder output", "output", out.Name())
 					}
@@ -278,7 +319,15 @@ func (c *sharedRecorder) writeLoop(outputs []Destination, currentCfg Config) {
 // output the structured event and records per-output result and
 // bytes-written metrics from the returned size/error.
 func (c *sharedRecorder) marshalAndSend(req writeRequest, outputs []Destination) {
+	if req.event.message.GetData().GetInhibitionMutedAlert().GetObservation() != nil && time.Since(req.event.message.Timestamp.AsTime()) > ObservationResidence {
+		c.dropObservation()
+		c.metrics.eventsDropped.WithLabelValues("inhibition_muted_alert").Inc()
+		return
+	}
 	for _, out := range outputs {
+		if filter, ok := out.(interface{ Interested(string) bool }); ok && !filter.Interested(req.event.typeName()) {
+			continue
+		}
 		name := out.Name()
 		size, err := out.SendEvent(req.event)
 		if err != nil {
@@ -308,26 +357,106 @@ func (c *sharedRecorder) marshalAndSend(req writeRequest, outputs []Destination)
 // The expensive protojson.Marshal call is deferred to the write-loop
 // goroutine so that the caller's hot path only pays for snapshot construction
 // and a channel send.
+// RecordEvent is the legacy all-events API. Production callers use RecordTypedEvent
+// so inhibition-only outputs cannot enable unrelated builders.
 func (r Recorder) RecordEvent(ctx context.Context, build func() EventData) {
-	if r.core == nil || r.core.events == nil {
-		return
+	r.RecordTypedEvent(ctx, "*", build)
+}
+
+const (
+	interestAll        uint32 = 1
+	interestInhibition uint32 = 1 << 10
+)
+
+func eventInterest(eventType string) uint32 {
+	switch eventType {
+	case "alertmanager_startup_event":
+		return 1 << 1
+	case "alertmanager_shutdown_event":
+		return 1 << 2
+	case "alert_created":
+		return 1 << 3
+	case "alert_resolved":
+		return 1 << 4
+	case "alert_grouped":
+		return 1 << 5
+	case "notification":
+		return 1 << 6
+	case "silence_created":
+		return 1 << 7
+	case "silence_updated":
+		return 1 << 8
+	case "silence_muted_alert":
+		return 1 << 9
+	case "inhibition_muted_alert":
+		return interestInhibition
 	}
-	if !EventRecordingEnabled(ctx) {
-		return
+	return 0
+}
+
+func (c *sharedRecorder) setOutputs(outputs []Destination) {
+	var interest uint32
+	var observation *WebhookOutput
+	for _, out := range outputs {
+		if wo, ok := out.(*WebhookOutput); ok && len(wo.eventTypes) > 0 {
+			for _, kind := range wo.eventTypes {
+				interest |= eventInterest(kind)
+			}
+			if wo.observationKey != "" {
+				observation = wo
+			}
+		} else {
+			interest |= interestAll | interestInhibition
+		}
 	}
-	data := build()
+	c.observationOutput.Store(observation)
+	c.interest.Store(interest)
+}
+
+// Interested is the pre-builder event-type gate. It performs no snapshots or I/O.
+func (r Recorder) Interested(ctx context.Context, eventType string) bool {
+	if r.core == nil || r.core.events == nil || !EventRecordingEnabled(ctx) {
+		return false
+	}
+	interest := r.core.interest.Load()
+	return interest&interestAll != 0 || interest&eventInterest(eventType) != 0
+}
+
+// RecordTypedEvent checks configured interest before constructing immutable snapshots.
+func (r Recorder) RecordTypedEvent(ctx context.Context, eventType string, build func() EventData) bool {
+	if !r.Interested(ctx, eventType) {
+		return false
+	}
+	return r.enqueue(build(), time.Now())
+}
+
+func (r Recorder) enqueue(data EventData, now time.Time) bool {
 	clusterPosition := uint64(0)
 	if peer := r.core.peer.Load(); peer != nil {
 		clusterPosition = uint64(peer.Position())
 	}
-	event := data.withMetadata(timestamppb.Now(), r.core.instance, clusterPosition)
-	request := writeRequest{event: event}
-
+	event := data.withMetadata(timestamppb.New(now), r.core.instance, clusterPosition)
 	select {
-	case r.core.events <- request:
+	case <-r.core.done:
+		return false
 	default:
-		// Queue full; drop event to avoid blocking alertmanager.
+	}
+	select {
+	case r.core.events <- writeRequest{event: event}:
+		return true
+	default:
 		r.core.metrics.eventsDropped.WithLabelValues(event.typeName()).Inc()
+		return false
+	}
+}
+
+// SetObservationOptions records fixed service enablement independently of sink success.
+// Call once during construction before sharing the recorder.
+func (r Recorder) SetObservationOptions(enabled, configured bool) {
+	if r.core != nil {
+		r.core.observationStarted = time.Now().UnixNano()
+		r.core.observationEnabled = enabled
+		r.core.observationConfigured = configured
 	}
 }
 

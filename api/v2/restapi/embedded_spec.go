@@ -325,6 +325,170 @@ func init() {
         }
       }
     },
+    "/oscar/inhibition/rules": {
+      "put": {
+        "description": "Replace the whole managed set. Errors may follow activation; inspect status and reconcile. Same-content retries repair durability without activating components.",
+        "tags": [
+          "oscarInhibition"
+        ],
+        "operationId": "putOscarInhibitionRules",
+        "parameters": [
+          {
+            "$ref": "#/parameters/oscarInhibitionKey"
+          },
+          {
+            "type": "string",
+            "name": "If-Match",
+            "in": "header",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionSet"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active and durable confirmation",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionStatus"
+            },
+            "headers": {
+              "ETag": {
+                "type": "string"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid authored rules",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "403": {
+            "description": "Invalid or missing service credential",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "409": {
+            "description": "Reserved name conflict in base configuration",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "412": {
+            "description": "Stale ETag; re-read native and SQL state",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "413": {
+            "description": "Request exceeds byte limit",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "422": {
+            "description": "Runtime activation failed",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "428": {
+            "description": "If-Match required",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "503": {
+            "description": "Persistence unconfirmed or coordinator unavailable",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          }
+        }
+      }
+    },
+    "/oscar/inhibition/status": {
+      "get": {
+        "description": "Internal managed inhibition status; requires the dedicated service credential.",
+        "tags": [
+          "oscarInhibition"
+        ],
+        "operationId": "getOscarInhibitionStatus",
+        "parameters": [
+          {
+            "$ref": "#/parameters/oscarInhibitionKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active and durable state are reported separately. ETag is the concurrency authority.",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionStatus"
+            },
+            "headers": {
+              "ETag": {
+                "type": "string"
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid or missing service credential"
+          },
+          "503": {
+            "description": "Managed coordinator unavailable"
+          }
+        }
+      }
+    },
+    "/oscar/inhibition/validate": {
+      "post": {
+        "description": "Validate and canonicalize a complete structured managed set without side effects.",
+        "tags": [
+          "oscarInhibition"
+        ],
+        "operationId": "validateOscarInhibition",
+        "parameters": [
+          {
+            "$ref": "#/parameters/oscarInhibitionKey"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionSet"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical definition and semantic digest",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionValidation"
+            }
+          },
+          "400": {
+            "description": "Invalid authored rules",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "403": {
+            "description": "Invalid or missing service credential"
+          },
+          "413": {
+            "description": "Request exceeds byte limit"
+          }
+        }
+      }
+    },
     "/receivers": {
       "get": {
         "description": "Get list of all receivers (name of notification integrations)",
@@ -877,6 +1041,246 @@ func init() {
         }
       }
     },
+    "oscarInhibitionError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "message": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/oscarInhibitionStatus"
+        }
+      }
+    },
+    "oscarInhibitionMatcher": {
+      "type": "object",
+      "required": [
+        "label",
+        "operator",
+        "value"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "operator": {
+          "type": "string",
+          "pattern": "^(=|!=|=~|!~)$"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarInhibitionRule": {
+      "type": "object",
+      "required": [
+        "name",
+        "source_matchers",
+        "target_matchers",
+        "equal"
+      ],
+      "properties": {
+        "equal": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^oscar-inh-([1-9][0-9]*)-r[1-9][0-9]*$"
+        },
+        "source_matchers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionMatcher"
+          }
+        },
+        "target_matchers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionMatcher"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarInhibitionSet": {
+      "type": "object",
+      "required": [
+        "rules"
+      ],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionRule"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarInhibitionStatus": {
+      "type": "object",
+      "properties": {
+        "active_digest": {
+          "type": "string"
+        },
+        "active_generation": {
+          "type": "integer",
+          "format": "uint64"
+        },
+        "build_version": {
+          "type": "string"
+        },
+        "contract_version": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "etag": {
+          "type": "string"
+        },
+        "external_rule_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instance_id": {
+          "type": "string"
+        },
+        "last_successful_base_identity": {
+          "type": "string"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "managed_file_healthy": {
+          "type": "boolean"
+        },
+        "persisted_digest": {
+          "type": "string"
+        },
+        "persisted_generation": {
+          "type": "integer",
+          "format": "uint64"
+        },
+        "recording": {
+          "type": "object",
+          "properties": {
+            "admitted": {
+              "type": "integer"
+            },
+            "cache_bypasses": {
+              "type": "integer"
+            },
+            "capture_drops": {
+              "type": "integer"
+            },
+            "flag_enabled": {
+              "type": "boolean"
+            },
+            "interest_active": {
+              "type": "boolean"
+            },
+            "last_successful_receipt": {
+              "type": "string",
+              "x-nullable": true
+            },
+            "output_drops": {
+              "type": "integer"
+            },
+            "output_failures": {
+              "type": "integer"
+            },
+            "problem_since": {
+              "type": "string",
+              "x-nullable": true
+            },
+            "queue_length": {
+              "type": "integer"
+            },
+            "recovered_at": {
+              "type": "string",
+              "x-nullable": true
+            },
+            "runtime_epoch": {
+              "type": "string"
+            },
+            "sink_configured": {
+              "type": "boolean"
+            },
+            "sink_initialized": {
+              "type": "boolean"
+            },
+            "state": {
+              "type": "string"
+            },
+            "supported": {
+              "type": "boolean"
+            },
+            "suppressed_repeats": {
+              "type": "integer"
+            }
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionRule"
+          }
+        },
+        "runtime_epoch": {
+          "type": "string"
+        }
+      }
+    },
+    "oscarInhibitionValidation": {
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionRule"
+          }
+        }
+      }
+    },
     "oscarRepeatSchedule": {
       "type": "object",
       "required": [
@@ -1080,6 +1484,13 @@ func init() {
     }
   },
   "parameters": {
+    "oscarInhibitionKey": {
+      "type": "string",
+      "description": "Dedicated internal managed inhibition service credential.",
+      "name": "X-Oscar-Inhibition-Key",
+      "in": "header",
+      "required": true
+    },
     "receiverMatchers": {
       "type": "array",
       "items": {
@@ -1463,6 +1874,182 @@ func init() {
         }
       }
     },
+    "/oscar/inhibition/rules": {
+      "put": {
+        "description": "Replace the whole managed set. Errors may follow activation; inspect status and reconcile. Same-content retries repair durability without activating components.",
+        "tags": [
+          "oscarInhibition"
+        ],
+        "operationId": "putOscarInhibitionRules",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "Dedicated internal managed inhibition service credential.",
+            "name": "X-Oscar-Inhibition-Key",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "If-Match",
+            "in": "header",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionSet"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active and durable confirmation",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionStatus"
+            },
+            "headers": {
+              "ETag": {
+                "type": "string"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid authored rules",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "403": {
+            "description": "Invalid or missing service credential",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "409": {
+            "description": "Reserved name conflict in base configuration",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "412": {
+            "description": "Stale ETag; re-read native and SQL state",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "413": {
+            "description": "Request exceeds byte limit",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "422": {
+            "description": "Runtime activation failed",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "428": {
+            "description": "If-Match required",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "503": {
+            "description": "Persistence unconfirmed or coordinator unavailable",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          }
+        }
+      }
+    },
+    "/oscar/inhibition/status": {
+      "get": {
+        "description": "Internal managed inhibition status; requires the dedicated service credential.",
+        "tags": [
+          "oscarInhibition"
+        ],
+        "operationId": "getOscarInhibitionStatus",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "Dedicated internal managed inhibition service credential.",
+            "name": "X-Oscar-Inhibition-Key",
+            "in": "header",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active and durable state are reported separately. ETag is the concurrency authority.",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionStatus"
+            },
+            "headers": {
+              "ETag": {
+                "type": "string"
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid or missing service credential"
+          },
+          "503": {
+            "description": "Managed coordinator unavailable"
+          }
+        }
+      }
+    },
+    "/oscar/inhibition/validate": {
+      "post": {
+        "description": "Validate and canonicalize a complete structured managed set without side effects.",
+        "tags": [
+          "oscarInhibition"
+        ],
+        "operationId": "validateOscarInhibition",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "Dedicated internal managed inhibition service credential.",
+            "name": "X-Oscar-Inhibition-Key",
+            "in": "header",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionSet"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Canonical definition and semantic digest",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionValidation"
+            }
+          },
+          "400": {
+            "description": "Invalid authored rules",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
+          },
+          "403": {
+            "description": "Invalid or missing service credential"
+          },
+          "413": {
+            "description": "Request exceeds byte limit"
+          }
+        }
+      }
+    },
     "/receivers": {
       "get": {
         "description": "Get list of all receivers (name of notification integrations)",
@@ -1692,6 +2279,87 @@ func init() {
     }
   },
   "definitions": {
+    "OscarInhibitionErrorErrorsItems0": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "OscarInhibitionStatusError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "OscarInhibitionStatusRecording": {
+      "type": "object",
+      "properties": {
+        "admitted": {
+          "type": "integer"
+        },
+        "cache_bypasses": {
+          "type": "integer"
+        },
+        "capture_drops": {
+          "type": "integer"
+        },
+        "flag_enabled": {
+          "type": "boolean"
+        },
+        "interest_active": {
+          "type": "boolean"
+        },
+        "last_successful_receipt": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "output_drops": {
+          "type": "integer"
+        },
+        "output_failures": {
+          "type": "integer"
+        },
+        "problem_since": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "queue_length": {
+          "type": "integer"
+        },
+        "recovered_at": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "runtime_epoch": {
+          "type": "string"
+        },
+        "sink_configured": {
+          "type": "boolean"
+        },
+        "sink_initialized": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "suppressed_repeats": {
+          "type": "integer"
+        }
+      }
+    },
     "alert": {
       "type": "object",
       "required": [
@@ -2040,6 +2708,238 @@ func init() {
         }
       }
     },
+    "oscarInhibitionError": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OscarInhibitionErrorErrorsItems0"
+          }
+        },
+        "message": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/oscarInhibitionStatus"
+        }
+      }
+    },
+    "oscarInhibitionMatcher": {
+      "type": "object",
+      "required": [
+        "label",
+        "operator",
+        "value"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "operator": {
+          "type": "string",
+          "pattern": "^(=|!=|=~|!~)$"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarInhibitionRule": {
+      "type": "object",
+      "required": [
+        "name",
+        "source_matchers",
+        "target_matchers",
+        "equal"
+      ],
+      "properties": {
+        "equal": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^oscar-inh-([1-9][0-9]*)-r[1-9][0-9]*$"
+        },
+        "source_matchers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionMatcher"
+          }
+        },
+        "target_matchers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionMatcher"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarInhibitionSet": {
+      "type": "object",
+      "required": [
+        "rules"
+      ],
+      "properties": {
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionRule"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarInhibitionStatus": {
+      "type": "object",
+      "properties": {
+        "active_digest": {
+          "type": "string"
+        },
+        "active_generation": {
+          "type": "integer",
+          "format": "uint64"
+        },
+        "build_version": {
+          "type": "string"
+        },
+        "contract_version": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "etag": {
+          "type": "string"
+        },
+        "external_rule_names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instance_id": {
+          "type": "string"
+        },
+        "last_successful_base_identity": {
+          "type": "string"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "managed_file_healthy": {
+          "type": "boolean"
+        },
+        "persisted_digest": {
+          "type": "string"
+        },
+        "persisted_generation": {
+          "type": "integer",
+          "format": "uint64"
+        },
+        "recording": {
+          "type": "object",
+          "properties": {
+            "admitted": {
+              "type": "integer"
+            },
+            "cache_bypasses": {
+              "type": "integer"
+            },
+            "capture_drops": {
+              "type": "integer"
+            },
+            "flag_enabled": {
+              "type": "boolean"
+            },
+            "interest_active": {
+              "type": "boolean"
+            },
+            "last_successful_receipt": {
+              "type": "string",
+              "x-nullable": true
+            },
+            "output_drops": {
+              "type": "integer"
+            },
+            "output_failures": {
+              "type": "integer"
+            },
+            "problem_since": {
+              "type": "string",
+              "x-nullable": true
+            },
+            "queue_length": {
+              "type": "integer"
+            },
+            "recovered_at": {
+              "type": "string",
+              "x-nullable": true
+            },
+            "runtime_epoch": {
+              "type": "string"
+            },
+            "sink_configured": {
+              "type": "boolean"
+            },
+            "sink_initialized": {
+              "type": "boolean"
+            },
+            "state": {
+              "type": "string"
+            },
+            "supported": {
+              "type": "boolean"
+            },
+            "suppressed_repeats": {
+              "type": "integer"
+            }
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionRule"
+          }
+        },
+        "runtime_epoch": {
+          "type": "string"
+        }
+      }
+    },
+    "oscarInhibitionValidation": {
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarInhibitionRule"
+          }
+        }
+      }
+    },
     "oscarRepeatSchedule": {
       "type": "object",
       "required": [
@@ -2243,6 +3143,13 @@ func init() {
     }
   },
   "parameters": {
+    "oscarInhibitionKey": {
+      "type": "string",
+      "description": "Dedicated internal managed inhibition service credential.",
+      "name": "X-Oscar-Inhibition-Key",
+      "in": "header",
+      "required": true
+    },
     "receiverMatchers": {
       "type": "array",
       "items": {

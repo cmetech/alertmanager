@@ -68,6 +68,7 @@ func newTestRecorderWithConfig(cfg Config, outputs ...Destination) Recorder {
 		cfgUpdate: make(chan cfgUpdateMsg),
 		done:      make(chan struct{}),
 	}
+	core.setOutputs(outputs)
 	core.wg.Add(1)
 	go core.writeLoop(outputs, cfg)
 	return Recorder{core: core}

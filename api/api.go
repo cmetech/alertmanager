@@ -64,6 +64,8 @@ type API struct {
 type Options struct {
 	// SilenceMutationKey enables OSCAR's native silence-write guard when set.
 	SilenceMutationKey []byte
+	InhibitionKey      []byte
+	ManagedInhibition  *config.Coordinator
 	// Alerts to be used by the API. Mandatory.
 	Alerts provider.Alerts
 	// Silences to be used by the API. Mandatory.
@@ -208,6 +210,7 @@ func New(opts Options) (*API, error) {
 	if err != nil {
 		return nil, err
 	}
+	v2.ConfigureManagedInhibition(opts.ManagedInhibition, opts.InhibitionKey)
 	connect := apiconnect.NewAPI(effective.connect)
 
 	requestsInFlight := prometheus.NewGauge(prometheus.GaugeOpts{

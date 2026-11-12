@@ -256,17 +256,26 @@ func (a *App) setup() error {
 
 	hostname, _ := os.Hostname()
 	var eventRec eventrecorder.Recorder
-	if ff.EnableEventRecorder() {
-		eventRec = eventrecorder.NewRecorderFromConfig(initialConf.EventRecorder, hostname, logger.With("component", "eventrecorder"), reg)
+	recorderConfig := initialConf.EventRecorder
+	if !ff.EnableEventRecorder() {
+		recorderConfig = eventrecorder.Config{}
 	}
+	recorderConfig, observationErr := eventrecorder.FixedObservationConfig(recorderConfig, eventrecorder.ObservationOptions{Enabled: opts.InhibitionObservations, URL: opts.InhibitionObservationURL, KeyFile: opts.InhibitionObservationKeyFile})
+	if observationErr != nil {
+		logger.Error("Inhibition observation sink unavailable", "err", observationErr)
+	}
+	if ff.EnableEventRecorder() || opts.InhibitionObservations {
+		eventRec = eventrecorder.NewRecorderFromConfig(recorderConfig, hostname, logger.With("component", "eventrecorder"), reg)
+	}
+	eventRec.SetObservationOptions(opts.InhibitionObservations, opts.InhibitionObservations && observationErr == nil)
 	a.onStop("event recorder", eventRec.Close)
 
 	recordCtx := eventrecorder.WithEventRecording(context.Background())
-	eventRec.RecordEvent(recordCtx, func() eventrecorder.EventData {
+	eventRec.RecordTypedEvent(recordCtx, "alertmanager_startup_event", func() eventrecorder.EventData {
 		return eventrecorder.NewAlertmanagerStartupEvent(version.Version, version.BuildContext())
 	})
 	a.onStop("shutdown event", func() error {
-		eventRec.RecordEvent(recordCtx, func() eventrecorder.EventData {
+		eventRec.RecordTypedEvent(recordCtx, "alertmanager_shutdown_event", func() eventrecorder.EventData {
 			return eventrecorder.NewAlertmanagerShutdownEvent()
 		})
 		return nil
@@ -379,6 +388,17 @@ func (a *App) setup() error {
 		clusterPeer = peer
 	}
 
+	configLogger := logger.With("component", "configuration")
+	configCoordinator := config.NewCoordinator(
+		opts.ConfigFile,
+		reg,
+		configLogger,
+	)
+	a.coordinator = configCoordinator
+	configCoordinator.ConfigureObservations(eventRec, recorderConfig, opts.InhibitionObservations && !ff.EnableEventRecorder())
+	if err := configCoordinator.EnableManagedInhibition(filepath.Join(opts.DataDir, "oscar-inhibition.json"), amInstanceID()); err != nil {
+		return err
+	}
 	apih, err := api.New(api.Options{
 		Alerts:                     alerts,
 		Silences:                   silences,
@@ -394,6 +414,8 @@ func (a *App) setup() error {
 		ConnectSendMaxBytes:        opts.ConnectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: opts.ConnectMaxRequestBodyBytes,
 		SilenceMutationKey:         opts.SilenceMutationKey,
+		InhibitionKey:              opts.InhibitionKey,
+		ManagedInhibition:          configCoordinator,
 		CORSHandler:                opts.CORSHandler,
 		Logger:                     logger.With("component", "api"),
 		Registry:                   reg,
@@ -449,14 +471,6 @@ func (a *App) setup() error {
 		tracingManager.Stop()
 		return nil
 	})
-
-	configLogger := logger.With("component", "configuration")
-	configCoordinator := config.NewCoordinator(
-		opts.ConfigFile,
-		reg,
-		configLogger,
-	)
-	a.coordinator = configCoordinator
 
 	// The reloader owns the config-scoped subgraph (templates, routes,
 	// receivers, pipeline, inhibitor, dispatcher). It rebuilds and swaps
@@ -546,4 +560,12 @@ func (a *App) setup() error {
 	}
 
 	return nil
+}
+
+func amInstanceID() string {
+	name, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return name
 }

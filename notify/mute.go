@@ -91,7 +91,15 @@ func (n *MuteStage) Exec(ctx context.Context, logger *slog.Logger, alerts ...*al
 	for _, a := range alerts {
 		// TODO(fabxc): increment total alerts counter.
 		// Do not send the alert if muted.
-		if n.muter.Mutes(ctx, a.LabelSet()) {
+		var isMuted bool
+		if full, ok := n.muter.(interface {
+			MutesAlert(context.Context, *alert.Alert) bool
+		}); ok {
+			isMuted = full.MutesAlert(ctx, a)
+		} else {
+			isMuted = n.muter.Mutes(ctx, a.LabelSet())
+		}
+		if isMuted {
 			muted = append(muted, a)
 		} else {
 			filtered = append(filtered, a)

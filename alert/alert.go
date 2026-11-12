@@ -52,6 +52,10 @@ type Alert struct {
 	// The fingerprint of Labels, computed once by New. The labels must not
 	// be modified after construction.
 	fingerprint model.Fingerprint
+
+	// Raw occurrence provenance exists only on notification copies whose EndsAt was cleared.
+	occurrenceEndsAt    time.Time
+	hasOccurrenceEndsAt bool
 }
 
 // New returns an Alert wrapping the given model.Alert. All Alerts must be
@@ -65,6 +69,25 @@ func New(a model.Alert, updatedAt time.Time, timeout bool) *Alert {
 		EndTimeSource: EndTimeSourceUnknown,
 		fingerprint:   a.Labels.Fingerprint(),
 	}
+}
+
+// ClearNotificationEnd preserves raw occurrence provenance before clearing the
+// firing notification copy's EndsAt. Callers must copy the stored alert first.
+func (a *Alert) ClearNotificationEnd() {
+	if !a.hasOccurrenceEndsAt {
+		a.occurrenceEndsAt = a.EndsAt
+		a.hasOccurrenceEndsAt = true
+	}
+	a.EndsAt = time.Time{}
+}
+
+// OccurrenceEndsAt returns the original occurrence end time for observation
+// snapshots; normal notification and inhibition decisions continue to use EndsAt.
+func (a *Alert) OccurrenceEndsAt() time.Time {
+	if a.hasOccurrenceEndsAt {
+		return a.occurrenceEndsAt
+	}
+	return a.EndsAt
 }
 
 // Fingerprint returns the fingerprint of the alert's labels, computed at

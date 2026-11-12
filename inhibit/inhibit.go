@@ -70,6 +70,9 @@ func NewInhibitor(ap provider.Alerts, rs []amcommoncfg.InhibitRule, logger *slog
 		}
 
 		r := NewInhibitRule(cr)
+		if recorder.Interested(eventrecorder.WithEventRecording(context.Background()), "inhibition_muted_alert") {
+			r.observation = eventrecorder.NewObservationRule(r.Name, r.SourceMatchers, r.TargetMatchers, r.Equal, cr.ManagedOrigin)
+		}
 		ih.rules = append(ih.rules, r)
 
 		if cr.Name != "" {
@@ -176,6 +179,15 @@ func (ih *Inhibitor) Stop() {
 // Mutes returns true iff the given label set is muted.  It implements the
 // Muter interface.
 func (ih *Inhibitor) Mutes(ctx context.Context, lset labelset.LabelSet) bool {
+	return ih.mutes(ctx, lset, nil)
+}
+
+// MutesAlert shares the native decision and records the full occurrence only on notification evaluation.
+func (ih *Inhibitor) MutesAlert(ctx context.Context, a *alert.Alert) bool {
+	return ih.mutes(ctx, a.LabelSet(), a)
+}
+
+func (ih *Inhibitor) mutes(ctx context.Context, lset labelset.LabelSet, target *alert.Alert) bool {
 	fp := lset.Fingerprint()
 
 	_, span := tracer.Start(ctx, "inhibit.Inhibitor.Mutes",
@@ -206,7 +218,8 @@ func (ih *Inhibitor) Mutes(ctx context.Context, lset labelset.LabelSet) bool {
 		)
 		// If we are here, the target side matches. If the source side matches, too, we
 		// need to exclude inhibiting alerts for which the same is true.
-		if inhibitedByFP, eq := r.hasEqual(lset.LabelSet, r.SourceMatchers.Matches(lset.LabelSet), now); eq {
+		exclude := r.SourceMatchers.Matches(lset.LabelSet)
+		if inhibitedByFP, source, eq := r.cache.findSelected(lset.LabelSet, now, func(a *alert.Alert) bool { return !exclude || !r.TargetMatchers.Matches(a.Labels) }); eq {
 			inhibitedBy = append(inhibitedBy, inhibitedByFP.String())
 			span.AddEvent("alert inhibited",
 				trace.WithAttributes(
@@ -214,13 +227,9 @@ func (ih *Inhibitor) Mutes(ctx context.Context, lset labelset.LabelSet) bool {
 				),
 			)
 
-			ih.recorder.RecordEvent(ctx, func() eventrecorder.EventData {
-				return eventrecorder.NewInhibitionMutedAlertEvent(
-					[]eventrecorder.InhibitRule{eventrecorder.NewInhibitRule(r.Name, r.SourceMatchers, r.TargetMatchers, r.Equal)},
-					fp, lset.LabelSet,
-					[]model.Fingerprint{inhibitedByFP},
-				)
-			})
+			if target != nil {
+				ih.recorder.RecordInhibition(ctx, r.observation, source, target, inhibitedByFP, fp)
+			}
 			return true
 		}
 	}
@@ -248,7 +257,8 @@ type InhibitRule struct {
 	Equal map[model.LabelName]struct{}
 
 	// Cache of alerts matching source labels.
-	cache *cache
+	cache       *cache
+	observation eventrecorder.ObservationRule
 }
 
 // NewInhibitRule returns a new InhibitRule based on a configuration definition.
