@@ -19,9 +19,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -109,4 +111,30 @@ func TestConversionAdmissionRequiresInstalledCallback(t *testing.T) {
 	guard.ServeHTTP(reply, conversionRequest([]byte("[]"), "webhookreceiver", key))
 	require.Equal(t, 503, reply.Code)
 	require.False(t, called)
+}
+
+type delayedConversionBody struct {
+	io.ReadCloser
+	delayed bool
+}
+
+func (b *delayedConversionBody) Read(p []byte) (int, error) {
+	if !b.delayed {
+		b.delayed = true
+		time.Sleep(61 * time.Second)
+	}
+	return b.ReadCloser.Read(p)
+}
+func TestConversionAdmissionExpiresWhileReadingBody(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		key := bytes.Repeat([]byte("w"), 32)
+		request := conversionRequest([]byte("[]"), "webhookreceiver", key)
+		request.Body = &delayedConversionBody{ReadCloser: request.Body}
+		called := false
+		guard := conversionAdmissionGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }), map[string][]byte{"webhookreceiver/v1": key})
+		reply := httptest.NewRecorder()
+		guard.ServeHTTP(reply, request)
+		require.Equal(t, 401, reply.Code)
+		require.False(t, called)
+	})
 }

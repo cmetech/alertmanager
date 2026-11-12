@@ -158,3 +158,22 @@ func TestConversionResolutionClockTolerance(t *testing.T) {
 		})
 	}
 }
+
+func TestConversionResolutionCannotExtendAlreadyResolvedEnd(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now()
+		p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), nil, nil)
+		require.NoError(t, err)
+		defer p.Close()
+		old := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"}, Annotations: model.LabelSet{conversionAnnotation: "owned"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(-time.Second)}, now, false)
+		require.NoError(t, p.Put(t.Context(), old))
+		incoming := *old
+		incoming.Annotations = old.Annotations.Clone()
+		incoming.Annotations["__oscar_fingerprint_conversion_resolution"] = model.LabelValue(alert.ConversionResolutionReceipt(old))
+		incoming.EndsAt = now.Add(time.Second)
+		require.Error(t, p.PutResolvedConversion(t.Context(), &incoming))
+		current, err := p.Get(old.Fingerprint())
+		require.NoError(t, err)
+		require.Equal(t, old.EndsAt, current.EndsAt)
+	})
+}

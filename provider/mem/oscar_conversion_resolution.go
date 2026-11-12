@@ -46,7 +46,7 @@ func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Ale
 		switch {
 		case err != nil:
 			reason = "missing"
-		case incoming.Timeout || incoming.EndsAt.IsZero() || incoming.EndsAt.After(nativeNow) || incoming.EndsAt.Before(old.StartsAt):
+		case incoming.Timeout || incoming.EndsAt.IsZero() || incoming.EndsAt.After(nativeNow) || incoming.EndsAt.Before(old.StartsAt) || incoming.EndsAt.After(old.EndsAt):
 			reason = "lifecycle"
 		case receipt != alert.ConversionResolutionReceipt(old):
 			reason = "receipt"

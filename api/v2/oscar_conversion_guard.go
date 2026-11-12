@@ -105,6 +105,12 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 			http.Error(w, "invalid conversion body", 413)
 			return
 		}
+		// A slow sender cannot keep an otherwise valid assertion alive while the
+		// bounded exact body is read. Admission time is checked again at handoff.
+		if seconds < time.Now().Unix()-60 || seconds > time.Now().Unix()+5 {
+			http.Error(w, "invalid conversion admission", 401)
+			return
+		}
 		sum := sha256.Sum256(body)
 		message := strings.Join([]string{"native-conversion-ingress-v1", "POST", "/api/v2/alerts", actor, kid, stamp, hex.EncodeToString(sum[:])}, "\n")
 		mac := hmac.New(sha256.New, key)
