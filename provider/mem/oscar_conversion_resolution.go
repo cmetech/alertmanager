@@ -36,12 +36,29 @@ func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Ale
 		receipt := string(supplied.Annotations["__oscar_fingerprint_conversion_resolution"])
 		delete(supplied.Annotations, "__oscar_fingerprint_conversion_resolution")
 		incoming = &supplied
-		if err != nil || incoming.Timeout || !incoming.Resolved() || incoming.EndsAt.Before(old.StartsAt) ||
-			receipt != alert.ConversionResolutionReceipt(old) || !incoming.Labels.Equal(old.Labels) || !incoming.Annotations.Equal(old.Annotations) ||
-			old.Annotations[conversionAnnotation] == "" || incoming.GeneratorURL != old.GeneratorURL ||
-			!(incoming.StartsAt.Equal(old.StartsAt) || incoming.StartsAt.Equal(old.StartsAt.Truncate(time.Millisecond))) {
-			return errors.New("conversion resolution current-entry precondition failed")
+		reason := ""
+		switch {
+		case err != nil:
+			reason = "missing"
+		case incoming.Timeout || !incoming.Resolved() || incoming.EndsAt.Before(old.StartsAt):
+			reason = "lifecycle"
+		case receipt != alert.ConversionResolutionReceipt(old):
+			reason = "receipt"
+		case !incoming.Labels.Equal(old.Labels):
+			reason = "labels"
+		case !incoming.Annotations.Equal(old.Annotations):
+			reason = "annotations"
+		case old.Annotations[conversionAnnotation] == "":
+			reason = "capsule"
+		case incoming.GeneratorURL != old.GeneratorURL:
+			reason = "generator"
+		case !(incoming.StartsAt.Equal(old.StartsAt) || incoming.StartsAt.Equal(old.StartsAt.Truncate(time.Millisecond))):
+			reason = "episode"
 		}
+		if reason != "" {
+			return errors.New("conversion resolution current-entry precondition failed: " + reason)
+		}
+
 		// GET serializes milliseconds. Exact current capsule + complete contents and
 		// the codec's exact timestamp projection identify the same current statement.
 		// Retain native's precise original episode timestamp and annotations.
