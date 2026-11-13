@@ -35,8 +35,12 @@ paths:
             $ref: '#/definitions/oscarInhibitionStatus'
         '403':
           description: Invalid or missing service credential
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
         '503':
           description: Managed coordinator unavailable
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
   /oscar/inhibition/validate:
     post:
       tags: [oscarInhibition]
@@ -60,8 +64,12 @@ paths:
             $ref: '#/definitions/oscarInhibitionError'
         '403':
           description: Invalid or missing service credential
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
         '413':
           description: Request exceeds byte limit
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
   /oscar/inhibition/rules:
     put:
       tags: [oscarInhibition]
@@ -872,6 +880,9 @@ definitions:
           startsAt:
             type: string
             format: date-time
+          startsAtRaw:
+            type: string
+            description: Exact UTC RFC3339Nano native occurrence start; startsAt retains its existing millisecond serialization.
           updatedAt:
             type: string
             format: date-time

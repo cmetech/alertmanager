@@ -502,3 +502,30 @@ func TestObservationCaptureDropDoesNotWaitForOutputHealth(t *testing.T) {
 		t.Fatal("alert thread waited for output health mutex")
 	}
 }
+
+// Existing interested outputs share the bounded first-plus-refresh observation cadence.
+func TestObservationExistingOutputCadenceCompatibility(t *testing.T) {
+	t.Parallel()
+	source, target, rule := observationFixture()
+	target.Labels = model.LabelSet{}
+	for i := range 40 {
+		target.Labels[model.LabelName(fmt.Sprintf("label_%02d", i))] = "value"
+	}
+	r := queueRecorder(4)
+	existing := newMockDestination("existing-output")
+	r.core.setOutputs([]Destination{existing})
+	require.True(t, observe(r, source, target, rule))
+	require.False(t, observe(r, source, target, rule))
+	first := <-r.core.events
+	event := first.event.message.GetData().GetInhibitionMutedAlert()
+	require.Len(t, event.MutedAlert.Labels, 32)
+	require.True(t, event.Observation.Target.LabelsTruncated)
+	r.core.marshalAndSend(first, []Destination{existing})
+	for key := range r.core.admissions.recent {
+		r.core.admissions.recent[key] = time.Now().Add(-ObservationRefresh)
+	}
+	require.True(t, observe(r, source, target, rule))
+	require.Equal(t, 10*time.Minute, ObservationRefresh)
+	r.core.marshalAndSend(<-r.core.events, []Destination{existing})
+	require.Equal(t, 2, existing.eventCount())
+}

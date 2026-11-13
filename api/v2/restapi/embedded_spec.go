@@ -439,10 +439,16 @@ func init() {
             }
           },
           "403": {
-            "description": "Invalid or missing service credential"
+            "description": "Invalid or missing service credential",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           },
           "503": {
-            "description": "Managed coordinator unavailable"
+            "description": "Managed coordinator unavailable",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           }
         }
       }
@@ -481,10 +487,16 @@ func init() {
             }
           },
           "403": {
-            "description": "Invalid or missing service credential"
+            "description": "Invalid or missing service credential",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           },
           "413": {
-            "description": "Request exceeds byte limit"
+            "description": "Request exceeds byte limit",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           }
         }
       }
@@ -870,6 +882,10 @@ func init() {
             "startsAt": {
               "type": "string",
               "format": "date-time"
+            },
+            "startsAtRaw": {
+              "description": "Exact UTC RFC3339Nano native occurrence start; startsAt retains its existing millisecond serialization.",
+              "type": "string"
             },
             "status": {
               "$ref": "#/definitions/alertStatus"
@@ -1996,10 +2012,16 @@ func init() {
             }
           },
           "403": {
-            "description": "Invalid or missing service credential"
+            "description": "Invalid or missing service credential",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           },
           "503": {
-            "description": "Managed coordinator unavailable"
+            "description": "Managed coordinator unavailable",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           }
         }
       }
@@ -2042,10 +2064,16 @@ func init() {
             }
           },
           "403": {
-            "description": "Invalid or missing service credential"
+            "description": "Invalid or missing service credential",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           },
           "413": {
-            "description": "Request exceeds byte limit"
+            "description": "Request exceeds byte limit",
+            "schema": {
+              "$ref": "#/definitions/oscarInhibitionError"
+            }
           }
         }
       }
@@ -2537,6 +2565,10 @@ func init() {
             "startsAt": {
               "type": "string",
               "format": "date-time"
+            },
+            "startsAtRaw": {
+              "description": "Exact UTC RFC3339Nano native occurrence start; startsAt retains its existing millisecond serialization.",
+              "type": "string"
             },
             "status": {
               "$ref": "#/definitions/alertStatus"

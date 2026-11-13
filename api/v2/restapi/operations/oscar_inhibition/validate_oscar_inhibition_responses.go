@@ -126,6 +126,11 @@ ValidateOscarInhibitionForbidden Invalid or missing service credential
 swagger:response validateOscarInhibitionForbidden
 */
 type ValidateOscarInhibitionForbidden struct {
+
+	/*
+	  In: Body
+	*/
+	Payload *models.OscarInhibitionError `json:"body,omitempty"`
 }
 
 // NewValidateOscarInhibitionForbidden creates ValidateOscarInhibitionForbidden with default headers values
@@ -134,12 +139,27 @@ func NewValidateOscarInhibitionForbidden() *ValidateOscarInhibitionForbidden {
 	return &ValidateOscarInhibitionForbidden{}
 }
 
+// WithPayload adds the payload to the validate oscar inhibition forbidden response
+func (o *ValidateOscarInhibitionForbidden) WithPayload(payload *models.OscarInhibitionError) *ValidateOscarInhibitionForbidden {
+	o.Payload = payload
+	return o
+}
+
+// SetPayload sets the payload to the validate oscar inhibition forbidden response
+func (o *ValidateOscarInhibitionForbidden) SetPayload(payload *models.OscarInhibitionError) {
+	o.Payload = payload
+}
+
 // WriteResponse to the client
 func (o *ValidateOscarInhibitionForbidden) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
 
-	rw.Header().Del(runtime.HeaderContentType) // Remove Content-Type on empty responses
-
 	rw.WriteHeader(403)
+	if o.Payload != nil {
+		payload := o.Payload
+		if err := producer.Produce(rw, payload); err != nil {
+			panic(err) // let the recovery middleware deal with this
+		}
+	}
 }
 
 // ValidateOscarInhibitionRequestEntityTooLargeCode is the HTTP code returned for type ValidateOscarInhibitionRequestEntityTooLarge
@@ -151,6 +171,11 @@ ValidateOscarInhibitionRequestEntityTooLarge Request exceeds byte limit
 swagger:response validateOscarInhibitionRequestEntityTooLarge
 */
 type ValidateOscarInhibitionRequestEntityTooLarge struct {
+
+	/*
+	  In: Body
+	*/
+	Payload *models.OscarInhibitionError `json:"body,omitempty"`
 }
 
 // NewValidateOscarInhibitionRequestEntityTooLarge creates ValidateOscarInhibitionRequestEntityTooLarge with default headers values
@@ -159,10 +184,25 @@ func NewValidateOscarInhibitionRequestEntityTooLarge() *ValidateOscarInhibitionR
 	return &ValidateOscarInhibitionRequestEntityTooLarge{}
 }
 
+// WithPayload adds the payload to the validate oscar inhibition request entity too large response
+func (o *ValidateOscarInhibitionRequestEntityTooLarge) WithPayload(payload *models.OscarInhibitionError) *ValidateOscarInhibitionRequestEntityTooLarge {
+	o.Payload = payload
+	return o
+}
+
+// SetPayload sets the payload to the validate oscar inhibition request entity too large response
+func (o *ValidateOscarInhibitionRequestEntityTooLarge) SetPayload(payload *models.OscarInhibitionError) {
+	o.Payload = payload
+}
+
 // WriteResponse to the client
 func (o *ValidateOscarInhibitionRequestEntityTooLarge) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
 
-	rw.Header().Del(runtime.HeaderContentType) // Remove Content-Type on empty responses
-
 	rw.WriteHeader(413)
+	if o.Payload != nil {
+		payload := o.Payload
+		if err := producer.Produce(rw, payload); err != nil {
+			panic(err) // let the recovery middleware deal with this
+		}
+	}
 }

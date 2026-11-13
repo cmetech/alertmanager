@@ -152,6 +152,7 @@ GetOscarInhibitionStatusForbidden describes a response with status code 403, wit
 Invalid or missing service credential
 */
 type GetOscarInhibitionStatusForbidden struct {
+	Payload *models.OscarInhibitionError
 }
 
 // IsSuccess returns true when this get oscar inhibition status forbidden response has a 2xx status code
@@ -185,14 +186,27 @@ func (o *GetOscarInhibitionStatusForbidden) Code() int {
 }
 
 func (o *GetOscarInhibitionStatusForbidden) Error() string {
-	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusForbidden", 403)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusForbidden %s", 403, payload)
 }
 
 func (o *GetOscarInhibitionStatusForbidden) String() string {
-	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusForbidden", 403)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusForbidden %s", 403, payload)
+}
+
+func (o *GetOscarInhibitionStatusForbidden) GetPayload() *models.OscarInhibitionError {
+	return o.Payload
 }
 
 func (o *GetOscarInhibitionStatusForbidden) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+
+	o.Payload = new(models.OscarInhibitionError)
+
+	// response payload
+	if err := consumer.Consume(response.Body(), o.Payload); err != nil && !stderrors.Is(err, io.EOF) {
+		return err
+	}
 
 	return nil
 }
@@ -208,6 +222,7 @@ GetOscarInhibitionStatusServiceUnavailable describes a response with status code
 Managed coordinator unavailable
 */
 type GetOscarInhibitionStatusServiceUnavailable struct {
+	Payload *models.OscarInhibitionError
 }
 
 // IsSuccess returns true when this get oscar inhibition status service unavailable response has a 2xx status code
@@ -241,14 +256,27 @@ func (o *GetOscarInhibitionStatusServiceUnavailable) Code() int {
 }
 
 func (o *GetOscarInhibitionStatusServiceUnavailable) Error() string {
-	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusServiceUnavailable", 503)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusServiceUnavailable %s", 503, payload)
 }
 
 func (o *GetOscarInhibitionStatusServiceUnavailable) String() string {
-	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusServiceUnavailable", 503)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[GET /oscar/inhibition/status][%d] getOscarInhibitionStatusServiceUnavailable %s", 503, payload)
+}
+
+func (o *GetOscarInhibitionStatusServiceUnavailable) GetPayload() *models.OscarInhibitionError {
+	return o.Payload
 }
 
 func (o *GetOscarInhibitionStatusServiceUnavailable) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+
+	o.Payload = new(models.OscarInhibitionError)
+
+	// response payload
+	if err := consumer.Consume(response.Body(), o.Payload); err != nil && !stderrors.Is(err, io.EOF) {
+		return err
+	}
 
 	return nil
 }

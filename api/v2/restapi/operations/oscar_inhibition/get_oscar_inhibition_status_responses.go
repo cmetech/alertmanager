@@ -103,6 +103,11 @@ GetOscarInhibitionStatusForbidden Invalid or missing service credential
 swagger:response getOscarInhibitionStatusForbidden
 */
 type GetOscarInhibitionStatusForbidden struct {
+
+	/*
+	  In: Body
+	*/
+	Payload *models.OscarInhibitionError `json:"body,omitempty"`
 }
 
 // NewGetOscarInhibitionStatusForbidden creates GetOscarInhibitionStatusForbidden with default headers values
@@ -111,12 +116,27 @@ func NewGetOscarInhibitionStatusForbidden() *GetOscarInhibitionStatusForbidden {
 	return &GetOscarInhibitionStatusForbidden{}
 }
 
+// WithPayload adds the payload to the get oscar inhibition status forbidden response
+func (o *GetOscarInhibitionStatusForbidden) WithPayload(payload *models.OscarInhibitionError) *GetOscarInhibitionStatusForbidden {
+	o.Payload = payload
+	return o
+}
+
+// SetPayload sets the payload to the get oscar inhibition status forbidden response
+func (o *GetOscarInhibitionStatusForbidden) SetPayload(payload *models.OscarInhibitionError) {
+	o.Payload = payload
+}
+
 // WriteResponse to the client
 func (o *GetOscarInhibitionStatusForbidden) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
 
-	rw.Header().Del(runtime.HeaderContentType) // Remove Content-Type on empty responses
-
 	rw.WriteHeader(403)
+	if o.Payload != nil {
+		payload := o.Payload
+		if err := producer.Produce(rw, payload); err != nil {
+			panic(err) // let the recovery middleware deal with this
+		}
+	}
 }
 
 // GetOscarInhibitionStatusServiceUnavailableCode is the HTTP code returned for type GetOscarInhibitionStatusServiceUnavailable
@@ -128,6 +148,11 @@ GetOscarInhibitionStatusServiceUnavailable Managed coordinator unavailable
 swagger:response getOscarInhibitionStatusServiceUnavailable
 */
 type GetOscarInhibitionStatusServiceUnavailable struct {
+
+	/*
+	  In: Body
+	*/
+	Payload *models.OscarInhibitionError `json:"body,omitempty"`
 }
 
 // NewGetOscarInhibitionStatusServiceUnavailable creates GetOscarInhibitionStatusServiceUnavailable with default headers values
@@ -136,10 +161,25 @@ func NewGetOscarInhibitionStatusServiceUnavailable() *GetOscarInhibitionStatusSe
 	return &GetOscarInhibitionStatusServiceUnavailable{}
 }
 
+// WithPayload adds the payload to the get oscar inhibition status service unavailable response
+func (o *GetOscarInhibitionStatusServiceUnavailable) WithPayload(payload *models.OscarInhibitionError) *GetOscarInhibitionStatusServiceUnavailable {
+	o.Payload = payload
+	return o
+}
+
+// SetPayload sets the payload to the get oscar inhibition status service unavailable response
+func (o *GetOscarInhibitionStatusServiceUnavailable) SetPayload(payload *models.OscarInhibitionError) {
+	o.Payload = payload
+}
+
 // WriteResponse to the client
 func (o *GetOscarInhibitionStatusServiceUnavailable) WriteResponse(rw http.ResponseWriter, producer runtime.Producer) {
 
-	rw.Header().Del(runtime.HeaderContentType) // Remove Content-Type on empty responses
-
 	rw.WriteHeader(503)
+	if o.Payload != nil {
+		payload := o.Payload
+		if err := producer.Produce(rw, payload); err != nil {
+			panic(err) // let the recovery middleware deal with this
+		}
+	}
 }

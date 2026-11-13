@@ -219,6 +219,7 @@ ValidateOscarInhibitionForbidden describes a response with status code 403, with
 Invalid or missing service credential
 */
 type ValidateOscarInhibitionForbidden struct {
+	Payload *models.OscarInhibitionError
 }
 
 // IsSuccess returns true when this validate oscar inhibition forbidden response has a 2xx status code
@@ -252,14 +253,27 @@ func (o *ValidateOscarInhibitionForbidden) Code() int {
 }
 
 func (o *ValidateOscarInhibitionForbidden) Error() string {
-	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionForbidden", 403)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionForbidden %s", 403, payload)
 }
 
 func (o *ValidateOscarInhibitionForbidden) String() string {
-	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionForbidden", 403)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionForbidden %s", 403, payload)
+}
+
+func (o *ValidateOscarInhibitionForbidden) GetPayload() *models.OscarInhibitionError {
+	return o.Payload
 }
 
 func (o *ValidateOscarInhibitionForbidden) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+
+	o.Payload = new(models.OscarInhibitionError)
+
+	// response payload
+	if err := consumer.Consume(response.Body(), o.Payload); err != nil && !stderrors.Is(err, io.EOF) {
+		return err
+	}
 
 	return nil
 }
@@ -275,6 +289,7 @@ ValidateOscarInhibitionRequestEntityTooLarge describes a response with status co
 Request exceeds byte limit
 */
 type ValidateOscarInhibitionRequestEntityTooLarge struct {
+	Payload *models.OscarInhibitionError
 }
 
 // IsSuccess returns true when this validate oscar inhibition request entity too large response has a 2xx status code
@@ -308,14 +323,27 @@ func (o *ValidateOscarInhibitionRequestEntityTooLarge) Code() int {
 }
 
 func (o *ValidateOscarInhibitionRequestEntityTooLarge) Error() string {
-	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionRequestEntityTooLarge", 413)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionRequestEntityTooLarge %s", 413, payload)
 }
 
 func (o *ValidateOscarInhibitionRequestEntityTooLarge) String() string {
-	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionRequestEntityTooLarge", 413)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[POST /oscar/inhibition/validate][%d] validateOscarInhibitionRequestEntityTooLarge %s", 413, payload)
+}
+
+func (o *ValidateOscarInhibitionRequestEntityTooLarge) GetPayload() *models.OscarInhibitionError {
+	return o.Payload
 }
 
 func (o *ValidateOscarInhibitionRequestEntityTooLarge) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+
+	o.Payload = new(models.OscarInhibitionError)
+
+	// response payload
+	if err := consumer.Consume(response.Body(), o.Payload); err != nil && !stderrors.Is(err, io.EOF) {
+		return err
+	}
 
 	return nil
 }

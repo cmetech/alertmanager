@@ -107,3 +107,22 @@ is a separate `ui/app/Makefile` target using OpenAPI Generator 3.3.4. Do not edi
 generated sources manually. The managed endpoints use strict raw handlers before
 the generated router so malformed input and safe operation errors have consistent
 native shapes.
+
+
+The additive `gettableAlert.startsAtRaw` field carries the exact UTC
+RFC3339Nano occurrence start used by observation identity. Existing `startsAt`
+keeps millisecond serialization and native page contract version 2 remains
+compatible for older readers. OSCAR's new image pin is required to provide the
+raw field for exact sub-millisecond Active Alert relationship discovery; it must
+never be reconstructed from the legacy datetime field. Go and Elm contracts are
+regenerated together. Status403/503 and validation403/413 now reference the
+existing structured error model in generated callers as in actual handlers.
+
+The first-plus-ten-minute-refresh cadence and bounded labels apply to every
+existing interested recorder output, not only the fixed OSCAR sink. Existing
+consumers no longer receive a fresh inhibition event on every evaluation. Maps
+have at most32 entries with the byte limits above; truncation is explicit.
+Admission/cache-pressure exceptions can bypass coalescing. Consumers must treat
+these as sampled observations, never complete suppression counts or a transition
+journal. `TestObservationExistingOutputCadenceCompatibility` asserts this output
+contract without restoring expensive per-evaluation snapshots.

@@ -1,0 +1,68 @@
+[
+  {
+    "annotations": {},
+    "endsAt": "2026-11-12T12:00:00.123Z",
+    "fingerprint": "ada81e74cfa7fc2c",
+    "receivers": [
+      {
+        "name": "default"
+      }
+    ],
+    "startsAt": "2026-11-12T11:00:00.123Z",
+    "startsAtRaw": "2026-11-12T11:00:00.123456789Z",
+    "status": {
+      "inhibitedBy": [],
+      "mutedBy": [],
+      "silencedBy": [],
+      "state": "active"
+    },
+    "updatedAt": "2026-11-12T11:00:01.123Z",
+    "labels": {
+      "alertname": "Root"
+    }
+  },
+  {
+    "annotations": {},
+    "endsAt": "2026-11-12T12:00:00.123Z",
+    "fingerprint": "9a897ffffced3c5f",
+    "receivers": [
+      {
+        "name": "default"
+      }
+    ],
+    "startsAt": "2026-11-12T11:00:00.123Z",
+    "startsAtRaw": "2026-11-12T11:00:00.123456789Z",
+    "status": {
+      "inhibitedBy": [],
+      "mutedBy": [],
+      "silencedBy": [],
+      "state": "active"
+    },
+    "updatedAt": "2026-11-12T11:00:01.123Z",
+    "labels": {
+      "alertname": "Target"
+    }
+  },
+  {
+    "annotations": {},
+    "endsAt": "2026-11-12T12:00:00.123Z",
+    "fingerprint": "9a897ffffced3c5f",
+    "receivers": [
+      {
+        "name": "default"
+      }
+    ],
+    "startsAt": "2026-11-12T11:00:00.123Z",
+    "startsAtRaw": "2026-11-12T11:00:00.123456788Z",
+    "status": {
+      "inhibitedBy": [],
+      "mutedBy": [],
+      "silencedBy": [],
+      "state": "active"
+    },
+    "updatedAt": "2026-11-12T11:00:01.123Z",
+    "labels": {
+      "alertname": "Target"
+    }
+  }
+]

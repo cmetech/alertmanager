@@ -169,6 +169,7 @@ func AlertToOpenAPIAlert(source *alert.Alert, status alert.AlertStatus, receiver
 		},
 		Annotations: ModelLabelSetToAPILabelSet(source.Annotations),
 		StartsAt:    &startsAt,
+		StartsAtRaw: source.StartsAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt:   &updatedAt,
 		EndsAt:      &endsAt,
 		Fingerprint: &fp,
