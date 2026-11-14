@@ -65,6 +65,8 @@ func run() int {
 		perAlertNameLimit                 = kingpin.Flag("alerts.per-alertname-limit", "Maximum number of alerts per alertname. If negative or zero, no limit is set.").Default("0").Int()
 		dispatchMaintenanceInterval       = kingpin.Flag("dispatch.maintenance-interval", "Interval between maintenance of aggregation groups in the dispatcher.").Default("30s").Duration()
 		dispatchStartDelay                = kingpin.Flag("dispatch.start-delay", "Minimum amount of time to wait before dispatching alerts. This option should be synced with value of --rules.alert.resend-delay on Prometheus.").Default("0s").Duration()
+		oscarConversionKeys               = kingpin.Flag("oscar.conversion-ingress-key", "Confined producer/key-id:secret-file admission binding; repeat for each actor.").Strings()
+		oscarConversionCallbackKey        = kingpin.Flag("oscar.conversion-callback-key-file", "Expected native callback credential for conversion admission readiness.").String()
 
 		webConfig                  = webflag.AddFlags(kingpin.CommandLine, ":9093")
 		externalURL                = kingpin.Flag("web.external-url", "The URL under which Alertmanager is externally reachable (for example, if Alertmanager is served via a reverse proxy). Used for generating relative and absolute links back to Alertmanager itself. If the URL has a path portion, it will be used to prefix all HTTP endpoints served by Alertmanager. If omitted, relevant URL components will be derived automatically.").String()
@@ -145,6 +147,46 @@ func run() int {
 	if err != nil {
 		logger.Error("error parsing the feature flag list", "err", err)
 		return 1
+	}
+	conversionKeys := map[string][]byte{}
+	for _, binding := range *oscarConversionKeys {
+		name, path, ok := strings.Cut(binding, ":")
+		parts := strings.Split(name, "/")
+		if !ok || len(parts) != 2 || parts[1] != "v1" || (parts[0] != "webhookreceiver" && parts[0] != "trapreceiver" && parts[0] != "alertmanager-resolution") {
+			logger.Error("invalid confined conversion admission binding")
+			return 1
+		}
+		if _, duplicate := conversionKeys[name]; duplicate {
+			logger.Error("duplicate conversion admission binding")
+			return 1
+		}
+		key, err := readOscarSilenceMutationKey(path)
+		if err != nil {
+			logger.Error("conversion admission key unavailable")
+			return 1
+		}
+		for _, other := range conversionKeys {
+			if string(other) == string(key) {
+				logger.Error("conversion admission keys must differ")
+				return 1
+			}
+		}
+		conversionKeys[name] = key
+	}
+	var conversionCallbackKey []byte
+	if len(conversionKeys) > 0 {
+		var err error
+		conversionCallbackKey, err = readOscarSilenceMutationKey(*oscarConversionCallbackKey)
+		if err != nil {
+			logger.Error("conversion callback key unavailable")
+			return 1
+		}
+		for _, key := range conversionKeys {
+			if string(key) == string(conversionCallbackKey) {
+				logger.Error("conversion callback/admission keys must differ")
+				return 1
+			}
+		}
 	}
 	compat.InitFromFlags(logger, ff)
 
@@ -236,6 +278,8 @@ func run() int {
 		InhibitionObservations:       *oscarInhibitionObservations,
 		InhibitionObservationURL:     *oscarInhibitionObservationURL,
 		InhibitionObservationKeyFile: *oscarInhibitionObservationKeyFile,
+		ConversionAdmissionKeys:      conversionKeys,
+		ConversionCallbackKey:        conversionCallbackKey,
 
 		ClusterBindAddr:        *clusterBindAddr,
 		ClusterAdvertiseAddr:   *clusterAdvertiseAddr,

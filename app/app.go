@@ -416,6 +416,8 @@ func (a *App) setup() error {
 		SilenceMutationKey:         opts.SilenceMutationKey,
 		InhibitionKey:              opts.InhibitionKey,
 		ManagedInhibition:          configCoordinator,
+		ConversionAdmissionKeys:    opts.ConversionAdmissionKeys,
+		ConversionCallbackKey:      opts.ConversionCallbackKey,
 		CORSHandler:                opts.CORSHandler,
 		Logger:                     logger.With("component", "api"),
 		Registry:                   reg,

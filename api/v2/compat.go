@@ -182,6 +182,9 @@ func AlertToOpenAPIAlert(source *alert.Alert, status alert.AlertStatus, receiver
 		},
 	}
 
+	if source.Annotations[conversionAnnotation] != "" {
+		aa.Annotations["__oscar_fingerprint_conversion_resolution"] = alert.ConversionResolutionReceipt(source)
+	}
 	if aa.Status.SilencedBy == nil {
 		aa.Status.SilencedBy = []string{}
 	}

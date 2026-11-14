@@ -85,6 +85,8 @@ type Options struct {
 	InhibitionObservations       bool
 	InhibitionObservationURL     string
 	InhibitionObservationKeyFile string
+	ConversionAdmissionKeys      map[string][]byte
+	ConversionCallbackKey        []byte
 
 	// Cluster.
 	ClusterBindAddr        string

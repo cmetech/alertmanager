@@ -126,3 +126,11 @@ Admission/cache-pressure exceptions can bypass coalescing. Consumers must treat
 these as sampled observations, never complete suppression counts or a transition
 journal. `TestObservationExistingOutputCadenceCompatibility` asserts this output
 contract without restoring expensive per-evaluation snapshots.
+
+
+The API setup installs conversion admission before wrapping the managed
+inhibition endpoint. Conversion admission retains its original base handler, so
+reinstalling that wrapper afterward would hide the managed guard/API. The app
+regression configures conversion, inhibition and silence credentials together
+and invokes their mounted handlers without starting listeners. Conversion
+resolution receipts remain additive to exact startsAtRaw serialization.

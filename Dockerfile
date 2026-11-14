@@ -6,6 +6,7 @@ LABEL org.opencontainers.image.source="https://github.com/cmetech/alertmanager"
 LABEL org.oscar.alertmanager.page-contract="2"
 LABEL org.oscar.alertmanager.inhibition-contract="1"
 LABEL org.oscar.alertmanager.silence-mutation-auth="1"
+LABEL org.oscar.alertmanager.conversion-ingress="1"
 
 ARG ARCH="amd64"
 ARG OS="linux"
