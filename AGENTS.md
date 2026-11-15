@@ -2,6 +2,8 @@
 
 Guidance for AI coding agents working in this repository. Keep this file concise and current. For end‑user docs, see `README.md` and https://prometheus.io/docs/alerting/alertmanager/.
 
+OSCAR Mantine branding uses `/api/branding/assets/{favicon,logoLight,logoDark}/` on the OSCAR origin; images refresh on reload and logos follow light/dark mode. The endpoint is supplied by OSCAR AdminUI, not the Alertmanager API. Standalone header failure falls back to text.
+
 ## Project overview
 
 Alertmanager handles alerts sent by clients such as Prometheus. It deduplicates, groups, routes, silences, and inhibits alerts, and dispatches them to receiver integrations (email, PagerDuty, Slack, webhook, etc.).

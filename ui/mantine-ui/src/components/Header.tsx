@@ -1,10 +1,11 @@
-import { AppShell, Burger, Button, Group, Menu, Text } from '@mantine/core';
+import { AppShell, Burger, Button, Group, Menu } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { Link, NavLink, Route, Routes } from 'react-router-dom';
 
 import { AlertsPage } from '@/pages/Alerts.page';
 import { SilencesPage } from '@/pages/Silences.page';
 
+import { BrandingLogo } from './BrandingLogo';
 import classes from './Header.module.css';
 
 const navLinkXPadding = 'md';
@@ -145,8 +146,7 @@ export const Header = () => {
           <Group gap={40} wrap="nowrap">
             <Link to="/" style={{ textDecoration: 'none', color: 'var(--mantine-color-text)' }}>
               <Group gap={10} wrap="nowrap">
-                {/* <img src={PrometheusLogo} height={30} /> */}
-                <Text fz={20}>Alertmanager</Text>
+                <BrandingLogo />
               </Group>
             </Link>
             <Group gap={12} visibleFrom="sm" wrap="nowrap">

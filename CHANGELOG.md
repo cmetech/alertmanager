@@ -1,3 +1,7 @@
+## OSCAR runtime branding — 2026-11-15
+
+- Mantine UI uses OSCAR's managed favicon and appearance-specific logo through the public branding asset endpoint. Uploaded branding takes precedence; standalone deployments retain a text header if OSCAR assets are unavailable.
+
 ## main / (unreleased)
 
 Please do **not** add any entries in this section. If your change affects
