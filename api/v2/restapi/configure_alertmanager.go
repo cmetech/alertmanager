@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroup"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/general"
+	"github.com/prometheus/alertmanager/api/v2/restapi/operations/oscar_inhibition"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/receiver"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/silence"
 )
@@ -85,6 +86,13 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 			return middleware.NotImplemented("operation alert.GetOscarAlertsPage has not yet been implemented")
 		})
 	}
+	if api.OscarInhibitionGetOscarInhibitionStatusHandler == nil {
+		api.OscarInhibitionGetOscarInhibitionStatusHandler = oscar_inhibition.GetOscarInhibitionStatusHandlerFunc(func(params oscar_inhibition.GetOscarInhibitionStatusParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation oscar_inhibition.GetOscarInhibitionStatus has not yet been implemented")
+		})
+	}
 	if api.ReceiverGetReceiversHandler == nil {
 		api.ReceiverGetReceiversHandler = receiver.GetReceiversHandlerFunc(func(params receiver.GetReceiversParams) middleware.Responder {
 			_ = params
@@ -125,6 +133,20 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 			_ = params
 
 			return middleware.NotImplemented("operation silence.PostSilences has not yet been implemented")
+		})
+	}
+	if api.OscarInhibitionPutOscarInhibitionRulesHandler == nil {
+		api.OscarInhibitionPutOscarInhibitionRulesHandler = oscar_inhibition.PutOscarInhibitionRulesHandlerFunc(func(params oscar_inhibition.PutOscarInhibitionRulesParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation oscar_inhibition.PutOscarInhibitionRules has not yet been implemented")
+		})
+	}
+	if api.OscarInhibitionValidateOscarInhibitionHandler == nil {
+		api.OscarInhibitionValidateOscarInhibitionHandler = oscar_inhibition.ValidateOscarInhibitionHandlerFunc(func(params oscar_inhibition.ValidateOscarInhibitionParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation oscar_inhibition.ValidateOscarInhibition has not yet been implemented")
 		})
 	}
 

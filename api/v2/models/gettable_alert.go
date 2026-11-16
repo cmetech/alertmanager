@@ -57,6 +57,9 @@ type GettableAlert struct {
 	// Format: date-time
 	StartsAt *strfmt.DateTime `json:"startsAt"`
 
+	// Exact UTC RFC3339Nano native occurrence start; startsAt retains its existing millisecond serialization.
+	StartsAtRaw string `json:"startsAtRaw,omitempty"`
+
 	// status
 	// Required: true
 	Status *AlertStatus `json:"status"`
@@ -83,6 +86,8 @@ func (m *GettableAlert) UnmarshalJSON(raw []byte) error {
 
 		StartsAt *strfmt.DateTime `json:"startsAt"`
 
+		StartsAtRaw string `json:"startsAtRaw,omitempty"`
+
 		Status *AlertStatus `json:"status"`
 
 		UpdatedAt *strfmt.DateTime `json:"updatedAt"`
@@ -100,6 +105,8 @@ func (m *GettableAlert) UnmarshalJSON(raw []byte) error {
 	m.Receivers = dataAO0.Receivers
 
 	m.StartsAt = dataAO0.StartsAt
+
+	m.StartsAtRaw = dataAO0.StartsAtRaw
 
 	m.Status = dataAO0.Status
 
@@ -130,6 +137,8 @@ func (m GettableAlert) MarshalJSON() ([]byte, error) {
 
 		StartsAt *strfmt.DateTime `json:"startsAt"`
 
+		StartsAtRaw string `json:"startsAtRaw,omitempty"`
+
 		Status *AlertStatus `json:"status"`
 
 		UpdatedAt *strfmt.DateTime `json:"updatedAt"`
@@ -144,6 +153,8 @@ func (m GettableAlert) MarshalJSON() ([]byte, error) {
 	dataAO0.Receivers = m.Receivers
 
 	dataAO0.StartsAt = m.StartsAt
+
+	dataAO0.StartsAtRaw = m.StartsAtRaw
 
 	dataAO0.Status = m.Status
 

@@ -1046,3 +1046,9 @@ func getSwaggerSpec() (*loads.Document, *analysis.Spec, error) {
 	swaggerSpecAnalysisCache = analysis.New(swaggerSpec.Spec())
 	return swaggerSpec, swaggerSpecAnalysisCache, nil
 }
+
+// ConfigureManagedInhibition mounts the internal coordinator API before the generated router.
+// Call during setup, before serving requests.
+func (api *API) ConfigureManagedInhibition(coordinator *config.Coordinator, key []byte) {
+	api.Handler = ManagedInhibitionHandler(api.Handler, coordinator, key)
+}

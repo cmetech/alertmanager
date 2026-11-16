@@ -46,6 +46,10 @@ func TestConversionResolutionActualGETPOSTCodec(t *testing.T) {
 	require.NoError(t, err)
 	wire, err := json.Marshal(AlertToOpenAPIAlert(stored, alert.AlertStatus{State: alert.AlertStateActive}, nil, nil))
 	require.NoError(t, err)
+	var gettable models.GettableAlert
+	require.NoError(t, json.Unmarshal(wire, &gettable))
+	require.Equal(t, stored.StartsAt.UTC().Format(time.RFC3339Nano), gettable.StartsAtRaw)
+	require.NotEmpty(t, gettable.Annotations["__oscar_fingerprint_conversion_resolution"])
 	var ending models.PostableAlert
 	require.NoError(t, json.Unmarshal(wire, &ending))
 	ending.EndsAt = strfmt.DateTime(now.Add(-time.Millisecond))

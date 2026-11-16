@@ -171,7 +171,7 @@ func (s *Silencer) Mutes(ctx context.Context, lset labelset.LabelSet) bool {
 				activeIDs = append(activeIDs, sil.Id)
 				allIDs = append(allIDs, sil.Id)
 
-				s.recorder.RecordEvent(ctx, func() eventrecorder.EventData {
+				s.recorder.RecordTypedEvent(ctx, "silence_muted_alert", func() eventrecorder.EventData {
 					return eventrecorder.NewSilenceMutedAlertEvent(
 						sil, fp, lset.LabelSet,
 					)

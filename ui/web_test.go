@@ -68,7 +68,16 @@ func fetchIndexAndAssets(t *testing.T, router *route.Router, urlPath string) {
 	matches := re.FindAllStringSubmatch(res.Body.String(), -1)
 	require.NotEmpty(t, matches, "No assets (src/href) found in index.html. Is the build empty?")
 
+	const managedFavicon = "/api/branding/assets/favicon/"
+	if strings.HasSuffix(urlPath, "/ui/") {
+		// OSCAR's Admin UI proxy owns this root-absolute endpoint, including
+		// when native Alertmanager itself is mounted under a route prefix.
+		require.Contains(t, res.Body.String(), `href="`+managedFavicon+`"`)
+	}
 	for _, match := range matches {
+		if match[1] == managedFavicon {
+			continue
+		}
 		assetPath := path.Join(urlPath, match[1])
 		t.Run(assetPath, func(t *testing.T) {
 			res := fetchWithEncoding(router, assetPath, encNone)

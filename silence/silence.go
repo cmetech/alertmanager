@@ -238,7 +238,7 @@ func (s *Silences) Set(ctx context.Context, sil *pb.Silence) error {
 			return err
 		}
 		if changed {
-			s.recorder.RecordEvent(ctx, func() eventrecorder.EventData {
+			s.recorder.RecordTypedEvent(ctx, "silence_updated", func() eventrecorder.EventData {
 				return eventrecorder.NewSilenceUpdatedEvent(sil)
 			})
 		}
@@ -286,7 +286,7 @@ func (s *Silences) Set(ctx context.Context, sil *pb.Silence) error {
 		return err
 	}
 	if added {
-		s.recorder.RecordEvent(ctx, func() eventrecorder.EventData {
+		s.recorder.RecordTypedEvent(ctx, "silence_created", func() eventrecorder.EventData {
 			return eventrecorder.NewSilenceCreatedEvent(sil)
 		})
 	}

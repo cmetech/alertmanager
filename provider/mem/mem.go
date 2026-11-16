@@ -450,7 +450,7 @@ func (a *Alerts) putLocked(ctx context.Context, alerts ...*alert.Alert) error {
 		}
 
 		if !existing {
-			a.recorder.RecordEvent(ctx, func() eventrecorder.EventData {
+			a.recorder.RecordTypedEvent(ctx, "alert_created", func() eventrecorder.EventData {
 				return eventrecorder.NewAlertCreatedEvent(alrt)
 			})
 		}

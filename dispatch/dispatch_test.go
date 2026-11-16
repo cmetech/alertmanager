@@ -125,7 +125,7 @@ func TestAggrGroup(t *testing.T) {
 	removeEndsAt := func(as alert.AlertSlice) alert.AlertSlice {
 		for i, a := range as {
 			ac := *a
-			ac.EndsAt = time.Time{}
+			ac.ClearNotificationEnd()
 			as[i] = &ac
 		}
 		return as

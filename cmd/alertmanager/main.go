@@ -49,20 +49,24 @@ func run() int {
 	}
 
 	var (
-		configFile                  = kingpin.Flag("config.file", "Alertmanager configuration file name.").Default("alertmanager.yml").String()
-		dataDir                     = kingpin.Flag("storage.path", "Base path for data storage.").Default("data/").String()
-		oscarConversionKeys         = kingpin.Flag("oscar.conversion-ingress-key", "Confined producer/key-id:secret-file admission binding; repeat for each actor.").Strings()
-		oscarConversionCallbackKey  = kingpin.Flag("oscar.conversion-callback-key-file", "Expected native callback credential for conversion admission readiness.").String()
-		oscarSilenceKeyFile         = kingpin.Flag("oscar.silence-mutation-key-file", "OSCAR secret file required for native silence writes.").String()
-		retention                   = kingpin.Flag("data.retention", "How long to keep data for.").Default("120h").Duration()
-		maintenanceInterval         = kingpin.Flag("data.maintenance-interval", "Interval between garbage collection and snapshotting to disk of the silences and the notification logs.").Default("15m").Duration()
-		maxSilences                 = kingpin.Flag("silences.max-silences", "Maximum number of silences, including expired silences. If negative or zero, no limit is set.").Default("0").Int()
-		maxSilenceSizeBytes         = kingpin.Flag("silences.max-silence-size-bytes", "Maximum silence size in bytes. If negative or zero, no limit is set.").Default("0").Int()
-		silenceLogging              = kingpin.Flag("log.silences", "Enable logging silences. If it is enabled, the status change of silence will be logged").Bool()
-		alertGCInterval             = kingpin.Flag("alerts.gc-interval", "Interval between alert GC.").Default("30m").Duration()
-		perAlertNameLimit           = kingpin.Flag("alerts.per-alertname-limit", "Maximum number of alerts per alertname. If negative or zero, no limit is set.").Default("0").Int()
-		dispatchMaintenanceInterval = kingpin.Flag("dispatch.maintenance-interval", "Interval between maintenance of aggregation groups in the dispatcher.").Default("30s").Duration()
-		dispatchStartDelay          = kingpin.Flag("dispatch.start-delay", "Minimum amount of time to wait before dispatching alerts. This option should be synced with value of --rules.alert.resend-delay on Prometheus.").Default("0s").Duration()
+		configFile                        = kingpin.Flag("config.file", "Alertmanager configuration file name.").Default("alertmanager.yml").String()
+		dataDir                           = kingpin.Flag("storage.path", "Base path for data storage.").Default("data/").String()
+		oscarInhibitionObservations       = kingpin.Flag("oscar.inhibition-observations", "Enable best-effort bounded native inhibition observations.").Bool()
+		oscarInhibitionObservationURL     = kingpin.Flag("oscar.inhibition-observation-url", "Fixed owner-service inhibition observation endpoint.").String()
+		oscarInhibitionObservationKeyFile = kingpin.Flag("oscar.inhibition-observation-key-file", "Dedicated inhibition observation credential file.").String()
+		oscarInhibitionKeyFile            = kingpin.Flag("oscar.inhibition-key-file", "Dedicated OSCAR managed inhibition service credential file.").String()
+		oscarSilenceKeyFile               = kingpin.Flag("oscar.silence-mutation-key-file", "OSCAR secret file required for native silence writes.").String()
+		retention                         = kingpin.Flag("data.retention", "How long to keep data for.").Default("120h").Duration()
+		maintenanceInterval               = kingpin.Flag("data.maintenance-interval", "Interval between garbage collection and snapshotting to disk of the silences and the notification logs.").Default("15m").Duration()
+		maxSilences                       = kingpin.Flag("silences.max-silences", "Maximum number of silences, including expired silences. If negative or zero, no limit is set.").Default("0").Int()
+		maxSilenceSizeBytes               = kingpin.Flag("silences.max-silence-size-bytes", "Maximum silence size in bytes. If negative or zero, no limit is set.").Default("0").Int()
+		silenceLogging                    = kingpin.Flag("log.silences", "Enable logging silences. If it is enabled, the status change of silence will be logged").Bool()
+		alertGCInterval                   = kingpin.Flag("alerts.gc-interval", "Interval between alert GC.").Default("30m").Duration()
+		perAlertNameLimit                 = kingpin.Flag("alerts.per-alertname-limit", "Maximum number of alerts per alertname. If negative or zero, no limit is set.").Default("0").Int()
+		dispatchMaintenanceInterval       = kingpin.Flag("dispatch.maintenance-interval", "Interval between maintenance of aggregation groups in the dispatcher.").Default("30s").Duration()
+		dispatchStartDelay                = kingpin.Flag("dispatch.start-delay", "Minimum amount of time to wait before dispatching alerts. This option should be synced with value of --rules.alert.resend-delay on Prometheus.").Default("0s").Duration()
+		oscarConversionKeys               = kingpin.Flag("oscar.conversion-ingress-key", "Confined producer/key-id:secret-file admission binding; repeat for each actor.").Strings()
+		oscarConversionCallbackKey        = kingpin.Flag("oscar.conversion-callback-key-file", "Expected native callback credential for conversion admission readiness.").String()
 
 		webConfig                  = webflag.AddFlags(kingpin.CommandLine, ":9093")
 		externalURL                = kingpin.Flag("web.external-url", "The URL under which Alertmanager is externally reachable (for example, if Alertmanager is served via a reverse proxy). Used for generating relative and absolute links back to Alertmanager itself. If the URL has a path portion, it will be used to prefix all HTTP endpoints served by Alertmanager. If omitted, relevant URL components will be derived automatically.").String()
@@ -121,6 +125,16 @@ func run() int {
 		oscarSilenceKey, keyErr = readOscarSilenceMutationKey(*oscarSilenceKeyFile)
 		if keyErr != nil {
 			fmt.Fprintf(os.Stderr, "invalid OSCAR silence mutation key file: %v\n", keyErr)
+			return 1
+		}
+	}
+
+	oscarInhibitionKey := []byte{}
+	if *oscarInhibitionKeyFile != "" {
+		var keyErr error
+		oscarInhibitionKey, keyErr = readOscarSilenceMutationKey(*oscarInhibitionKeyFile)
+		if keyErr != nil {
+			fmt.Fprintf(os.Stderr, "invalid OSCAR inhibition key file: %v\n", keyErr)
 			return 1
 		}
 	}
@@ -245,23 +259,27 @@ func run() int {
 		DispatchMaintenanceInterval: *dispatchMaintenanceInterval,
 		DispatchStartDelay:          *dispatchStartDelay,
 
-		WebConfig:                  webConfig,
-		ExternalURL:                *externalURL,
-		RoutePrefix:                *routePrefix,
-		CORSHandler:                corsHandler,
-		GetConcurrency:             *getConcurrency,
-		HTTPTimeout:                *httpTimeout,
-		ConnectUnaryConcurrency:    *connectUnaryConcurrency,
-		ConnectStreamConcurrency:   *connectStreamConcurrency,
-		ConnectUnaryTimeout:        *connectUnaryTimeout,
-		ConnectStreamIdleTimeout:   *connectStreamIdleTimeout,
-		ConnectStreamLifetime:      *connectStreamLifetime,
-		ConnectReadMaxBytes:        *connectReadMaxBytes,
-		ConnectSendMaxBytes:        *connectSendMaxBytes,
-		ConnectMaxRequestBodyBytes: *connectMaxRequestBodyBytes,
-		SilenceMutationKey:         oscarSilenceKey,
-		ConversionAdmissionKeys:    conversionKeys,
-		ConversionCallbackKey:      conversionCallbackKey,
+		WebConfig:                    webConfig,
+		ExternalURL:                  *externalURL,
+		RoutePrefix:                  *routePrefix,
+		CORSHandler:                  corsHandler,
+		GetConcurrency:               *getConcurrency,
+		HTTPTimeout:                  *httpTimeout,
+		ConnectUnaryConcurrency:      *connectUnaryConcurrency,
+		ConnectStreamConcurrency:     *connectStreamConcurrency,
+		ConnectUnaryTimeout:          *connectUnaryTimeout,
+		ConnectStreamIdleTimeout:     *connectStreamIdleTimeout,
+		ConnectStreamLifetime:        *connectStreamLifetime,
+		ConnectReadMaxBytes:          *connectReadMaxBytes,
+		ConnectSendMaxBytes:          *connectSendMaxBytes,
+		ConnectMaxRequestBodyBytes:   *connectMaxRequestBodyBytes,
+		SilenceMutationKey:           oscarSilenceKey,
+		InhibitionKey:                oscarInhibitionKey,
+		InhibitionObservations:       *oscarInhibitionObservations,
+		InhibitionObservationURL:     *oscarInhibitionObservationURL,
+		InhibitionObservationKeyFile: *oscarInhibitionObservationKeyFile,
+		ConversionAdmissionKeys:      conversionKeys,
+		ConversionCallbackKey:        conversionCallbackKey,
 
 		ClusterBindAddr:        *clusterBindAddr,
 		ClusterAdvertiseAddr:   *clusterAdvertiseAddr,

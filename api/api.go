@@ -64,6 +64,8 @@ type API struct {
 type Options struct {
 	// SilenceMutationKey enables OSCAR's native silence-write guard when set.
 	SilenceMutationKey      []byte
+	InhibitionKey           []byte
+	ManagedInhibition       *config.Coordinator
 	ConversionAdmissionKeys map[string][]byte
 	ConversionCallbackKey   []byte
 	// Alerts to be used by the API. Mandatory.
@@ -211,6 +213,9 @@ func New(opts Options) (*API, error) {
 		return nil, err
 	}
 	v2.InstallConversionAdmission(opts.ConversionAdmissionKeys, opts.ConversionCallbackKey)
+	// Conversion installation rebuilds its wrapper from the base handler. Mount
+	// the managed API afterward so both guards remain reachable.
+	v2.ConfigureManagedInhibition(opts.ManagedInhibition, opts.InhibitionKey)
 	connect := apiconnect.NewAPI(effective.connect)
 
 	requestsInFlight := prometheus.NewGauge(prometheus.GaugeOpts{

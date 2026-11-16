@@ -27,6 +27,7 @@ import (
 	"github.com/prometheus/alertmanager/api/v2/client/alert"
 	"github.com/prometheus/alertmanager/api/v2/client/alertgroup"
 	"github.com/prometheus/alertmanager/api/v2/client/general"
+	"github.com/prometheus/alertmanager/api/v2/client/oscar_inhibition"
 	"github.com/prometheus/alertmanager/api/v2/client/receiver"
 	"github.com/prometheus/alertmanager/api/v2/client/silence"
 )
@@ -76,6 +77,7 @@ func New(transport runtime.ClientTransport, formats strfmt.Registry) *Alertmanag
 	cli.Alert = alert.New(transport, formats)
 	cli.Alertgroup = alertgroup.New(transport, formats)
 	cli.General = general.New(transport, formats)
+	cli.OscarInhibition = oscar_inhibition.New(transport, formats)
 	cli.Receiver = receiver.New(transport, formats)
 	cli.Silence = silence.New(transport, formats)
 	return cli
@@ -128,6 +130,8 @@ type AlertmanagerAPI struct {
 
 	General general.ClientService
 
+	OscarInhibition oscar_inhibition.ClientService
+
 	Receiver receiver.ClientService
 
 	Silence silence.ClientService
@@ -141,6 +145,7 @@ func (c *AlertmanagerAPI) SetTransport(transport runtime.ClientTransport) {
 	c.Alert.SetTransport(transport)
 	c.Alertgroup.SetTransport(transport)
 	c.General.SetTransport(transport)
+	c.OscarInhibition.SetTransport(transport)
 	c.Receiver.SetTransport(transport)
 	c.Silence.SetTransport(transport)
 }

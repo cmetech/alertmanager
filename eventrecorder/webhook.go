@@ -15,13 +15,17 @@ package eventrecorder
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"reflect"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -33,6 +37,9 @@ import (
 
 // WebhookOutputConfig configures an HTTP webhook event recorder output.
 type WebhookOutputConfig struct {
+	EventTypes         []string `yaml:"event_types,omitempty" json:"event_types,omitempty"`
+	observationKey     string
+	observationReceipt func(int64)
 	// Name identifies this output in metrics and logs.
 	Name string `yaml:"name" json:"name"`
 	// URL is the endpoint to POST each event to.
@@ -98,7 +105,7 @@ func (c WebhookOutputConfig) validate() error {
 // equal reports whether two webhook output configs are semantically
 // equal.
 func (c WebhookOutputConfig) equal(o WebhookOutputConfig) bool {
-	if c.Name != o.Name {
+	if !slices.Equal(c.EventTypes, o.EventTypes) || c.observationKey != o.observationKey || c.Name != o.Name {
 		return false
 	}
 	aURL, bURL := "", ""
@@ -152,22 +159,48 @@ const (
 // temporarily unavailable webhook does not block the event recorder queue.
 // Events are dropped (with a log message) when the internal queue is
 // full.
+type outputHealth struct {
+	// Only recorder/HTTP workers and status readers use this mutex, never alert threads.
+	mu                          sync.Mutex
+	dropped, failures           atomic.Uint64
+	success, problem, recovered atomic.Int64
+}
+
+func (h *outputHealth) drop() { h.dropCount(1) }
+func (h *outputHealth) dropCount(count int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.dropped.Add(uint64(count))
+	h.problem.CompareAndSwap(0, time.Now().UnixNano())
+}
+
+func (h *outputHealth) failed() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.failures.Add(1)
+	h.problem.CompareAndSwap(0, time.Now().UnixNano())
+}
+
 type WebhookOutput struct {
-	client       *http.Client
-	url          string
-	name         string
-	kind         string
-	batch        *httpBatchConfig
-	maxRetries   int
-	retryBackoff time.Duration
-	maxBackoff   time.Duration
-	logger       *slog.Logger
-	drops        prometheus.Counter
-	work         chan []byte
-	batches      chan []byte
-	done         chan struct{}
-	cancel       chan struct{} // closed after drain to abort remaining retries
-	wg           sync.WaitGroup
+	eventTypes         []string
+	observationKey     string
+	observationReceipt func(int64)
+	health             outputHealth
+	client             *http.Client
+	url                string
+	name               string
+	kind               string
+	batch              *httpBatchConfig
+	maxRetries         int
+	retryBackoff       time.Duration
+	maxBackoff         time.Duration
+	logger             *slog.Logger
+	drops              prometheus.Counter
+	work               chan []byte
+	batches            chan []byte
+	done               chan struct{}
+	cancel             chan struct{} // closed after drain to abort remaining retries
+	wg                 sync.WaitGroup
 }
 
 type httpBatchConfig struct {
@@ -226,6 +259,9 @@ func newWebhookOutput(cfg WebhookOutputConfig, kind string, batch *httpBatchConf
 		timeout = time.Duration(cfg.Timeout)
 	}
 	client.Timeout = timeout
+	if cfg.observationKey != "" {
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
 
 	workers := defaultWebhookWorkers
 	if cfg.Workers > 0 {
@@ -248,19 +284,22 @@ func newWebhookOutput(cfg WebhookOutputConfig, kind string, batch *httpBatchConf
 		return nil, err
 	}
 	wo := &WebhookOutput{
-		client:       client,
-		url:          urlStr,
-		name:         name,
-		kind:         kind,
-		batch:        batch,
-		maxRetries:   maxRetries,
-		retryBackoff: retryBackoff,
-		maxBackoff:   defaultWebhookMaxBackoff,
-		logger:       logger,
-		drops:        dropsCounter.WithLabelValues(name),
-		work:         make(chan []byte, webhookQueueSize),
-		done:         make(chan struct{}),
-		cancel:       make(chan struct{}),
+		client:             client,
+		eventTypes:         slices.Clone(cfg.EventTypes),
+		observationKey:     cfg.observationKey,
+		observationReceipt: cfg.observationReceipt,
+		url:                urlStr,
+		name:               name,
+		kind:               kind,
+		batch:              batch,
+		maxRetries:         maxRetries,
+		retryBackoff:       retryBackoff,
+		maxBackoff:         defaultWebhookMaxBackoff,
+		logger:             logger,
+		drops:              dropsCounter.WithLabelValues(name),
+		work:               make(chan []byte, webhookQueueSize),
+		done:               make(chan struct{}),
+		cancel:             make(chan struct{}),
 	}
 
 	if batch != nil {
@@ -290,15 +329,36 @@ func (wo *WebhookOutput) Name() string {
 // a worker.  It returns the serialized size (for the bytes-written
 // metric).  If the internal queue is full the event is dropped and
 // counted via the output-drops metric.
+// Interested filters before serialization as well as the recorder builder gate.
+func (wo *WebhookOutput) Interested(eventType string) bool {
+	return len(wo.eventTypes) == 0 || slices.Contains(wo.eventTypes, eventType)
+}
+
 func (wo *WebhookOutput) SendEvent(event Event) (int, error) {
+	if !wo.Interested(event.typeName()) {
+		return 0, nil
+	}
+	if wo.observationKey != "" && event.message.GetData().GetInhibitionMutedAlert().GetObservation() == nil {
+		return 0, nil
+	}
 	data, err := event.MarshalJSON()
 	if err != nil {
+		if wo.observationKey != "" {
+			wo.health.drop()
+			wo.drops.Inc()
+		}
 		return 0, &serializeError{err: err}
+	}
+	if wo.observationKey != "" && len(data) > observationMaxEventBytes {
+		wo.drops.Inc()
+		wo.health.drop()
+		return 0, errors.New("observation exceeds encoded byte budget")
 	}
 	select {
 	case wo.work <- data:
 	default:
 		wo.drops.Inc()
+		wo.health.drop()
 		wo.logger.Warn("Event recorder HTTP output queue full, dropping event", "output", wo.name)
 	}
 	return len(data), nil
@@ -409,32 +469,91 @@ func jsonArray(events [][]byte, size int) []byte {
 }
 
 func (wo *WebhookOutput) postWithRetry(data []byte) {
+	count := 1
+	deadline := time.Time{}
+	if wo.observationKey != "" {
+		// Queue residence is independent of retries, including time in the shared queue.
+		var batch []struct {
+			Timestamp time.Time `json:"@timestamp"`
+		}
+		if err := json.Unmarshal(data, &batch); err != nil || len(batch) == 0 {
+			wo.dropEvents(count)
+			return
+		}
+		count = len(batch)
+		deadline = batch[0].Timestamp.Add(ObservationResidence)
+		for _, entry := range batch {
+			if d := entry.Timestamp.Add(ObservationResidence); d.Before(deadline) {
+				deadline = d
+			}
+		}
+	}
 	for attempt := range wo.maxRetries {
-		err := wo.post(data)
-		if err == nil {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			wo.dropEvents(count)
+			return
+		}
+		if err := wo.postBefore(data, deadline); err == nil {
+			wo.health.mu.Lock()
+			now := time.Now().UnixNano()
+			wo.health.success.Store(now)
+			if wo.health.problem.Swap(0) != 0 {
+				wo.health.recovered.Store(now)
+			}
+			if wo.observationReceipt != nil {
+				wo.observationReceipt(now)
+			}
+			wo.health.mu.Unlock()
 			return
 		}
 		wo.logger.Warn("Event recorder HTTP output POST failed", "output", wo.name, "attempt", attempt+1)
+		wo.health.failed()
 		if attempt < wo.maxRetries-1 {
 			backoff := min(wo.retryBackoff<<attempt, wo.maxBackoff)
+			if !deadline.IsZero() {
+				backoff = min(backoff, time.Until(deadline))
+			}
 			select {
 			case <-time.After(backoff):
 			case <-wo.cancel:
-				wo.logger.Warn("Event recorder webhook shutdown during retry backoff, dropping event", "output", wo.name)
+				wo.dropEvents(count)
 				return
 			}
 		}
 	}
-	wo.logger.Error("Event recorder HTTP output POST failed after retries, dropping event", "output", wo.name, "retries", wo.maxRetries)
+	wo.dropEvents(count)
+}
+
+func (wo *WebhookOutput) dropEvents(n int) {
+	wo.health.dropCount(n)
+	wo.drops.Add(float64(n))
 }
 
 func (wo *WebhookOutput) post(data []byte) error {
-	resp, err := wo.client.Post(wo.url, "application/json", bytes.NewReader(data))
+	return wo.postBefore(data, time.Time{})
+}
+
+func (wo *WebhookOutput) postBefore(data []byte, deadline time.Time) error {
+	ctx := context.Background()
+	if !deadline.IsZero() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, wo.url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if wo.observationKey != "" {
+		req.Header.Set(ObservationKeyHeader, wo.observationKey)
+	}
+	resp, err := wo.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("event recorder %s POST failed: %w", wo.kind, err)
 	}
 	defer func() {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 	}()
 
@@ -448,6 +567,7 @@ func (wo *WebhookOutput) post(data []byte) error {
 // waits.  If the drain takes longer than 30 seconds, remaining
 // retries are canceled.
 func (wo *WebhookOutput) Close() error {
+	defer wo.client.CloseIdleConnections()
 	close(wo.done)
 	ch := make(chan struct{})
 	go func() {
@@ -462,3 +582,6 @@ func (wo *WebhookOutput) Close() error {
 	}
 	return nil
 }
+
+// SameWebhookConfig compares effective output configuration, including private fixed credentials.
+func SameWebhookConfig(a, b WebhookOutputConfig) bool { return a.equal(b) }

@@ -952,7 +952,7 @@ func (ag *aggrGroup) insert(ctx context.Context, alrt *alert.Alert) bool {
 		span.RecordError(err)
 		ag.logger.Error(message, "err", err)
 	} else if applied {
-		ag.recorder.RecordEvent(ctx, func() eventrecorder.EventData {
+		ag.recorder.RecordTypedEvent(ctx, "alert_grouped", func() eventrecorder.EventData {
 			return notify.NewAlertGroupedEvent(ag.alertGroupInfo(), alrt)
 		})
 		// The alert set changed; the alert is already visible via ag.alerts.
@@ -987,7 +987,7 @@ func (ag *aggrGroup) flush(notify func(...*alert.Alert) bool) {
 		if a.ResolvedAt(now) {
 			resolvedSlice = append(resolvedSlice, &a)
 		} else {
-			a.EndsAt = time.Time{}
+			a.ClearNotificationEnd()
 		}
 		alertsSlice = append(alertsSlice, &a)
 	}
@@ -1028,7 +1028,7 @@ func (ag *aggrGroup) recordResolvedEvents(resolved alert.AlertSlice) {
 		return
 	}
 	for _, a := range resolved {
-		ag.recorder.RecordEvent(ag.ctx, func() eventrecorder.EventData {
+		ag.recorder.RecordTypedEvent(ag.ctx, "alert_resolved", func() eventrecorder.EventData {
 			return notify.NewAlertResolvedEvent(ag.alertGroupInfo(), a)
 		})
 	}
