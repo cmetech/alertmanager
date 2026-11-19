@@ -1,3 +1,7 @@
+## GitLab CI compute policy — 2026-11-19
+
+- Keep Depot workflows opt-in and disable GitHub Actions at repository level; GitLab runners are the default after deliberate pushes. Preserve workflow job definitions for a future explicit provider switch. Affected component: CI only; no service restart, build, or schema migration. GitLab rollout/coverage must be verified per branch.
+
 ## Depot CI workflows — 2026-11-19
 
 - Add Depot CI workflows generated from GitHub Actions; retain the original GitHub workflows. Affected component: CI only; no runtime, schema, or service configuration changes.
