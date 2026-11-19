@@ -8,10 +8,9 @@
 # This action is synced from https://github.com/prometheus/prometheus
 ###
 name: Stale Check
+# GitLab runners are the default; Depot execution is opt-in.
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: '16 22 * * *'
 permissions:
   issues: write
   pull-requests: write

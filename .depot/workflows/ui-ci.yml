@@ -7,17 +7,9 @@
 
 name: UI CI
 
+# GitLab runners are the default; Depot execution is opt-in.
 on:
-  pull_request:
-    branches:
-      - '**'
-    paths:
-      - '.depot/workflows/ui-ci.yml'
-      - '.nvmrc'
-      - 'Makefile'
-      - 'internal/tools/**'
-      - 'proto/api/**'
-      - 'ui/**'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.number || github.sha }}

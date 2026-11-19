@@ -7,10 +7,8 @@
 
 ---
 name: Build release branch
-on:  # yamllint disable-line rule:truthy
-  push:
-    branches:
-      - release-*
+# GitLab runners are the default; Depot execution is opt-in.
+on:
   workflow_dispatch:
 permissions:
   contents: read

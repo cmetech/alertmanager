@@ -10,13 +10,9 @@
 # This action is synced from https://github.com/prometheus/prometheus
 ###
 name: Push README to Docker Hub
+# GitLab runners are the default; Depot execution is opt-in.
 on:
-  push:
-    paths:
-      - "README.md"
-      - "README-containers.md"
-      - ".depot/workflows/container_description.yml"
-    branches: [ main, master ]
+  workflow_dispatch:
 
 permissions:
   contents: read

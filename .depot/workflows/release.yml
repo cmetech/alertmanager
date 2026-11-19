@@ -7,10 +7,10 @@
 
 ---
 name: Release
-on:  # yamllint disable-line rule:truthy
-  push:
-    tags:
-      - v*
+# GitLab runners are the default; Depot execution is opt-in.
+on:
+  workflow_dispatch:
+
 permissions:
   contents: read
 

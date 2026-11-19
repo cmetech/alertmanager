@@ -5,10 +5,9 @@
 # - Changed GitHub runs-on labels to their Depot equivalents
 
 name: mixin
+# GitLab runners are the default; Depot execution is opt-in.
 on:
-  pull_request:
-    paths:
-      - "doc/alertmanager-mixin/**"
+  workflow_dispatch:
 
 permissions:
   contents: read

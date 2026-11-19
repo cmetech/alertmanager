@@ -10,17 +10,9 @@
 # This action is synced from https://github.com/prometheus/prometheus
 ###
 name: govulncheck
+# GitLab runners are the default; Depot execution is opt-in.
 on:
-  pull_request:
-    paths:
-      - VERSION
-      - .depot/workflows/govulncheck.yml
-  push:
-    branches:
-      - main
-      - master
-  schedule:
-    - cron: '33 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
