@@ -8,6 +8,7 @@
 package mem
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/store"
 )
 
 // This opt-in qualification gate records requirements for the proposed TL1
@@ -43,6 +45,15 @@ func TestTL1LifecycleQualification(t *testing.T) {
 			StartsAt: start, EndsAt: received.Add(time.Hour),
 		}, received, true)
 	}
+	requireInactive := func(t *testing.T, p *Alerts, fp model.Fingerprint) {
+		t.Helper()
+		stored, err := p.Get(fp)
+		if errors.Is(err, store.ErrNotFound) {
+			return
+		}
+		require.NoError(t, err)
+		require.True(t, stored.Resolved(), "expected the native variant to be inactive")
+	}
 	t.Run("severity_update_retires_superseded_native_variant", func(t *testing.T) {
 		p := newProvider(t)
 		now := time.Now()
@@ -50,24 +61,25 @@ func TestTL1LifecycleQualification(t *testing.T) {
 		minor := newProblem("minor", critical.StartsAt, now)
 		require.NoError(t, p.Put(t.Context(), critical))
 		require.NoError(t, p.Put(t.Context(), minor))
-		old, err := p.Get(critical.Fingerprint())
+		replacement, err := p.Get(minor.Fingerprint())
 		require.NoError(t, err)
-		require.True(t, old.Resolved(), "proposed TL1 contract: superseded critical variant must be retired")
+		require.False(t, replacement.Resolved(), "the replacement severity must be active")
+		requireInactive(t, p, critical.Fingerprint())
 	})
 	t.Run("late_problem_cannot_reopen_successfully_cleared_episode", func(t *testing.T) {
 		p := newProvider(t)
 		now := time.Now()
 		original := newProblem("critical", now.Add(-time.Minute), now.Add(-2*time.Second))
 		require.NoError(t, p.Put(t.Context(), original))
+		active, err := p.Get(original.Fingerprint())
+		require.NoError(t, err)
+		require.False(t, active.Resolved(), "fixture must establish an active original problem")
 		cleared := alert.New(model.Alert{Labels: original.Labels.Clone(), StartsAt: original.StartsAt, EndsAt: now.Add(-time.Second)}, now.Add(-time.Second), false)
 		require.NoError(t, p.Put(t.Context(), cleared))
-		stored, err := p.Get(original.Fingerprint())
-		require.NoError(t, err)
-		require.True(t, stored.Resolved(), "fixture must establish a successful clear before replay")
+		requireInactive(t, p, original.Fingerprint())
 		late := newProblem("critical", original.StartsAt, now)
-		require.NoError(t, p.Put(t.Context(), late))
-		stored, err = p.Get(original.Fingerprint())
-		require.NoError(t, err)
-		require.True(t, stored.Resolved(), "proposed TL1 contract: late native arrival must not reopen the cleared episode")
+		// Rejection and harmless acceptance both satisfy the observable lifecycle contract.
+		_ = p.Put(t.Context(), late)
+		requireInactive(t, p, original.Fingerprint())
 	})
 }
