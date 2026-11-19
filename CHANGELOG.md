@@ -1,3 +1,8 @@
+## Depot CI workflows — 2026-11-19
+
+- Add Depot CI workflows generated from GitHub Actions; retain the original GitHub workflows. Affected component: CI only; no runtime, schema, or service configuration changes.
+- Activation requires the `.depot/` files on the repository default branch. No service rebuild, restart, or database migration is required.
+
 ## OSCAR runtime branding — 2026-11-15
 
 - Mantine UI uses OSCAR's managed favicon and appearance-specific logo through the public branding asset endpoint. Uploaded branding takes precedence; standalone deployments retain a text header if OSCAR assets are unavailable.
