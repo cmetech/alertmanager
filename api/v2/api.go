@@ -387,6 +387,27 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 	alerts := OpenAPIAlertsToAlerts(ctx, params.Alerts)
 	actor := conversionActor(params.HTTPRequest.Context())
 	for i := range alerts {
+		delete(alerts[i].Labels, managedAnnotation)
+		if proof, present := alerts[i].Annotations[managedAnnotation]; present {
+			delete(alerts[i].Annotations, managedAnnotation)
+			if actor != "" {
+				labels := alerts[i].Labels
+				if len(alerts) != 1 || !validManagedOperation(string(proof), actor, time.Now().Unix()) ||
+					!managedPairMatches(string(proof), alerts[i].StartsAt, string(labels["node"]), string(labels["correlation_key"]), string(labels["alert_type"]), string(labels["is_resolution"])) {
+					return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed operation")
+				}
+				if capsule := string(alerts[i].Annotations[conversionAnnotation]); capsule != "" && (actor == "smtpreceiver" || capsuleProducer(capsule) != actor) {
+					return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed fingerprint contribution")
+				}
+				// The episode owner and worker must both be installed before managed delivery.
+				return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+					http.Error(w, "managed publication unavailable", http.StatusServiceUnavailable)
+				})
+			}
+		}
+		if actor == "smtpreceiver" {
+			return alert_ops.NewPostAlertsBadRequest().WithPayload("managed operation required")
+		}
 		capsule := string(alerts[i].Annotations[conversionAnnotation])
 		if actor != "alertmanager-resolution" {
 			delete(alerts[i].Annotations, "__oscar_fingerprint_conversion_resolution")

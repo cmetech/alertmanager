@@ -138,7 +138,7 @@ func run() int {
 	for _, binding := range *oscarConversionKeys {
 		name, path, ok := strings.Cut(binding, ":")
 		parts := strings.Split(name, "/")
-		if !ok || len(parts) != 2 || parts[1] != "v1" || (parts[0] != "webhookreceiver" && parts[0] != "trapreceiver" && parts[0] != "alertmanager-resolution") {
+		if !ok || len(parts) != 2 || parts[1] != "v1" || (parts[0] != "smtpreceiver" && parts[0] != "webhookreceiver" && parts[0] != "trapreceiver" && parts[0] != "alertmanager-resolution") {
 			logger.Error("invalid confined conversion admission binding")
 			return 1
 		}

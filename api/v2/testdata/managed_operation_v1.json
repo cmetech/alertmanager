@@ -1,0 +1,83 @@
+{
+  "valid": {
+    "protocol": "managed-receiver-operation-v1",
+    "producer": "smtpreceiver",
+    "owner": "sender",
+    "locator": "",
+    "source_id": "lab",
+    "tid": "node",
+    "handler": "simple",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "event_id": "6ebd8e78-0941-4fb0-986e-b2be3327cd7d",
+    "source_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "episode_id": "0f7f41ba-6e54-47f2-ab68-1ecda00b8831",
+    "started_at": "2026-11-18T10:00:00Z",
+    "kind": "clear",
+    "clear_at": "2026-11-18T10:02:00.123Z",
+    "expected_generation": 2,
+    "attempt": "cccccccccccccccccccccccccccccccc",
+    "issued_at": 100,
+    "deadline": 110,
+    "correlation": "lab:node:0f7f41ba-6e54-47f2-ab68-1ecda00b8831",
+    "binding_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "invalid": [
+    {
+      "deadline": 111
+    },
+    {
+      "deadline": 100
+    },
+    {
+      "expected_generation": -1
+    },
+    {
+      "expected_generation": true
+    },
+    {
+      "source_digest": "ABC"
+    },
+    {
+      "kind": "raise"
+    },
+    {
+      "clear_at": "2026-11-18T09:59:59Z"
+    },
+    {
+      "started_at": "2026-02-30T12:00:00Z"
+    },
+    {
+      "protocol": "v2"
+    },
+    {
+      "producer": "trapreceiver"
+    },
+    {
+      "correlation": "other"
+    },
+    {
+      "event_id": "oops"
+    },
+    {
+      "attempt": "ddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "grant": "all"
+    },
+    {
+      "owner": ""
+    },
+    {
+      "clear_at": null
+    },
+    {
+      "clear_at": "2026-11-18T10:02:00.123456Z"
+    },
+    {
+      "started_at": "2026-11-18T10:00:00.123456789Z"
+    },
+    {
+      "binding_digest": "invalid"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+[
+  {
+    "startsAt": "2026-11-18T14:30:01.123000Z",
+    "labels": {
+      "alertname": "LOS",
+      "correlation_key": "tl1:91a7581e8b05d01317fa869e5db65c3bbe64fd00b344bd8e225b49ab7822d302:6ebd8e78-0941-4fb0-986e-b2be3327cd7d",
+      "alert_type": "problem"
+    }
+  },
+  {
+    "startsAt": "2026-11-18T14:30:01.123000Z",
+    "labels": {
+      "alertname": "LOS",
+      "correlation_key": "tl1:91a7581e8b05d01317fa869e5db65c3bbe64fd00b344bd8e225b49ab7822d302:6ebd8e78-0941-4fb0-986e-b2be3327cd7d",
+      "alert_type": "resolution"
+    }
+  },
+  {
+    "startsAt": "2026-11-18T14:30:01.123000Z",
+    "labels": {
+      "alertname": "LOS",
+      "correlation_key": "tl1:91a7581e8b05d01317fa869e5db65c3bbe64fd00b344bd8e225b49ab7822d302:0f7f41ba-6e54-47f2-ab68-1ecda00b8837",
+      "alert_type": "problem"
+    }
+  }
+]
