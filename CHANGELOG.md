@@ -1,3 +1,7 @@
+## Unreleased — Managed native episode owner
+
+- The optional managed owner stages provider mutations, protects owned fingerprints, preserves ordered subscription delivery, and reconciles signed operations with AM over verified HTTPS. Bootstrap requires independent credentials, compatible AM storage and a ready History worker. Ordinary installations retain their release image and settings. Operator qualification requires rebuilding this fork and commissioning the matching AM configuration.
+
 ## Unreleased — Managed receiver operation admission
 
 - The exact-body native guard recognizes the confined SMTP producer and validates one managed operation against its actor, bounded attempt, labels and original or clear start. The native endpoint returns unavailable until the episode owner and worker are installed. Ordinary writes scrub the reserved lifecycle claim.
