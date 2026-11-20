@@ -128,3 +128,28 @@ func TestManagedCommitOver200BlockedListenerPreservesSeedOrderAndShutdown(t *tes
 		t.Fatal("shutdown blocked on subscriber")
 	}
 }
+
+func TestManagedFutureStartRemainsRetryableAndCannotStrandManualRetirement(t *testing.T) {
+	p := clearProvider(t, &clearCallback{})
+	p.EnableManaged()
+	a := managedFixture(3, "problem")
+	a.StartsAt = time.Now().Add(120 * time.Millisecond)
+	valid := func() error { return nil }
+	require.Error(t, p.ApplyManaged(t.Context(), "future", a, provider.ManagedStamp{Generation: 1}, valid))
+	_, present := p.ManagedApplied("future")
+	require.False(t, present)
+	// Simulate earlier accepted bytes restored on a clock that stepped back.
+	require.NoError(t, p.alerts.Set(a))
+	p.owners[a.Fingerprint()] = "restored"
+	p.variants["restored"] = map[model.Fingerprint]bool{a.Fingerprint(): true}
+	require.Error(t, p.ApplyManaged(t.Context(), "restored", nil, provider.ManagedStamp{Generation: 2}, valid))
+	time.Sleep(time.Until(a.StartsAt.Add(time.Millisecond)))
+	require.NoError(t, p.ApplyManaged(t.Context(), "restored", nil, provider.ManagedStamp{Generation: 2}, valid))
+	got, err := p.Get(a.Fingerprint())
+	require.NoError(t, err)
+	require.True(t, got.Resolved())
+	fresh := managedFixture(4, "problem")
+	fresh.StartsAt = a.StartsAt
+	require.NoError(t, p.ApplyManaged(t.Context(), "future", fresh, provider.ManagedStamp{Generation: 1}, valid))
+	require.Equal(t, a.StartsAt, fresh.StartsAt)
+}

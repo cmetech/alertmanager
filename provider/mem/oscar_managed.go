@@ -98,6 +98,9 @@ func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	now := time.Now()
+	if incoming != nil && incoming.StartsAt.After(now) {
+		return errors.New("managed start is ahead of native clock")
+	}
 	var changes []*alert.Alert
 	size := 0
 	existing := make(map[model.Fingerprint]bool)

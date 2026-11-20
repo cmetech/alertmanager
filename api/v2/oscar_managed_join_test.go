@@ -7,12 +7,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +59,7 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 	provider.EnableManaged()
 	owner := &managedOwner{epoch: strings.Repeat("e", 32), store: provider, client: client, gates: map[string]*managedGate{}}
 	mode := os.Getenv("OSCAR_MANAGED_FIXTURE_MODE")
-	if mode != "joined" {
+	if mode != "joined" && mode != "restart-reservation" {
 		var capability struct {
 			Contract string
 			Worker   bool
@@ -134,6 +138,56 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 	require.Equal(t, 200, <-ch)
 	w, old := post(u1, "/api/v2/alerts", "major")
 	require.Equal(t, 200, w.Code, w.Body.String())
+	if mode == "restart-reservation" {
+		firstRaw, _ := json.Marshal(u1)
+		key, e := boundKey(firstRaw)
+		require.NoError(t, e)
+		var settled ownerState
+		require.Eventually(t, func() bool {
+			settled, e = owner.state(t.Context(), "lookup", map[string]any{"operation": json.RawMessage(firstRaw)}, key)
+			return e == nil && settled.Phase == "settled"
+		}, 4*time.Second, 20*time.Millisecond)
+		// Crash immediately after the actual reserve, before SQL promotion.
+		proposal := event("22222222-2222-4222-8222-222222222222", "update", 1)
+		proposal["deadline"] = time.Now().Unix() + 2
+		original, _ := json.Marshal(proposal)
+		proposed := settled.Current.Projection
+		proposed.Alert.Labels = proposed.Alert.Labels.Clone()
+		proposed.Alert.Labels["severity"] = "minor"
+		proposed.Fingerprint = proposed.Alert.Fingerprint().String()
+		locked, e := owner.state(t.Context(), "reserve", map[string]any{"operation": json.RawMessage(original), "generation": 1, "native_epoch": owner.epoch, "projection": proposed}, key)
+		require.NoError(t, e)
+		require.Equal(t, "reserved", locked.Phase)
+		provider.Close()
+		replacementStore, e := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+		require.NoError(t, e)
+		defer replacementStore.Close()
+		replacementStore.EnableManaged()
+		replacement := &managedOwner{epoch: strings.Repeat("f", 32), store: replacementStore, client: client, gates: map[string]*managedGate{}}
+		go replacement.maintain()
+		require.Eventually(t, replacement.ready.Load, 4*time.Second, 20*time.Millisecond)
+		restored, e := replacementStore.Get(old)
+		require.NoError(t, e)
+		require.Equal(t, model.LabelValue("major"), restored.Labels["severity"])
+		var after ownerState
+		require.Eventually(t, func() bool {
+			after, e = replacement.state(t.Context(), "lookup", map[string]any{"operation": json.RawMessage(firstRaw)}, key)
+			return e == nil && after.Phase == "cancelled" && after.Generation == 3
+		}, 12*time.Second, 30*time.Millisecond)
+		require.Equal(t, settled.Current.Execution, after.Current.Execution)
+		_, e = owner.state(t.Context(), "applied", slotCommand(locked.Pending, 2), key)
+		require.Error(t, e)
+		_, e = owner.submit(t.Context(), key, locked.Pending, 2)
+		require.Error(t, e)
+		api.managedOwner = replacement
+		api.alerts = replacementStore
+		retry := event(proposal["event_id"].(string), "update", 3)
+		retry["attempt"] = strings.Repeat("9", 32)
+		accepted, _ := post(retry, "/api/v2/alerts", "minor")
+		require.Equal(t, 200, accepted.Code, accepted.Body.String())
+		require.Contains(t, accepted.Body.String(), "forwarded")
+		return
+	}
 	u2 := event("22222222-2222-4222-8222-222222222222", "update", 1)
 	w, newfp := post(u2, "/api/v2/alerts", "minor")
 	require.Equal(t, 200, w.Code, w.Body.String())
@@ -157,9 +211,20 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 	another := event("44444444-4444-4444-8444-444444444444", "raise", 0)
 	another["episode_id"] = "55555555-5555-4555-8555-555555555555"
 	another["correlation"] = "lab:node:" + another["episode_id"].(string)
+	api.alertmanagerConfig.Global.ResolveTimeout = model.Duration(3 * time.Second)
 	w, fp := post(another, "/api/v2/alerts", "major")
 	require.Equal(t, 200, w.Code, w.Body.String())
 	require.NotEqual(t, old, fp)
+	beforeRenew, err := provider.Get(fp)
+	require.NoError(t, err)
+	originalEnd := beforeRenew.EndsAt
+	time.Sleep(time.Until(originalEnd.Add(-1500 * time.Millisecond)))
+	refreshed, _ := post(another, "/api/v2/alerts", "major")
+	require.Equal(t, 200, refreshed.Code, refreshed.Body.String())
+	afterRenew, err := provider.Get(fp)
+	require.NoError(t, err)
+	require.Greater(t, afterRenew.EndsAt.Sub(originalEnd), time.Second)
+	time.Sleep(time.Until(originalEnd.Add(80 * time.Millisecond)))
 	provider.Close()
 	restarted, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
 	require.NoError(t, err)
@@ -171,6 +236,8 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 	open, err := restarted.Get(fp)
 	require.NoError(t, err)
 	require.True(t, open.ManagedReceiver)
+	require.Equal(t, afterRenew.EndsAt.UnixMilli(), open.EndsAt.UnixMilli(), "restart must restore acknowledged renewal")
+	require.False(t, open.Resolved())
 	restored, err := restarted.Get(clearfp)
 	require.NoError(t, err)
 	require.Equal(t, clear.StartsAt, restored.StartsAt)
@@ -209,9 +276,13 @@ func TestManagedRestartEvidenceAndCloseCompensation(t *testing.T) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(response)), Header: make(http.Header)}, nil
 	})
 	owner := &managedOwner{epoch: strings.Repeat("b", 32), store: p, client: &managedClient{http: &http.Client{Transport: transport}}}
-	// A replacement process cannot infer that a previous epoch never applied.
+	// Prior to full restore the replacement cannot supersede an unpromoted operation.
 	require.Error(t, owner.recover(t.Context(), key, &managedGate{}, row))
 	require.Empty(t, calls)
+	owner.restored.Store(true)
+	require.NoError(t, owner.recover(t.Context(), key, &managedGate{}, row))
+	require.Equal(t, []string{"cancel-unpromoted"}, calls)
+	calls = nil
 	owner.epoch = slot.Epoch
 	require.NoError(t, owner.recover(t.Context(), key, &managedGate{}, row))
 	require.Equal(t, []string{"cancel-unapplied"}, calls)
@@ -233,4 +304,113 @@ func TestManagedRestartEvidenceAndCloseCompensation(t *testing.T) {
 	row.Identity = json.RawMessage("{}")
 	_, err = owner.state(t.Context(), "lookup", map[string]string{"key": key}, key)
 	require.Error(t, err)
+}
+
+func TestManagedMaintenanceBlockedRetirementAllowsSiblingRecovery(t *testing.T) {
+	for _, startup := range []bool{true, false} {
+		t.Run(map[bool]string{true: "startup", false: "periodic"}[startup], func(t *testing.T) {
+			t.Parallel()
+			checkBlockedMaintenance(t, startup)
+		})
+	}
+}
+
+func checkBlockedMaintenance(t *testing.T, startup bool) {
+	p, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	defer p.Close()
+	p.EnableManaged()
+	fixture, err := os.ReadFile("testdata/managed_operation_v1.json")
+	require.NoError(t, err)
+	var v struct{ Valid map[string]any }
+	require.NoError(t, json.Unmarshal(fixture, &v))
+	v.Valid["kind"] = "raise"
+	v.Valid["clear_at"] = ""
+	var rows []ownerState
+	for i, name := range []string{"first", "second"} {
+		v.Valid["owner"] = name
+		raw, _ := json.Marshal(v.Valid)
+		key, e := boundKey(raw)
+		require.NoError(t, e)
+		now := time.Now()
+		a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": model.LabelValue(name), "alert_type": "problem"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, true)
+		slot := &ownerSlot{Operation: raw, Projection: snapshot(a), Generation: 1, Execution: fmt.Sprintf("%08d-1111-4111-8111-111111111111", i)}
+		require.NoError(t, p.ApplyManaged(t.Context(), key, a, slot.stamp(), func() error { return nil }))
+		rows = append(rows, ownerState{State: "open", Phase: "ack", Key: key, Identity: raw, Generation: 1, Pending: slot, Current: slot})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Key < rows[j].Key })
+	closed := time.Now().UnixMilli()
+	rows[0].Closed, rows[0].Phase, rows[0].State, rows[0].Generation = &closed, "closing", "exact_closed", 2
+	_, slow := p.SlurpAndSubscribe("blocked")
+	closeSlow := sync.OnceFunc(slow.Close)
+	defer closeSlow()
+	ordinary := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "ordinary"}, StartsAt: time.Now(), EndsAt: time.Now().Add(time.Hour)}, time.Now(), false)
+	for range 200 {
+		require.NoError(t, p.Put(t.Context(), ordinary))
+	}
+	blocked := make(chan error, 1)
+	go func() { blocked <- p.Put(t.Context(), ordinary) }()
+	select {
+	case <-blocked:
+		t.Fatal("stalled subscriber did not backpressure")
+	case <-time.After(25 * time.Millisecond):
+	}
+	var caps, redrives, retired atomic.Int32
+	transport := ownerTransport(func(r *http.Request) (*http.Response, error) {
+		action := strings.TrimPrefix(r.URL.Path, "/api/v1/internal/managed-receiver/")
+		var cmd map[string]any
+		if e := json.NewDecoder(r.Body).Decode(&cmd); e != nil {
+			return nil, e
+		}
+		var reply any
+		switch action {
+		case "capability":
+			caps.Add(1)
+			reply = map[string]any{"contract": managedContract, "worker": true, "capacity": maxManagedRows, "rows": 2}
+		case "scan":
+			keys := []string{rows[0].Key, rows[1].Key}
+			if !startup && cmd["restore"] == true {
+				keys = []string{}
+			}
+			reply = map[string]any{"keys": keys}
+		case "lookup":
+			if cmd["key"] == rows[0].Key {
+				reply = rows[0]
+			} else {
+				reply = rows[1]
+			}
+		case "retired":
+			retired.Add(1)
+			reply = rows[0]
+		case "recover":
+			rc := rows[1]
+			rc.Redrive = true
+			reply = rc
+		case "submit":
+			redrives.Add(1)
+			reply = map[string]string{"status": "broker_ack", "execution_id": rows[1].Pending.Execution, "digest": rows[1].Pending.claims().Digest}
+		case "ack":
+			reply = rows[1]
+		default:
+			return nil, fmt.Errorf("unexpected maintenance action %s", action)
+		}
+		body, e := json.Marshal(reply)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(body))}, e
+	})
+	owner := &managedOwner{epoch: strings.Repeat("f", 32), store: p, client: &managedClient{http: &http.Client{Transport: transport}}, gates: map[string]*managedGate{}}
+	go owner.maintain()
+	require.Eventually(t, func() bool { return caps.Load() >= 2 && redrives.Load() > 0 }, 8*time.Second, 25*time.Millisecond, "A must not block capability polling or B's acknowledged-but-missing worker recovery")
+	require.Zero(t, retired.Load())
+	require.Equal(t, !startup, owner.ready.Load(), "startup requires complete restoration while an existing healthy runtime can progress")
+	require.Eventually(t, func() bool {
+		_, release, e := owner.enter(rows[0].Key)
+		if e != nil {
+			return false
+		}
+		release()
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "a blocked retirement must release its episode gate")
+	closeSlow()
+	require.NoError(t, <-blocked)
+	require.Eventually(t, func() bool { return retired.Load() > 0 && owner.ready.Load() }, 8*time.Second, 25*time.Millisecond)
 }

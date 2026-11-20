@@ -59,7 +59,7 @@ func newManagedClient(caFile, keyFile string) (*managedClient, error) {
 
 func (c *managedClient) call(ctx context.Context, action string, body any, result any) error {
 	switch action {
-	case "capability", "scan", "lookup", "reserve", "applied", "submit", "ack", "recover", "retired", "compact", "cancel-unapplied":
+	case "capability", "scan", "lookup", "reserve", "applied", "renew", "submit", "ack", "recover", "retired", "compact", "cancel-unapplied", "cancel-unpromoted":
 	default:
 		return errors.New("invalid managed action")
 	}
@@ -165,12 +165,13 @@ type managedGate struct {
 	provenUnapplied   string
 }
 type managedOwner struct {
-	epoch  string
-	client *managedClient
-	store  managedStore
-	ready  atomic.Bool
-	mu     sync.Mutex
-	gates  map[string]*managedGate
+	epoch    string
+	client   *managedClient
+	store    managedStore
+	ready    atomic.Bool
+	restored atomic.Bool
+	mu       sync.Mutex
+	gates    map[string]*managedGate
 }
 
 func (api *API) InstallManagedOwner(ca, key string, forbidden map[string][]byte, callback []byte) error {
@@ -308,7 +309,7 @@ func (o *managedOwner) submit(ctx context.Context, key string, s *ownerSlot, gen
 
 func (o *managedOwner) publish(ctx context.Context, raw json.RawMessage, a *alert.Alert) (string, error) {
 	var op managedClaims
-	if !o.ready.Load() || json.Unmarshal(raw, &op) != nil {
+	if !o.ready.Load() || json.Unmarshal(raw, &op) != nil || a.StartsAt.After(time.Now()) {
 		return "", errors.New("managed worker unavailable")
 	}
 	ctx, cancel := context.WithDeadline(ctx, time.Unix(op.Deadline, 0))
@@ -406,7 +407,7 @@ func (o *managedOwner) publish(ctx context.Context, raw json.RawMessage, a *aler
 			if frozen.Fingerprint() != a.Fingerprint() || !frozen.StartsAt.Equal(a.StartsAt) {
 				return "", errors.New("managed refresh changed native pair")
 			}
-			if frozen.Timeout {
+			if frozen.Timeout && a.EndsAt.After(frozen.EndsAt) {
 				frozen.EndsAt = a.EndsAt
 				frozen.UpdatedAt = a.UpdatedAt
 			}
@@ -428,6 +429,12 @@ func (o *managedOwner) publish(ctx context.Context, raw json.RawMessage, a *aler
 			return "", err
 		}
 		g.appliedGeneration, g.appliedAttempt = state.Generation, slot.claims().Attempt
+		if isCurrent && a.Timeout && a.EndsAt.After(slot.Projection.Alert.EndsAt) {
+			state, err = o.state(ctx, "renew", map[string]any{"operation": raw, "generation": state.Generation, "ends_at": a.EndsAt.UTC()}, key)
+			if err != nil {
+				return o.recheckClosed(ctx, key, raw, g, err)
+			}
+		}
 	}
 	if state.Phase == "reserved" {
 		state, err = o.state(ctx, "applied", slotCommand(slot, state.Generation), key)
@@ -452,6 +459,9 @@ func (o *managedOwner) publish(ctx context.Context, raw json.RawMessage, a *aler
 	}
 	if state.Current == nil || state.Current.Execution != slot.Execution || (state.Pending != nil && state.Phase != "ack") {
 		return "", errors.New("managed forwarding unconfirmed")
+	}
+	if isCurrent && state.Closed == nil && a.Timeout && state.Current.Projection.Alert.EndsAt.Before(a.EndsAt) {
+		return "", errors.New("managed renewal unconfirmed")
 	}
 	return "forwarded", nil
 }
@@ -506,6 +516,22 @@ func (o *managedOwner) recover(ctx context.Context, key string, g *managedGate, 
 			_, err := o.state(ctx, "cancel-unapplied", cmd, key)
 			return err
 		}
+		// Prior-epoch memory may have been briefly visible. Once the
+		// sole replacement has restored authority, a still-reserved slot
+		// could not have been handed to the broker. Compare its independent
+		// current stamp before superseding the old generation.
+		if o.restored.Load() && slot.Epoch != o.epoch && time.Now().Unix() >= slot.claims().Deadline+5 {
+			actual, present := o.store.ManagedApplied(key)
+			if (s.Current == nil && !present) || (s.Current != nil && present && actual == s.Current.stamp()) {
+				priorGeneration := int64(0)
+				if s.Current != nil {
+					priorGeneration = s.Current.Generation
+				}
+				cmd["current_generation"], cmd["native_epoch"] = priorGeneration, o.epoch
+				_, err := o.state(ctx, "cancel-unpromoted", cmd, key)
+				return err
+			}
+		}
 		return errors.New("managed reservation unresolved")
 	}
 	if s.Pending == nil {
@@ -516,6 +542,70 @@ func (o *managedOwner) recover(ctx context.Context, key string, g *managedGate, 
 		_, err = o.submit(ctx, key, slot, s.Generation)
 	}
 	return err
+}
+
+// The SQL observation can advance independently of a blocked provider handoff.
+// Hold readiness on incomplete startup restoration, but visit the rest of every
+// page and retry failed restoration on the next pass.
+func (o *managedOwner) maintainEpisode(ctx context.Context, key string, restore bool) error {
+	g, release, err := o.enter(key)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	lookup := func() (ownerState, error) { return o.state(ctx, "lookup", map[string]string{"key": key}, key) }
+	s, err := lookup()
+	if err != nil {
+		return err
+	}
+	g.durable = s.Generation > 0 && s.Phase != "archived"
+	if !restore {
+		return o.recover(ctx, key, g, s)
+	}
+	if s.Phase == "reserved" && s.Pending != nil {
+		if applied, ok := o.store.ManagedApplied(key); ok && applied == s.Pending.stamp() {
+			if err = o.recover(ctx, key, g, s); err != nil {
+				return err
+			}
+			if s, err = lookup(); err != nil {
+				return err
+			}
+		} else {
+			// Ambiguous prior-epoch reservations remain fenced in SQL. A
+			// provably unapplied attempt can be cancelled after its deadline.
+			_ = o.recover(ctx, key, g, s)
+		}
+	}
+	if s.Phase == "closing" || s.Phase == "closed" || s.Phase == "retired" {
+		if err = o.recover(ctx, key, g, s); err != nil {
+			return err
+		}
+		if s, err = lookup(); err != nil {
+			return err
+		}
+	} else if s.Pending != nil && (s.Phase == "applied" || s.Phase == "ack") {
+		// A missing worker must not erase a provably committed native projection.
+		workerCtx, cancelWorker := context.WithTimeout(ctx, time.Second)
+		_ = o.recover(workerCtx, key, g, s)
+		cancelWorker()
+		if s, err = lookup(); err != nil {
+			return err
+		}
+	}
+	if s.Current == nil || (s.Closed != nil && (s.Current.claims().Kind != "clear" || s.Current.Generation != s.Generation)) {
+		return nil
+	}
+	a, err := s.Current.Projection.restore()
+	if err != nil {
+		return err
+	}
+	if err = o.store.ApplyManaged(ctx, key, a, s.Current.stamp(), func() error { return ctx.Err() }); err != nil {
+		return err
+	}
+	g.appliedGeneration, g.appliedAttempt = s.Current.Generation, s.Current.claims().Attempt
+	return nil
 }
 
 func (o *managedOwner) maintain() {
@@ -531,6 +621,7 @@ func (o *managedOwner) maintain() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	restore := true
+	restoreFailed := false
 	cursor := ""
 	for {
 		var capability struct {
@@ -551,50 +642,17 @@ func (o *managedOwner) maintain() {
 						healthy = false
 						break
 					}
-					g, release, e := o.enter(key)
-					if e != nil {
-						if restore {
-							healthy = false
-							break
-						}
-						cursor = key
-						continue
-					}
-					state, e := o.state(ctx, "lookup", map[string]string{"key": key}, key)
-					if e == nil {
-						g.durable = state.Generation > 0 && state.Phase != "archived"
-					}
-					if e == nil && restore && state.Phase == "reserved" && state.Pending != nil {
-						if applied, ok := o.store.ManagedApplied(key); ok && applied == state.Pending.stamp() {
-							e = o.recover(ctx, key, g, state)
-							if e == nil {
-								state, e = o.state(ctx, "lookup", map[string]string{"key": key}, key)
-							}
-						}
-					}
-					if e == nil && restore && state.Current != nil && (state.Closed == nil || state.Current.claims().Kind == "clear") {
-						var a *alert.Alert
-						a, e = state.Current.Projection.restore()
-						if e == nil {
-							e = o.store.ApplyManaged(ctx, key, a, state.Current.stamp(), func() error { return ctx.Err() })
-						}
-						if e == nil {
-							g.appliedGeneration = state.Current.Generation
-							g.appliedAttempt = state.Current.claims().Attempt
-						}
-					}
-					if e == nil {
-						_ = o.recover(ctx, key, g, state)
-					}
-					release()
-					if e != nil && restore {
-						healthy = false
-						break
+					if e := o.maintainEpisode(ctx, key, restore); e != nil && restore {
+						restoreFailed = true
 					}
 					cursor = key
 				}
 				if healthy && len(page.Keys) < 32 {
-					restore = false
+					restore = restore && restoreFailed
+					if !restore {
+						o.restored.Store(true)
+					}
+					restoreFailed = false
 					cursor = ""
 				}
 			}
