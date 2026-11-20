@@ -25,6 +25,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/alertmanager/alert"
@@ -59,7 +60,7 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 	provider.EnableManaged()
 	owner := &managedOwner{epoch: strings.Repeat("e", 32), store: provider, client: client, gates: map[string]*managedGate{}}
 	mode := os.Getenv("OSCAR_MANAGED_FIXTURE_MODE")
-	if mode != "joined" && mode != "restart-reservation" {
+	if mode != "joined" && mode != "restart-reservation" && mode != "future-start" {
 		var capability struct {
 			Contract string
 			Worker   bool
@@ -114,7 +115,7 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 		labels := models.LabelSet{"alertname": "fixture", "node": "node", "correlation_key": op["correlation"].(string), "alert_type": kind, "is_resolution": resolved, "severity": severity}
 		at, e := time.Parse(time.RFC3339Nano, start)
 		require.NoError(t, e)
-		body, e := json.Marshal(models.PostableAlerts{&models.PostableAlert{Alert: models.Alert{Labels: labels}, Annotations: models.LabelSet{managedAnnotation: string(encoded)}, StartsAt: strfmt.DateTime(at)}})
+		body, e := json.Marshal([]map[string]any{{"labels": labels, "annotations": models.LabelSet{managedAnnotation: string(encoded)}, "startsAt": strfmt.DateTime(at)}})
 		require.NoError(t, e)
 		r := conversionRequest(body, "smtpreceiver", sourceKey)
 		r.URL.Path = path
@@ -127,6 +128,40 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 		return w, APILabelSetToModelLabelSet(labels).Fingerprint()
 	}
 	u1 := event("11111111-1111-4111-8111-111111111111", "raise", 0)
+	if mode == "future-start" {
+		api.alertmanagerConfig.Global.ResolveTimeout = model.Duration(150 * time.Millisecond)
+		start := time.Now().UTC().Add(1200 * time.Millisecond).Truncate(time.Millisecond)
+		u1["started_at"] = start.Format(time.RFC3339Nano)
+		for _, path := range []string{"/api/v2/alerts", managedReadPath, managedConfirmPath} {
+			response, fp := post(u1, path, "major")
+			assert.Equal(t, http.StatusServiceUnavailable, response.Code, "%s: %s", path, response.Body.String())
+			_, missing := provider.Get(fp)
+			require.Error(t, missing)
+		}
+		encoded, e := json.Marshal(u1)
+		require.NoError(t, e)
+		key, e := boundKey(encoded)
+		require.NoError(t, e)
+		_, hasStamp := provider.ManagedApplied(key)
+		require.False(t, hasStamp)
+		miss, e := owner.state(t.Context(), "lookup", map[string]any{"operation": json.RawMessage(encoded)}, key)
+		require.NoError(t, e)
+		require.Equal(t, "complete_miss", miss.State)
+		require.Zero(t, miss.Generation)
+		time.Sleep(time.Until(start))
+		u1["attempt"] = strings.Repeat("f", 32)
+		u1["issued_at"] = time.Now().Unix()
+		u1["deadline"] = time.Now().Unix() + 10
+		response, _ := post(u1, managedReadPath, "major")
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		response, fp := post(u1, "/api/v2/alerts", "major")
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		require.Contains(t, response.Body.String(), "forwarded")
+		stored, e := provider.Get(fp)
+		require.NoError(t, e)
+		require.True(t, start.Equal(stored.StartsAt))
+		return
+	}
 	w, _ := post(u1, managedReadPath, "major")
 	require.Equal(t, 200, w.Code, w.Body.String())
 	require.Contains(t, w.Body.String(), "complete_miss")

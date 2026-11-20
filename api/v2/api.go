@@ -407,7 +407,9 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 				if capsule := string(alerts[i].Annotations[conversionAnnotation]); capsule != "" && capsuleProducer(capsule) != actor {
 					return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed fingerprint contribution")
 				}
-				if api.managedOwner == nil || !api.managedOwner.ready.Load() {
+				// A source clock ahead of native time can put the original start
+				// beyond the expiry synthesized below, including on signed reads.
+				if api.managedOwner == nil || !api.managedOwner.ready.Load() || alerts[i].StartsAt.After(time.Now()) {
 					return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
 						http.Error(w, "managed publication unavailable", http.StatusServiceUnavailable)
 					})
