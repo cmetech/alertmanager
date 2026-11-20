@@ -46,6 +46,7 @@ import (
 	alertops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/provider/mem"
 )
 
@@ -588,4 +589,25 @@ func joinedWebhook(t *testing.T, api *API, provider *mem.Alerts, dir, ca string,
 		}
 		http.Error(w, "missing native member", 404)
 	}
+}
+
+func TestManagedVisibleTerminalClearSurvivesStaleWriteBarrier(t *testing.T) {
+	p, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	defer p.Close()
+	p.EnableManaged()
+	key := strings.Repeat("a", 64)
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "clear"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
+	slot := &ownerSlot{Operation: json.RawMessage(`{"kind":"clear"}`), Generation: 1, Projection: snapshot(a)}
+	a.ManagedMember = alert.ManagedMembership{Episode: key, Generation: 1}
+	require.NoError(t, p.ApplyManaged(t.Context(), key, a, provider.ManagedStamp{Generation: 1}, func() error { return nil }))
+	closed := now.Add(-time.Minute).UnixMilli()
+	state := ownerState{Phase: "retired", Closed: &closed, Current: slot, Generation: 1}
+	owner := managedOwner{store: p}
+	require.NoError(t, owner.recover(t.Context(), key, &managedGate{}, state))
+	// Even after effective expiry a retained resolved provider member can still
+	// supply a genuine send_resolved callback before native GC.
+	slot.Projection.Alert.EndsAt = now.Add(-time.Second)
+	require.NoError(t, owner.recover(t.Context(), key, &managedGate{}, state))
 }

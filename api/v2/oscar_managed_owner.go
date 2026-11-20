@@ -153,6 +153,7 @@ type ownerState struct {
 }
 
 type managedStore interface {
+	Get(model.Fingerprint) (*alert.Alert, error)
 	EnableManaged()
 	ManagedShutdown() <-chan struct{}
 	ApplyManaged(context.Context, string, *alert.Alert, provider.ManagedStamp, func() error) error
@@ -543,6 +544,21 @@ func (o *managedOwner) recheckClosed(ctx context.Context, key string, raw json.R
 
 func (o *managedOwner) recover(ctx context.Context, key string, g *managedGate, s ownerState) error {
 	if (s.Phase == "retired" || s.Phase == "closed") && s.Closed != nil && time.Now().UnixMilli() >= *s.Closed+15000 {
+		// A terminal clear is itself an ordinary native alert. Group wait and
+		// repeat intervals can outlive the SQL stale-write barrier. Preserve its
+		// pinned callback until the provider can no longer authenticate that member.
+		if current := s.Current; current != nil && current.Generation == s.Generation && current.claims().Kind == "clear" {
+			if current.Projection.Alert.EndsAt.After(time.Now()) {
+				return nil
+			}
+			member, lookupErr := o.store.Get(current.Projection.Alert.Fingerprint())
+			if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+				return lookupErr
+			}
+			if member != nil && member.ManagedMember.Episode == key && member.ManagedMember.Generation == s.Generation {
+				return nil
+			}
+		}
 		out, err := o.state(ctx, "compact", map[string]any{"key": key, "generation": s.Generation}, key)
 		if err == nil && out.Phase == "archived" {
 			o.store.ReleaseManaged(key, s.Generation)
