@@ -1,6 +1,7 @@
 ## Unreleased — Managed receiver operation admission
 
 - The exact-body native guard recognizes the confined SMTP producer and validates one managed operation against its actor, bounded attempt, labels and original or clear start. The native endpoint returns unavailable until the episode owner and worker are installed. Ordinary writes scrub the reserved lifecycle claim.
+- Managed native admission checks the mapped source ID for named TL1 webhook operations and rejects all SMTP fingerprint controls in labels and annotations. Deploy with the matching receiver updates.
 - Deploy with the matching OSCAR backend and secret bootstrap. Default unconfigured operation requires no data migration.
 
 ## OSCAR runtime branding — 2026-11-15
