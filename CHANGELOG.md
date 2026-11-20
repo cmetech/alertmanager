@@ -2,6 +2,8 @@
 
 - The optional managed owner stages provider mutations, protects owned fingerprints, preserves ordered subscription delivery, and reconciles signed operations with AM over verified HTTPS. Bootstrap requires independent credentials, compatible AM storage and a ready History worker. Ordinary installations retain their release image and settings. Operator qualification requires rebuilding this fork and commissioning the matching AM configuration.
 
+- Identical timeout refreshes persist the acknowledged expiry with AM. Startup and periodic maintenance bound each ordered handoff and continue with sibling episodes. After completed restoration, an expired, unpromoted prior-process proposal can be superseded under its generation. A future alert start remains retryable until the native clock catches up. Qualify alongside the matching private AM owner before enabling managed sources.
+
 ## Unreleased — Managed receiver operation admission
 
 - The exact-body native guard recognizes the confined SMTP producer and validates one managed operation against its actor, bounded attempt, labels and original or clear start. The native endpoint returns unavailable until the episode owner and worker are installed. Ordinary writes scrub the reserved lifecycle claim.
