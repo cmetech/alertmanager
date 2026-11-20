@@ -1,0 +1,32 @@
+# Depot CI Migration
+# Source: .github/workflows/build-release-branch.yml
+#
+# Changes made:
+# - Rewrote .github/ path references to .depot/
+# - Changed GitHub runs-on labels to their Depot equivalents
+
+---
+name: Build release branch
+# GitLab runners are the default; Depot execution is opt-in.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Run ci
+    uses: $/.depot/workflows/ci.yml
+
+  build:
+    name: Build Alertmanager for all architectures
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    strategy:
+      matrix:
+        thread: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    needs: ci
+    steps:
+      - uses: prometheus/promci/build@872d318d090d73df349cb6ed90aadd072ca478f7 # v0.10.0
+        with:
+          parallelism: 12
+          thread: ${{ matrix.thread }}
