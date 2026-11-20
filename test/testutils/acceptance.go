@@ -16,6 +16,8 @@ package testutils
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +43,8 @@ type AcceptanceOpts struct {
 	RoutePrefix  string
 	Tolerance    time.Duration
 	baseTime     time.Time
+	// WithoutSilenceMutationKey leaves the real server unconfigured for fail-closed tests.
+	WithoutSilenceMutationKey bool
 }
 
 // AlertString formats an alert for display with relative times.
@@ -113,6 +117,24 @@ func (t *AcceptanceTest) AlertmanagerCluster(conf string, size int) *Alertmanage
 			t.Fatal(err)
 		}
 		am.dir = dir
+
+		// Each member has independent, temporary credentials. Keep them outside the
+		// data directory so they survive restarts without entering stored state.
+		credentialDir := t.TempDir()
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			t.Fatal(err)
+		}
+		am.silenceMutationKey = hex.EncodeToString(key)
+		am.silenceMutationKeyFile = filepath.Join(credentialDir, "silence-mutation-key")
+		if err := os.WriteFile(am.silenceMutationKeyFile, []byte(am.silenceMutationKey), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		am.httpConfigFile = filepath.Join(credentialDir, "http.yml")
+		httpConfig := fmt.Sprintf("http_headers:\n  X-Oscar-Silence-Mutation-Key:\n    files: [%q]\n", am.silenceMutationKeyFile)
+		if err := os.WriteFile(am.httpConfigFile, []byte(httpConfig), 0o600); err != nil {
+			t.Fatal(err)
+		}
 
 		cf, err := os.Create(filepath.Join(dir, "config.yml"))
 		if err != nil {
@@ -231,6 +253,10 @@ type Alertmanager struct {
 	confFile *os.File
 	dir      string
 
+	silenceMutationKey     string
+	silenceMutationKeyFile string
+	httpConfigFile         string
+
 	cmd  *exec.Cmd
 	errc chan<- error
 }
@@ -243,6 +269,11 @@ func (am *Alertmanager) ClusterAddr() string {
 // APIAddr returns the API address for the instance.
 func (am *Alertmanager) APIAddr() string {
 	return am.apiAddr
+}
+
+// HTTPConfigFile returns the member-specific HTTP credentials for amtool.
+func (am *Alertmanager) HTTPConfigFile() string {
+	return am.httpConfigFile
 }
 
 // AlertmanagerCluster represents a group of Alertmanager instances
@@ -365,6 +396,9 @@ func (am *Alertmanager) Start(additionalArg []string) error {
 		"--cluster.listen-address", "127.0.0.1:0",
 		"--cluster.settle-timeout", "0s",
 	}
+	if !am.Opts.WithoutSilenceMutationKey {
+		args = append(args, "--oscar.silence-mutation-key-file", am.silenceMutationKeyFile)
+	}
 	if len(am.Opts.FeatureFlags) > 0 {
 		args = append(args, "--enable-feature", strings.Join(am.Opts.FeatureFlags, ","))
 	}
@@ -402,6 +436,7 @@ func (am *Alertmanager) Start(additionalArg []string) error {
 
 	// Update API client with discovered address
 	transport := httptransport.New(am.apiAddr, am.Opts.RoutePrefix+"/api/v2/", nil)
+	transport.DefaultAuthentication = httptransport.APIKeyAuth("X-Oscar-Silence-Mutation-Key", "header", am.silenceMutationKey)
 	am.clientV2 = apiclient.New(transport, strfmt.Default)
 
 	// Discover cluster address from API (also serves as readiness check)

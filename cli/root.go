@@ -194,8 +194,14 @@ Config File:
 The alertmanager tool will read a config file in YAML format from one of two
 default config locations depending on the operating system.
 
-On non-Windows systems:
-  $HOME/.config/amtool/config.yml or /etc/amtool/config.yml
+On macOS:
+  $HOME/Library/Application Support/amtool/config.yml or /etc/amtool/config.yml
+
+On other Unix systems:
+  $XDG_CONFIG_HOME/amtool/config.yml (defaults to $HOME/.config/amtool/config.yml)
+  or /etc/amtool/config.yml
+
+On non-Windows systems, XDG_CONFIG_DIRS overrides /etc with its first directory.
 
 On Windows systems:
   %APPDATA%\amtool\config.yml or %ProgramData%\amtool\config.yml
