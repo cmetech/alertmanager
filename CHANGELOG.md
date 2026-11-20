@@ -1,3 +1,7 @@
+## Unreleased — Managed History notification callbacks
+
+- Verified native group webhooks include the applied episode, generation, event and last successful notification-log timestamp. Each send rechecks current provider membership, routing, mute intervals, inhibition and silence. Install with the matching private AM callback and ordinary History worker. Commission one verified OSCAR webhook per receiver. Default installations keep their existing transport.
+
 ## Unreleased — Managed native episode owner
 
 - The optional managed owner stages provider mutations, protects owned fingerprints, preserves ordered subscription delivery, and reconciles signed operations with AM over verified HTTPS. Bootstrap requires independent credentials, compatible AM storage and a ready History worker. Ordinary installations retain their release image and settings. Operator qualification requires rebuilding this fork and commissioning the matching AM configuration.
