@@ -181,6 +181,9 @@ func AlertToOpenAPIAlert(source *alert.Alert, status alert.AlertStatus, receiver
 		},
 	}
 
+	if source.ManagedReceiver {
+		aa.Annotations["__oscar_managed_native"] = "managed-episode-owner-v1"
+	}
 	if source.Annotations[conversionAnnotation] != "" {
 		aa.Annotations["__oscar_fingerprint_conversion_resolution"] = alert.ConversionResolutionReceipt(source)
 	}

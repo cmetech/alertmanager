@@ -42,8 +42,9 @@ type Alert struct {
 	model.Alert
 
 	// The authoritative timestamp.
-	UpdatedAt time.Time
-	Timeout   bool
+	ManagedReceiver bool `json:"-"`
+	UpdatedAt       time.Time
+	Timeout         bool
 	// EndTimeSource and ResolveTimeout describe the effective EndsAt. They are
 	// separate from Timeout, whose existing value controls native merge behavior.
 	EndTimeSource  EndTimeSource

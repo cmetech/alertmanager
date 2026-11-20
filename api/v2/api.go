@@ -15,6 +15,7 @@ package v2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,11 +67,12 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/api/v2")
 
 // API represents an Alertmanager API v2.
 type API struct {
-	peer        cluster.ClusterPeer
-	silences    *silence.Silences
-	alerts      provider.Alerts
-	alertGroups groupsFn
-	uptime      time.Time
+	managedOwner *managedOwner
+	peer         cluster.ClusterPeer
+	silences     *silence.Silences
+	alerts       provider.Alerts
+	alertGroups  groupsFn
+	uptime       time.Time
 
 	// mtx protects alertmanagerConfig, setAlertStatus and route.
 	mtx sync.RWMutex
@@ -386,7 +388,10 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 
 	alerts := OpenAPIAlertsToAlerts(ctx, params.Alerts)
 	actor := conversionActor(params.HTTPRequest.Context())
+	var managedProof string
 	for i := range alerts {
+		delete(alerts[i].Labels, "__oscar_managed_native")
+		delete(alerts[i].Annotations, "__oscar_managed_native")
 		delete(alerts[i].Labels, managedAnnotation)
 		if proof, present := alerts[i].Annotations[managedAnnotation]; present {
 			delete(alerts[i].Annotations, managedAnnotation)
@@ -402,13 +407,15 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 				if capsule := string(alerts[i].Annotations[conversionAnnotation]); capsule != "" && capsuleProducer(capsule) != actor {
 					return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed fingerprint contribution")
 				}
-				// The episode owner and worker must both be installed before managed delivery.
-				return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
-					http.Error(w, "managed publication unavailable", http.StatusServiceUnavailable)
-				})
+				if api.managedOwner == nil || !api.managedOwner.ready.Load() {
+					return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+						http.Error(w, "managed publication unavailable", http.StatusServiceUnavailable)
+					})
+				}
+				managedProof = string(proof)
 			}
 		}
-		if actor == "smtpreceiver" {
+		if actor == "smtpreceiver" && managedProof == "" {
 			return alert_ops.NewPostAlertsBadRequest().WithPayload("managed operation required")
 		}
 		capsule := string(alerts[i].Annotations[conversionAnnotation])
@@ -473,6 +480,39 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 			storedAlert.ResolveTimeout = resolveTimeout
 		}
 		validAlerts = append(validAlerts, storedAlert)
+	}
+	if path, _ := ctx.Value(managedReadKey{}).(string); path != "" {
+		if managedProof == "" || validationErrs != nil || len(validAlerts) != 1 {
+			return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed source read")
+		}
+		state, err := api.managedOwner.read(ctx, []byte(managedProof), path == managedConfirmPath)
+		return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+			if err != nil {
+				http.Error(w, "managed evidence unavailable", 503)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(w).Encode(state)
+		})
+	}
+	if managedProof != "" {
+		if validationErrs != nil || len(validAlerts) != 1 {
+			return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed alert")
+		}
+		result, err := api.managedOwner.publish(ctx, []byte(managedProof), validAlerts[0])
+		return middleware.ResponderFunc(func(w http.ResponseWriter, _ runtime.Producer) {
+			if err != nil {
+				http.Error(w, "managed publication unavailable", 503)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if result == "episode_closed" {
+				_, _ = w.Write([]byte(`{"status":"filtered","reason":"episode_closed"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"status":"forwarded"}`))
+		})
 	}
 	var putErr error
 	if actor == "alertmanager-resolution" {

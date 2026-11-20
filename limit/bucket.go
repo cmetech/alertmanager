@@ -158,3 +158,16 @@ func (b *Bucket[V]) Upsert(value V, priority time.Time) (ok bool) {
 
 	return false
 }
+
+// Clone returns an independent heap and index for staging an atomic store batch.
+func (b *Bucket[V]) Clone() *Bucket[V] {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	clone := NewBucket[V](b.capacity)
+	for _, entry := range b.items {
+		copy := *entry
+		clone.items = append(clone.items, &copy)
+		clone.index[copy.value] = &copy
+	}
+	return clone
+}

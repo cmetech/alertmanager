@@ -252,3 +252,41 @@ func (a *Alerts) Len() int {
 
 	return len(a.alerts)
 }
+
+// SetBatch validates the final reservation after all stores and quotas are locked.
+// The caller validates provenance and supplies retirements before the new firing.
+func (a *Alerts) SetBatch(changes []*alert.Alert, validate func() error) error {
+	a.Lock()
+	defer a.Unlock()
+	if a.destroyed {
+		return ErrDestroyed
+	}
+	staged := make(map[string]*limit.Bucket[model.Fingerprint])
+	if a.perAlertLimit > 0 {
+		for _, change := range changes {
+			name := change.Name()
+			bucket := staged[name]
+			if bucket == nil {
+				if existing := a.limits[name]; existing != nil {
+					bucket = existing.Clone()
+				} else {
+					bucket = limit.NewBucket[model.Fingerprint](a.perAlertLimit)
+				}
+				staged[name] = bucket
+			}
+			if !bucket.Upsert(change.Fingerprint(), change.EndsAt) {
+				return ErrLimited
+			}
+		}
+	}
+	if err := validate(); err != nil {
+		return err
+	}
+	for name, bucket := range staged {
+		a.limits[name] = bucket
+	}
+	for _, change := range changes {
+		a.alerts[change.Fingerprint()] = change
+	}
+	return nil
+}

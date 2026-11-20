@@ -33,6 +33,10 @@ import (
 const conversionAnnotation = "__oscar_fingerprint_conversion"
 
 type conversionActorKey struct{}
+type managedReadKey struct{}
+
+const managedReadPath = "/api/v2/oscar/managed-episode/status"
+const managedConfirmPath = "/api/v2/oscar/managed-episode/confirm"
 
 func conversionActor(ctx context.Context) string {
 	actor, _ := ctx.Value(conversionActorKey{}).(string)
@@ -72,7 +76,9 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 			json.NewEncoder(w).Encode(map[string]any{"contract": "native-conversion-ingress-v1", "actors": actors, "callback_contract": callback})
 			return
 		}
-		if r.Method != "POST" || r.URL.Path != "/api/v2/alerts" {
+		path := r.URL.Path
+		readManaged := path == managedReadPath || path == managedConfirmPath
+		if r.Method != "POST" || (path != "/api/v2/alerts" && !readManaged) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -84,6 +90,10 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 			}
 		}
 		if !present {
+			if readManaged {
+				http.Error(w, "managed source assertion required", 401)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -112,7 +122,7 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 			return
 		}
 		sum := sha256.Sum256(body)
-		message := strings.Join([]string{"native-conversion-ingress-v1", "POST", "/api/v2/alerts", actor, kid, stamp, hex.EncodeToString(sum[:])}, "\n")
+		message := strings.Join([]string{"native-conversion-ingress-v1", "POST", path, actor, kid, stamp, hex.EncodeToString(sum[:])}, "\n")
 		mac := hmac.New(sha256.New, key)
 		mac.Write([]byte(message))
 		signature, err := hex.DecodeString(r.Header.Get(names[3]))
@@ -125,7 +135,14 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), conversionActorKey{}, actor)))
+		ctx := context.WithValue(r.Context(), conversionActorKey{}, actor)
+		if readManaged {
+			ctx = context.WithValue(ctx, managedReadKey{}, path)
+			r = r.Clone(ctx)
+			r.URL.Path = "/api/v2/alerts"
+			r.URL.RawPath = ""
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -160,6 +177,15 @@ func (api *API) conversionCallbackReady() bool {
 				webhook.HTTPConfig == nil || webhook.HTTPConfig.Authorization == nil || webhook.HTTPConfig.Authorization.Type != "Bearer" ||
 				webhook.HTTPConfig.Authorization.CredentialsFile == "" || webhook.MaxAlerts != 0 || webhook.Payload != nil || !webhook.SendResolved() {
 				return false
+			}
+			if owner := api.managedOwner; owner != nil {
+				cfg := webhook.HTTPConfig
+				if target.Scheme != "https" || target.Host != "alertmanager-middleware:9400" || target.User != nil ||
+					target.Fragment != "" || target.RawPath != "" || (target.RawQuery != "" && target.RawQuery != "notifier_type=oscaradmin") ||
+					cfg.FollowRedirects || cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.CAFile != owner.client.caFile ||
+					(cfg.TLSConfig.ServerName != "" && cfg.TLSConfig.ServerName != "alertmanager-middleware") {
+					return false
+				}
 			}
 			actual, err := os.ReadFile(webhook.HTTPConfig.Authorization.CredentialsFile)
 			if err != nil || !hmac.Equal(bytes.TrimSpace(actual), key) {
