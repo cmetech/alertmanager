@@ -62,6 +62,7 @@ type API struct {
 // Options for the creation of an API object. Alerts, Silences and GroupFunc
 // are mandatory. The zero value for everything else is a safe default.
 type Options struct {
+	ManagedOwnerCA, ManagedOwnerKeyFile string
 	// SilenceMutationKey enables OSCAR's native silence-write guard when set.
 	SilenceMutationKey      []byte
 	ConversionAdmissionKeys map[string][]byte
@@ -211,6 +212,9 @@ func New(opts Options) (*API, error) {
 		return nil, err
 	}
 	v2.InstallConversionAdmission(opts.ConversionAdmissionKeys, opts.ConversionCallbackKey)
+	if err := v2.InstallManagedOwner(opts.ManagedOwnerCA, opts.ManagedOwnerKeyFile, opts.ConversionAdmissionKeys, opts.ConversionCallbackKey); err != nil {
+		return nil, err
+	}
 	connect := apiconnect.NewAPI(effective.connect)
 
 	requestsInFlight := prometheus.NewGauge(prometheus.GaugeOpts{

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/provider"
 )
 
 const conversionAnnotation = "__oscar_fingerprint_conversion"
@@ -26,6 +27,15 @@ const conversionAnnotation = "__oscar_fingerprint_conversion"
 // PutResolvedConversion resolves current source-owned entries without creating authority.
 // All preconditions and mutation share Put/GC's provider mutex; no I/O occurs here.
 func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Alert) error {
+	stream := a.handoff.Load()
+	var messages []*provider.Alert
+	var targets []listeningAlerts
+	if stream != nil {
+		if err := stream.acquire(ctx, a.shutdown); err != nil {
+			return err
+		}
+		defer func() { a.drain(stream, targets, messages) }()
+	}
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	owned := make([]*alert.Alert, 0, len(alerts))
@@ -44,6 +54,8 @@ func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Ale
 		}
 		reason := ""
 		switch {
+		case a.owners[incoming.Fingerprint()] != "":
+			reason = "managed owner"
 		case err != nil:
 			reason = "missing"
 		case incoming.Timeout || incoming.EndsAt.IsZero() || incoming.EndsAt.After(nativeNow) || incoming.EndsAt.Before(old.StartsAt) || incoming.EndsAt.After(old.EndsAt):
@@ -77,5 +89,9 @@ func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Ale
 		resolved.EndTimeSource = incoming.EndTimeSource
 		owned = append(owned, &resolved)
 	}
-	return a.putLocked(ctx, owned...)
+	if stream == nil {
+		return a.putLocked(ctx, nil, owned...)
+	}
+	targets = a.subscribers()
+	return a.putLocked(ctx, &messages, owned...)
 }

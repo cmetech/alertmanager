@@ -41,6 +41,7 @@ const (
 	keyNotificationReason
 	keyMutedAlerts
 	keyAggrGroupID
+	keyManagedPreviousNotification
 	keyFlushID
 	keyGroupMatchers
 	keyRouteLabels
@@ -245,4 +246,10 @@ func WithNflogStore(ctx context.Context, store *nflog.Store) context.Context {
 func NflogStore(ctx context.Context) (*nflog.Store, bool) {
 	v, ok := ctx.Value(keyNflogStore).(*nflog.Store)
 	return v, ok
+}
+
+// PreviousNotification identifies the nflog baseline retained until this integration succeeds.
+func PreviousNotification(ctx context.Context) (int64, bool) {
+	baseline, ok := ctx.Value(keyManagedPreviousNotification).(int64)
+	return baseline, ok
 }

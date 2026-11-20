@@ -1,3 +1,22 @@
+## Unreleased — Managed History notification callbacks
+
+- The local native qualification fixture can advance the same notification group with only an ordinary member present. This exercises managed target receipt recovery when the member later reappears.
+
+- A terminal clear keeps its notification context until native expiry and provider removal, including group waits longer than the stale-write barrier.
+
+- Verified native group webhooks include the applied episode, generation, event and last successful notification-log timestamp. Each send rechecks current provider membership, routing, mute intervals, inhibition and silence. Install with the matching private AM callback and ordinary History worker. Commission one verified OSCAR webhook per receiver. Default installations keep their existing transport.
+
+## Unreleased — Managed native episode owner
+
+- The optional managed owner stages provider mutations, protects owned fingerprints, preserves ordered subscription delivery, and reconciles signed operations with AM over verified HTTPS. Bootstrap requires independent credentials, compatible AM storage and a ready History worker. Ordinary installations retain their release image and settings. Operator qualification requires rebuilding this fork and commissioning the matching AM configuration.
+
+- Identical timeout refreshes persist the acknowledged expiry with AM. Startup and periodic maintenance bound each ordered handoff, visit sibling episodes, and wait a full retry interval after each pass so live sources can acquire their episode. After completed restoration, an expired, unpromoted prior-process proposal can be superseded under its generation. Signed publication, status and confirmation return retryable unavailable for a future managed start before calculating the native expiry. The original start remains eligible once the native clock catches up. Qualify alongside the matching private AM owner before enabling managed sources.
+
+## Unreleased — Managed receiver operation admission
+
+- The exact-body native guard recognizes the confined SMTP producer and validates one managed operation against its actor, bounded attempt, labels and original or clear start. The native endpoint returns unavailable until the episode owner and worker are installed. Ordinary writes scrub the reserved lifecycle claim.
+- Managed native admission checks the mapped source ID for named TL1 webhook operations and rejects all SMTP fingerprint controls in labels and annotations. Deploy with the matching receiver updates.
+- Deploy with the matching OSCAR backend and secret bootstrap. Default unconfigured operation requires no data migration.
 ## GitLab CI compute policy — 2026-11-19
 
 - Keep Depot workflows opt-in and disable GitHub Actions at repository level; GitLab runners are the default after deliberate pushes. Preserve workflow job definitions for a future explicit provider switch. Affected component: CI only; no service restart, build, or schema migration. GitLab rollout/coverage must be verified per branch.

@@ -45,7 +45,12 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/provider/mem"
 type Alerts struct {
 	cancel context.CancelFunc
 
-	mtx sync.Mutex
+	mtx      sync.Mutex
+	stamps   map[string]provider.ManagedStamp
+	handoff  atomic.Pointer[orderedHandoff]
+	shutdown <-chan struct{}
+	owners   map[model.Fingerprint]string
+	variants map[string]map[model.Fingerprint]bool
 
 	alerts *store.Alerts
 
@@ -222,6 +227,7 @@ func NewAlerts(
 	a := &Alerts{
 		alerts:     store.NewAlerts().WithPerAlertLimit(perAlertNameLimit),
 		cancel:     cancel,
+		shutdown:   ctx.Done(),
 		listeners:  map[int]listeningAlerts{},
 		next:       0,
 		logger:     l.With("component", "provider"),
@@ -280,6 +286,16 @@ func (a *Alerts) gcAlerts() []*alert.Alert {
 	start := time.Now()
 	defer func() { observeDuration(a.gcHold, start); a.mtx.Unlock() }()
 	deleted := a.alerts.GC()
+	for _, old := range deleted {
+		fp := old.Fingerprint()
+		if owner := a.owners[fp]; owner != "" && !a.variants[owner][fp] {
+			delete(a.owners, fp)
+			delete(a.variants[owner], fp)
+			if len(a.variants[owner]) == 0 {
+				delete(a.variants, owner)
+			}
+		}
+	}
 	if a.observer != nil {
 		for _, alrt := range deleted {
 			a.observer.Deleted(alrt)
@@ -289,6 +305,15 @@ func (a *Alerts) gcAlerts() []*alert.Alert {
 }
 
 func (a *Alerts) gcListeners() {
+	if stream := a.handoff.Load(); stream != nil {
+		// A committed batch holds subscriber channel references until its drain completes.
+		select {
+		case stream.turn <- struct{}{}:
+			defer func() { <-stream.turn }()
+		default:
+			return
+		}
+	}
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 
@@ -388,16 +413,33 @@ func (a *Alerts) Get(fp model.Fingerprint) (*alert.Alert, error) {
 
 // Put adds the given alert to the set.
 func (a *Alerts) Put(ctx context.Context, alerts ...*alert.Alert) error {
+	if stream := a.handoff.Load(); stream != nil {
+		for _, incoming := range alerts {
+			if err := stream.acquire(ctx, a.shutdown); err != nil {
+				return err
+			}
+			a.mtx.Lock()
+			var messages []*provider.Alert
+			err := a.putLocked(ctx, &messages, incoming)
+			targets := a.subscribers()
+			a.mtx.Unlock()
+			a.drain(stream, targets, messages)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	wait := time.Now()
 	a.mtx.Lock()
 	start := time.Now()
 	observeDuration(a.putWait, wait)
 	defer func() { observeDuration(a.putHold, start); a.mtx.Unlock() }()
 
-	return a.putLocked(ctx, alerts...)
+	return a.putLocked(ctx, nil, alerts...)
 }
 
-func (a *Alerts) putLocked(ctx context.Context, alerts ...*alert.Alert) error {
+func (a *Alerts) putLocked(ctx context.Context, messages *[]*provider.Alert, alerts ...*alert.Alert) error {
 	ctx, span := tracer.Start(ctx, "provider.mem.Put",
 		trace.WithAttributes(
 			attribute.Int("alerting.alerts.count", len(alerts)),
@@ -408,6 +450,9 @@ func (a *Alerts) putLocked(ctx context.Context, alerts ...*alert.Alert) error {
 
 	for _, alrt := range alerts {
 		fp := alrt.Fingerprint()
+		if a.owners[fp] != "" {
+			continue
+		}
 
 		existing := false
 
@@ -462,6 +507,10 @@ func (a *Alerts) putLocked(ctx context.Context, alerts ...*alert.Alert) error {
 			Header: metadata,
 		}
 
+		if messages != nil {
+			*messages = append(*messages, msg)
+			continue
+		}
 		for _, l := range a.listeners {
 			select {
 			case l.alerts <- msg:

@@ -174,3 +174,25 @@ func TestGC(t *testing.T) {
 	}
 	require.Len(t, resolved, n)
 }
+
+func TestManagedBatchLeavesQuotaAndExistingAlertsUntouched(t *testing.T) {
+	now := time.Now()
+	makeAlert := func(id string, until time.Time) *alert.Alert {
+		return alert.New(model.Alert{Labels: model.LabelSet{"alertname": "alarm", "id": model.LabelValue(id)}, StartsAt: now.Add(-time.Hour), EndsAt: until}, now, false)
+	}
+	s := NewAlerts().WithPerAlertLimit(1)
+	old := makeAlert("old", now.Add(time.Hour))
+	retired := makeAlert("old", now.Add(-time.Second))
+	first := makeAlert("first", now.Add(time.Hour))
+	second := makeAlert("second", now.Add(time.Hour))
+	require.NoError(t, s.Set(old))
+	require.ErrorIs(t, s.SetBatch([]*alert.Alert{retired, first, second}, func() error { return nil }), ErrLimited)
+	got, err := s.Get(old.Fingerprint())
+	require.NoError(t, err)
+	require.Equal(t, old, got)
+	require.ErrorIs(t, s.Set(first), ErrLimited)
+	require.Equal(t, 1, s.Len())
+	require.ErrorIs(t, s.SetBatch([]*alert.Alert{retired, first}, func() error { return context.Canceled }), context.Canceled)
+	require.ErrorIs(t, s.Set(first), ErrLimited)
+	require.NoError(t, s.SetBatch([]*alert.Alert{retired, first}, func() error { return nil }))
+}

@@ -152,6 +152,24 @@ func (i *Integration) Notify(ctx context.Context, alerts ...*alert.Alert) (verdi
 		span.End()
 	}()
 
+	if i.name != "webhook" {
+		for _, a := range alerts {
+			if a.ManagedReceiver {
+				// A config reload may leave an older integration in flight. Only
+				// the canonical webhook can consume a managed eligibility proof.
+				ordinary := make([]*alert.Alert, 0, len(alerts))
+				for _, member := range alerts {
+					if !member.ManagedReceiver {
+						ordinary = append(ordinary, member)
+					}
+				}
+				if len(ordinary) == 0 {
+					return Success()
+				}
+				return i.notifier.Notify(ctx, ordinary...)
+			}
+		}
+	}
 	return i.notifier.Notify(ctx, alerts...)
 }
 

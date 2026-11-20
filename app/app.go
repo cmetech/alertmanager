@@ -394,13 +394,14 @@ func (a *App) setup() error {
 		ConnectSendMaxBytes:        opts.ConnectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: opts.ConnectMaxRequestBodyBytes,
 		SilenceMutationKey:         opts.SilenceMutationKey,
-		ConversionAdmissionKeys:    opts.ConversionAdmissionKeys,
-		ConversionCallbackKey:      opts.ConversionCallbackKey,
-		CORSHandler:                opts.CORSHandler,
-		Logger:                     logger.With("component", "api"),
-		Registry:                   reg,
-		RequestDuration:            m.requestDuration,
-		GroupFunc:                  groupFn,
+		ManagedOwnerCA:             opts.ManagedOwnerCA, ManagedOwnerKeyFile: opts.ManagedOwnerKeyFile,
+		ConversionAdmissionKeys: opts.ConversionAdmissionKeys,
+		ConversionCallbackKey:   opts.ConversionCallbackKey,
+		CORSHandler:             opts.CORSHandler,
+		Logger:                  logger.With("component", "api"),
+		Registry:                reg,
+		RequestDuration:         m.requestDuration,
+		GroupFunc:               groupFn,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create API: %w", err)
