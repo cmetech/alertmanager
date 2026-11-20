@@ -18,6 +18,114 @@ produces:
 basePath: "/api/v2/"
 
 paths:
+  /oscar/inhibition/status:
+    get:
+      tags: [oscarInhibition]
+      operationId: getOscarInhibitionStatus
+      description: Internal managed inhibition status; requires the dedicated service credential.
+      parameters:
+        - $ref: '#/parameters/oscarInhibitionKey'
+      responses:
+        '200':
+          description: Active and durable state are reported separately. ETag is the concurrency authority.
+          headers:
+            ETag:
+              type: string
+          schema:
+            $ref: '#/definitions/oscarInhibitionStatus'
+        '403':
+          description: Invalid or missing service credential
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '503':
+          description: Managed coordinator unavailable
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+  /oscar/inhibition/validate:
+    post:
+      tags: [oscarInhibition]
+      operationId: validateOscarInhibition
+      description: Validate and canonicalize a complete structured managed set without side effects.
+      parameters:
+        - $ref: '#/parameters/oscarInhibitionKey'
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/oscarInhibitionSet'
+      responses:
+        '200':
+          description: Canonical definition and semantic digest
+          schema:
+            $ref: '#/definitions/oscarInhibitionValidation'
+        '400':
+          description: Invalid authored rules
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '403':
+          description: Invalid or missing service credential
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '413':
+          description: Request exceeds byte limit
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+  /oscar/inhibition/rules:
+    put:
+      tags: [oscarInhibition]
+      operationId: putOscarInhibitionRules
+      description: Replace the whole managed set. Errors may follow activation; inspect status and reconcile. Same-content retries repair durability without activating components.
+      parameters:
+        - $ref: '#/parameters/oscarInhibitionKey'
+        - in: header
+          name: If-Match
+          required: true
+          type: string
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: '#/definitions/oscarInhibitionSet'
+      responses:
+        '200':
+          description: Active and durable confirmation
+          headers:
+            ETag:
+              type: string
+          schema:
+            $ref: '#/definitions/oscarInhibitionStatus'
+        '400':
+          description: Invalid authored rules
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '403':
+          description: Invalid or missing service credential
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '409':
+          description: Reserved name conflict in base configuration
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '412':
+          description: Stale ETag; re-read native and SQL state
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '413':
+          description: Request exceeds byte limit
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '422':
+          description: Runtime activation failed
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '428':
+          description: If-Match required
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
+        '503':
+          description: Persistence unconfirmed or coordinator unavailable
+          schema:
+            $ref: '#/definitions/oscarInhibitionError'
   /status:
     get:
       tags:
@@ -345,6 +453,12 @@ responses:
       type: string
 
 parameters:
+  oscarInhibitionKey:
+    name: X-Oscar-Inhibition-Key
+    in: header
+    required: true
+    type: string
+    description: Dedicated internal managed inhibition service credential.
   receiverMatchers:
     name: receiver_matchers
     in: query
@@ -356,6 +470,160 @@ parameters:
       type: string
 
 definitions:
+  oscarInhibitionMatcher:
+    type: object
+    additionalProperties: false
+    required: [label, operator, value]
+    properties:
+      label:
+        type: string
+      operator:
+        type: string
+        pattern: '^(=|!=|=~|!~)$'
+      value:
+        type: string
+  oscarInhibitionRule:
+    type: object
+    additionalProperties: false
+    required: [name, source_matchers, target_matchers, equal]
+    properties:
+      name:
+        type: string
+        pattern: '^oscar-inh-([1-9][0-9]*)-r[1-9][0-9]*$'
+      source_matchers:
+        type: array
+        items:
+          $ref: '#/definitions/oscarInhibitionMatcher'
+      target_matchers:
+        type: array
+        items:
+          $ref: '#/definitions/oscarInhibitionMatcher'
+      equal:
+        type: array
+        items:
+          type: string
+  oscarInhibitionSet:
+    type: object
+    additionalProperties: false
+    required: [rules]
+    properties:
+      rules:
+        type: array
+        items:
+          $ref: '#/definitions/oscarInhibitionRule'
+  oscarInhibitionValidation:
+    type: object
+    properties:
+      digest:
+        type: string
+      rules:
+        type: array
+        items:
+          $ref: '#/definitions/oscarInhibitionRule'
+  oscarInhibitionError:
+    type: object
+    properties:
+      code:
+        type: string
+      message:
+        type: string
+      errors:
+        type: array
+        items:
+          type: object
+          properties:
+            field:
+              type: string
+            message:
+              type: string
+      status:
+        $ref: '#/definitions/oscarInhibitionStatus'
+  oscarInhibitionStatus:
+    type: object
+    properties:
+      contract_version:
+        type: integer
+      build_version:
+        type: string
+      instance_id:
+        type: string
+      runtime_epoch:
+        type: string
+      etag:
+        type: string
+      active_digest:
+        type: string
+      persisted_digest:
+        type: string
+      active_generation:
+        type: integer
+        format: uint64
+      persisted_generation:
+        type: integer
+        format: uint64
+      managed_file_healthy:
+        type: boolean
+      last_successful_base_identity:
+        type: string
+      external_rule_names:
+        type: array
+        items:
+          type: string
+      rules:
+        type: array
+        items:
+          $ref: '#/definitions/oscarInhibitionRule'
+      error:
+        type: object
+        properties:
+          code:
+            type: string
+          message:
+            type: string
+      limits:
+        type: object
+        additionalProperties:
+          type: integer
+      recording:
+        type: object
+        properties:
+          supported:
+            type: boolean
+          flag_enabled:
+            type: boolean
+          sink_configured:
+            type: boolean
+          sink_initialized:
+            type: boolean
+          interest_active:
+            type: boolean
+          state:
+            type: string
+          runtime_epoch:
+            type: string
+          last_successful_receipt:
+            type: string
+            x-nullable: true
+          problem_since:
+            type: string
+            x-nullable: true
+          recovered_at:
+            type: string
+            x-nullable: true
+          admitted:
+            type: integer
+          capture_drops:
+            type: integer
+          suppressed_repeats:
+            type: integer
+          cache_bypasses:
+            type: integer
+          queue_length:
+            type: integer
+          output_drops:
+            type: integer
+          output_failures:
+            type: integer
   alertmanagerStatus:
     type: object
     properties:
@@ -612,6 +880,9 @@ definitions:
           startsAt:
             type: string
             format: date-time
+          startsAtRaw:
+            type: string
+            description: Exact UTC RFC3339Nano native occurrence start; startsAt retains its existing millisecond serialization.
           updatedAt:
             type: string
             format: date-time

@@ -69,7 +69,8 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 			if callbackReady() {
 				callback = "native-conversion-callback-v1"
 			}
-			json.NewEncoder(w).Encode(map[string]any{"contract": "native-conversion-ingress-v1", "actors": actors, "callback_contract": callback})
+			// The payload is JSON-safe; a failed response write cannot be retried here.
+			_ = json.NewEncoder(w).Encode(map[string]any{"contract": "native-conversion-ingress-v1", "actors": actors, "callback_contract": callback})
 			return
 		}
 		if r.Method != "POST" || r.URL.Path != "/api/v2/alerts" {
@@ -89,7 +90,7 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 		}
 		for _, name := range names {
 			if len(r.Header.Values(name)) != 1 || r.Header.Get(name) == "" {
-				http.Error(w, "invalid conversion admission", 401)
+				http.Error(w, "invalid conversion admission", http.StatusUnauthorized)
 				return
 			}
 		}
@@ -97,18 +98,18 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 		seconds, err := strconv.ParseInt(stamp, 10, 64)
 		key, exists := keys[actor+"/"+kid]
 		if err != nil || strconv.FormatInt(seconds, 10) != stamp || seconds < time.Now().Unix()-60 || seconds > time.Now().Unix()+5 || !exists || len(key) < 32 || r.URL.RawQuery != "" || r.Header.Get("Content-Encoding") != "" {
-			http.Error(w, "invalid conversion admission", 401)
+			http.Error(w, "invalid conversion admission", http.StatusUnauthorized)
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, 8*1024*1024+1))
 		if err != nil || len(body) > 8*1024*1024 {
-			http.Error(w, "invalid conversion body", 413)
+			http.Error(w, "invalid conversion body", http.StatusRequestEntityTooLarge)
 			return
 		}
 		// A slow sender cannot keep an otherwise valid assertion alive while the
 		// bounded exact body is read. Admission time is checked again at handoff.
 		if seconds < time.Now().Unix()-60 || seconds > time.Now().Unix()+5 {
-			http.Error(w, "invalid conversion admission", 401)
+			http.Error(w, "invalid conversion admission", http.StatusUnauthorized)
 			return
 		}
 		sum := sha256.Sum256(body)
@@ -117,11 +118,11 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 		mac.Write([]byte(message))
 		signature, err := hex.DecodeString(r.Header.Get(names[3]))
 		if err != nil || !hmac.Equal(signature, mac.Sum(nil)) {
-			http.Error(w, "invalid conversion admission", 401)
+			http.Error(w, "invalid conversion admission", http.StatusUnauthorized)
 			return
 		}
 		if actor != "alertmanager-resolution" && !callbackReady() {
-			http.Error(w, "native conversion callback unavailable", 503)
+			http.Error(w, "native conversion callback unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))

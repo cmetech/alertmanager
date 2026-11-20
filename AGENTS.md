@@ -156,3 +156,12 @@ If you regenerate API code or UI data, commit the regenerated files alongside th
 - Maintainers and ownership: `MAINTAINERS.md`, `CODEOWNERS`.
 - Release process: `RELEASE.md`.
 - UI contributing guide: `ui/app/CONTRIBUTING.md`.
+
+## OSCAR managed inhibition
+
+When changing managed rules, persistence, configuration reloads, or their internal
+API, read `doc/oscar-managed-inhibition.md`. Keep overlay mutations under the
+existing coordinator lock and one transactional reloader subscriber. A failed
+HTTP apply can still be active; preserve separate active/durable reporting and
+same-content durability repair without dispatcher rebuilds. Never bypass native
+resolved-target inhibition or infer History/ticket closure from disappearance.

@@ -302,7 +302,7 @@ amtool template render --template.glob='/foo/bar/*.tmpl' --template.text='{{ tem
 
 ### Configuration
 
-`amtool` allows a configuration file to specify some options for convenience. The default configuration file paths are `$HOME/.config/amtool/config.yml` or `/etc/amtool/config.yml`
+`amtool` allows a configuration file to specify some options for convenience. The user configuration file is `amtool/config.yml` under the operating system's user configuration directory: `$HOME/Library/Application Support` on macOS, `$XDG_CONFIG_HOME` (or `$HOME/.config` when unset) on other Unix systems, and `%APPDATA%` on Windows. On non-Windows systems, the system configuration file is `/etc/amtool/config.yml`, or `amtool/config.yml` under the first directory in `$XDG_CONFIG_DIRS` when set. On Windows it is `%ProgramData%\amtool\config.yml`.
 
 An example configuration file might look like the following:
 

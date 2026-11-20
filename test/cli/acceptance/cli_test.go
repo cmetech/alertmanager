@@ -451,6 +451,9 @@ receivers:
 	out, err := am.ImportSilences(invalidFile)
 	require.Error(t, err, "import should fail with invalid silence")
 	require.Contains(t, string(out), "couldn't import 1 out of 1 silences", "error message should report exact count")
+	require.Contains(t, string(out), "[400]", "the authorized request must reach silence validation")
+	require.Contains(t, string(out), "start time must be before end time")
+	require.NotContains(t, string(out), "(status 403)", "authorization failure must not count as invalid-silence validation")
 }
 
 func TestSilenceImportPartialFailure(t *testing.T) {

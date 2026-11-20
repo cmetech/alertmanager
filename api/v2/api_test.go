@@ -655,6 +655,7 @@ func TestAlertToOpenAPIAlert(t *testing.T) {
 			Labels: open_api_models.LabelSet{"severity": "critical", "alertname": "alert1"},
 		},
 		StartsAt:    convertDateTime(start),
+		StartsAtRaw: start.UTC().Format(time.RFC3339Nano),
 		EndsAt:      convertDateTime(time.Time{}),
 		UpdatedAt:   convertDateTime(updated),
 		Fingerprint: &fp,

@@ -143,7 +143,7 @@ func (am *Alertmanager) addAlertCommand(omitEquals bool, alrt *TestAlert) ([]byt
 		endsAt := strfmt.DateTime(am.Opts.ExpandTime(alrt.EndsAt))
 		args = append(args, "--end="+endsAt.String())
 	}
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.CombinedOutput()
 }
 
@@ -151,7 +151,7 @@ func (am *Alertmanager) addAlertCommand(omitEquals bool, alrt *TestAlert) ([]byt
 func (am *Alertmanager) QueryAlerts(match ...string) ([]TestAlert, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := append([]string{amURLFlag, "alert", "query"}, match...)
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, err
@@ -212,7 +212,7 @@ func (am *Alertmanager) addSilenceCommand(sil *TestSilence) ([]byte, error) {
 		args = append(args, "--comment="+sil.comment)
 	}
 	args = append(args, sil.match...)
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.CombinedOutput()
 }
 
@@ -220,7 +220,7 @@ func (am *Alertmanager) addSilenceCommand(sil *TestSilence) ([]byte, error) {
 func (am *Alertmanager) QuerySilence(match ...string) ([]TestSilence, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := append([]string{amURLFlag, "silence", "query"}, match...)
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		am.T.Error("Silence query command failed: ", err)
@@ -232,7 +232,7 @@ func (am *Alertmanager) QuerySilence(match ...string) ([]TestSilence, error) {
 func (am *Alertmanager) QueryExpiredSilence(match ...string) ([]TestSilence, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := append([]string{amURLFlag, "silence", "query", "--expired", "--within=1h"}, match...)
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		am.T.Error("Silence query command failed: ", err)
@@ -304,7 +304,7 @@ func (am *Alertmanager) DelSilence(at float64, sil *TestSilence) {
 func (am *Alertmanager) expireSilenceCommand(sil *TestSilence) ([]byte, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := []string{amURLFlag, "silence", "expire", sil.ID()}
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.CombinedOutput()
 }
 
@@ -312,7 +312,7 @@ func (am *Alertmanager) expireSilenceCommand(sil *TestSilence) ([]byte, error) {
 func (am *Alertmanager) ExportSilences() ([]byte, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := []string{amURLFlag, "silence", "query", "-o", "json"}
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.Output()
 }
 
@@ -320,7 +320,7 @@ func (am *Alertmanager) ExportSilences() ([]byte, error) {
 func (am *Alertmanager) ImportSilences(filename string) ([]byte, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := []string{amURLFlag, "silence", "import", filename}
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.CombinedOutput()
 }
 
@@ -328,7 +328,7 @@ func (am *Alertmanager) ImportSilences(filename string) ([]byte, error) {
 func (am *Alertmanager) ExpireSilenceByID(id string) ([]byte, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := []string{amURLFlag, "silence", "expire", id}
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.CombinedOutput()
 }
 
@@ -340,7 +340,7 @@ func (am *Alertmanager) ShowRoute() ([]byte, error) {
 func (am *Alertmanager) showRouteCommand() ([]byte, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := []string{amURLFlag, "config", "routes", "show"}
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.CombinedOutput()
 }
 
@@ -352,8 +352,12 @@ func (am *Alertmanager) TestRoute(labels ...string) ([]byte, error) {
 func (am *Alertmanager) testRouteCommand(labels ...string) ([]byte, error) {
 	amURLFlag := "--alertmanager.url=" + am.getURL("/")
 	args := append([]string{amURLFlag, "config", "routes", "test"}, labels...)
-	cmd := exec.Command(amtool, args...)
+	cmd := am.command(args...)
 	return cmd.CombinedOutput()
+}
+
+func (am *Alertmanager) command(args ...string) *exec.Cmd {
+	return exec.Command(amtool, append([]string{"--http.config.file=" + am.HTTPConfigFile()}, args...)...)
 }
 
 func (am *Alertmanager) getURL(path string) string {

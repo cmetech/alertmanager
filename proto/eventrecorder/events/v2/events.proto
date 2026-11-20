@@ -183,4 +183,28 @@ message InhibitionMutedAlertEvent {
   repeated InhibitRule inhibit_rules = 1;
   MutedAlert muted_alert = 2;
   repeated uint64 inhibiting_fingerprints = 3;
+  InhibitionObservation observation = 4;
+}
+
+// Bounded occurrence display data. Identity never derives from truncated maps.
+message ObservedOccurrence {
+  string fingerprint = 1;
+  google.protobuf.Timestamp starts_at = 2;
+  google.protobuf.Timestamp ends_at = 3;
+  map<string,string> labels = 4;
+  map<string,string> annotations = 5;
+  bool labels_truncated = 6;
+  bool annotations_truncated = 7;
+  bool identity_available = 8;
+}
+message InhibitionObservation {
+  uint32 schema_version = 1;
+  string runtime_epoch = 2;
+  string rule_identity = 3;
+  string rule_name = 4;
+  ObservedOccurrence source = 5;
+  ObservedOccurrence target = 6;
+  InhibitRule rule_snapshot = 7;
+  bool rule_snapshot_truncated = 8;
+  string rule_origin = 9;
 }

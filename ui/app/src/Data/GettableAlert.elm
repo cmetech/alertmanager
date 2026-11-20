@@ -28,6 +28,7 @@ type alias GettableAlert =
     , receivers : List ReceiverReference
     , fingerprint : String
     , startsAt : DateTime
+    , startsAtRaw : Maybe String
     , updatedAt : DateTime
     , endsAt : DateTime
     , status : AlertStatus
@@ -43,6 +44,7 @@ decoder =
         |> required "receivers" (Decode.list ReceiverReference.decoder)
         |> required "fingerprint" Decode.string
         |> required "startsAt" DateTime.decoder
+        |> optional "startsAtRaw" (Decode.nullable Decode.string) Nothing
         |> required "updatedAt" DateTime.decoder
         |> required "endsAt" DateTime.decoder
         |> required "status" AlertStatus.decoder
@@ -57,6 +59,7 @@ encoder model =
         , ( "receivers", Encode.list ReceiverReference.encoder model.receivers )
         , ( "fingerprint", Encode.string model.fingerprint )
         , ( "startsAt", DateTime.encoder model.startsAt )
+        , ( "startsAtRaw", Maybe.withDefault Encode.null (Maybe.map Encode.string model.startsAtRaw) )
         , ( "updatedAt", DateTime.encoder model.updatedAt )
         , ( "endsAt", DateTime.encoder model.endsAt )
         , ( "status", AlertStatus.encoder model.status )

@@ -25,6 +25,8 @@ import (
 // target labels if an alert matching the source labels exists.
 // Both alerts have to have a set of labels being equal.
 type InhibitRule struct {
+	// ManagedOrigin is set only by the managed coordinator merge, never authored YAML/JSON.
+	ManagedOrigin bool `yaml:"-" json:"-"`
 	// Name is an optional name for the inhibition rule.
 	Name string `yaml:"name,omitempty" json:"name,omitempty"`
 	// SourceMatch defines a set of labels that have to equal the given

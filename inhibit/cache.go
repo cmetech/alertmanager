@@ -72,6 +72,12 @@ func (c *cache) set(a *alert.Alert) {
 // find returns the fingerprint of a cached source alert that shares the equal
 // labels of lset, is active at now, and satisfies match.
 func (c *cache) find(lset model.LabelSet, now time.Time, match func(*alert.Alert) bool) (model.Fingerprint, bool) {
+	fp, _, ok := c.findSelected(lset, now, match)
+	return fp, ok
+}
+
+// findSelected carries the exact selected immutable cached alert out of the same lookup.
+func (c *cache) findSelected(lset model.LabelSet, now time.Time, match func(*alert.Alert) bool) (model.Fingerprint, *alert.Alert, bool) {
 	eq := c.fingerprintEquals(lset)
 
 	c.mtx.RLock()
@@ -85,10 +91,10 @@ func (c *cache) find(lset model.LabelSet, now time.Time, match func(*alert.Alert
 		if !match(a) {
 			continue
 		}
-		return fp, true
+		return fp, a, true
 	}
 
-	return model.Fingerprint(0), false
+	return model.Fingerprint(0), nil, false
 }
 
 func (c *cache) run(ctx context.Context, interval time.Duration) {

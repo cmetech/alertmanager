@@ -7,9 +7,10 @@ import (
 	"testing"
 
 	"github.com/go-openapi/runtime"
-	silence_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/silence"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/promslog"
+
+	silence_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/silence"
 )
 
 func TestOscarSilenceMutationGuard(t *testing.T) {

@@ -32,11 +32,15 @@ func TestConversionResolutionActualGETPOSTCodec(t *testing.T) {
 	now := time.Now()
 	p, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), nil, nil)
 	require.NoError(t, err)
-	api := API{alerts: p, logger: promslog.NewNopLogger(), m: metrics.NewAlerts(prometheus.NewRegistry()),
-		alertmanagerConfig: &config.Config{Global: &config.GlobalConfig{ResolveTimeout: model.Duration(2 * time.Minute)}}}
-	original := &models.PostableAlert{Alert: models.Alert{Labels: models.LabelSet{"alertname": "A", "host": "h"}},
+	api := API{
+		alerts: p, logger: promslog.NewNopLogger(), m: metrics.NewAlerts(prometheus.NewRegistry()),
+		alertmanagerConfig: &config.Config{Global: &config.GlobalConfig{ResolveTimeout: model.Duration(2 * time.Minute)}},
+	}
+	original := &models.PostableAlert{
+		Alert:       models.Alert{Labels: models.LabelSet{"alertname": "A", "host": "h"}},
 		Annotations: models.LabelSet{conversionAnnotation: `{"claims":{"producer":"webhookreceiver"}}`, "summary": "owned"},
-		StartsAt:    strfmt.DateTime(now.Add(-time.Minute))}
+		StartsAt:    strfmt.DateTime(now.Add(-time.Minute)),
+	}
 	request := httptest.NewRequest("POST", "/api/v2/alerts", nil)
 	request = request.WithContext(context.WithValue(request.Context(), conversionActorKey{}, "webhookreceiver"))
 	first := httptest.NewRecorder()
@@ -46,6 +50,10 @@ func TestConversionResolutionActualGETPOSTCodec(t *testing.T) {
 	require.NoError(t, err)
 	wire, err := json.Marshal(AlertToOpenAPIAlert(stored, alert.AlertStatus{State: alert.AlertStateActive}, nil, nil))
 	require.NoError(t, err)
+	var gettable models.GettableAlert
+	require.NoError(t, json.Unmarshal(wire, &gettable))
+	require.Equal(t, stored.StartsAt.UTC().Format(time.RFC3339Nano), gettable.StartsAtRaw)
+	require.NotEmpty(t, gettable.Annotations["__oscar_fingerprint_conversion_resolution"])
 	var ending models.PostableAlert
 	require.NoError(t, json.Unmarshal(wire, &ending))
 	ending.EndsAt = strfmt.DateTime(now.Add(-time.Millisecond))

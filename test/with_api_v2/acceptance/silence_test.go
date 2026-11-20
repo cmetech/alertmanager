@@ -14,10 +14,15 @@
 package test
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/strfmt"
 	"github.com/stretchr/testify/require"
 
@@ -231,4 +236,76 @@ receivers:
 	at.Run()
 
 	t.Log(co.Check())
+}
+
+// TestSilenceMutationRequiresMemberKey exercises the real server flag and client
+// transport together: missing or incorrect headers cannot mutate silences.
+func TestSilenceMutationRequiresMemberKey(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		withoutKey bool
+	}{
+		{name: "configured key"},
+		{name: "no configured key", withoutKey: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			at := NewAcceptanceTest(t, &AcceptanceOpts{RoutePrefix: "/guard-test", WithoutSilenceMutationKey: tc.withoutKey})
+			amc := at.AlertmanagerCluster("route:\n  receiver: default\nreceivers:\n- name: default\n", 1)
+			t.Cleanup(amc.Terminate)
+			require.NoError(t, amc.Start())
+			am := amc.Members()[0]
+			now := time.Now()
+			ps := &models.PostableSilence{Silence: models.Silence{
+				Comment: new("authorization regression"), CreatedBy: new("test"),
+				Matchers: models.Matchers{{Name: new("alertname"), Value: new("guard-test"), IsEqual: new(true), IsRegex: new(false)}},
+				StartsAt: new(strfmt.DateTime(now)), EndsAt: new(strfmt.DateTime(now.Add(time.Hour))),
+			}}
+			body, err := json.Marshal(ps)
+			require.NoError(t, err)
+			url := "http://" + am.APIAddr() + "/guard-test/api/v2"
+			client := &http.Client{Timeout: 5 * time.Second}
+			request := func(method, path, key string, want int) {
+				t.Helper()
+				req, err := http.NewRequest(method, url+path, bytes.NewReader(body))
+				require.NoError(t, err)
+				req.Header.Set("Content-Type", "application/json")
+				if key != "" {
+					req.Header.Set("X-Oscar-Silence-Mutation-Key", key)
+				}
+				res, err := client.Do(req)
+				require.NoError(t, err)
+				defer res.Body.Close()
+				responseBody, err := io.ReadAll(res.Body)
+				require.NoError(t, err)
+				require.Equal(t, want, res.StatusCode, "%s %s: %s", method, path, responseBody)
+			}
+			request(http.MethodGet, "/silences", "", http.StatusOK)
+			for _, key := range []string{"", "incorrect-test-key"} {
+				request(http.MethodPost, "/silences", key, http.StatusForbidden)
+			}
+			created, err := am.Client().Silence.PostSilences(silence.NewPostSilencesParams().WithSilence(ps))
+			if tc.withoutKey {
+				// Even the harness's valid client header cannot authorize an unconfigured server.
+				require.Error(t, err)
+				var apiError *runtime.APIError
+				require.ErrorAs(t, err, &apiError)
+				require.Equal(t, http.StatusForbidden, apiError.Code)
+				request(http.MethodDelete, "/silence/00000000-0000-0000-0000-000000000001", "", http.StatusForbidden)
+				return
+			}
+			require.NoError(t, err)
+			id := created.Payload.SilenceID
+			for _, key := range []string{"", "incorrect-test-key"} {
+				request(http.MethodDelete, "/silence/"+id, key, http.StatusForbidden)
+			}
+			current, err := am.Client().Silence.GetSilence(silence.NewGetSilenceParams().WithSilenceID(strfmt.UUID(id)))
+			require.NoError(t, err)
+			require.Equal(t, "active", *current.Payload.Status.State)
+			_, err = am.Client().Silence.DeleteSilence(silence.NewDeleteSilenceParams().WithSilenceID(strfmt.UUID(id)))
+			require.NoError(t, err)
+			current, err = am.Client().Silence.GetSilence(silence.NewGetSilenceParams().WithSilenceID(strfmt.UUID(id)))
+			require.NoError(t, err)
+			require.Equal(t, "expired", *current.Payload.Status.State)
+		})
+	}
 }

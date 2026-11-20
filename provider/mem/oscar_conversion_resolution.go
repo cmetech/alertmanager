@@ -58,7 +58,7 @@ func (a *Alerts) PutResolvedConversion(ctx context.Context, alerts ...*alert.Ale
 			reason = "capsule"
 		case incoming.GeneratorURL != old.GeneratorURL:
 			reason = "generator"
-		case !(incoming.StartsAt.Equal(old.StartsAt) || incoming.StartsAt.Equal(old.StartsAt.Truncate(time.Millisecond))):
+		case !incoming.StartsAt.Equal(old.StartsAt) && !incoming.StartsAt.Equal(old.StartsAt.Truncate(time.Millisecond)):
 			reason = "episode"
 		}
 		if reason != "" {

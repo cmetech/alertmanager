@@ -66,23 +66,27 @@ type Options struct {
 	DispatchStartDelay          time.Duration
 
 	// Web server.
-	WebConfig                  *web.FlagConfig
-	ExternalURL                string
-	RoutePrefix                string
-	CORSHandler                func(http.Handler) http.Handler
-	GetConcurrency             int
-	HTTPTimeout                time.Duration
-	ConnectUnaryConcurrency    int
-	ConnectStreamConcurrency   int
-	ConnectUnaryTimeout        time.Duration
-	ConnectStreamIdleTimeout   time.Duration
-	ConnectStreamLifetime      time.Duration
-	ConnectReadMaxBytes        int
-	ConnectSendMaxBytes        int
-	ConnectMaxRequestBodyBytes int64
-	SilenceMutationKey         []byte
-	ConversionAdmissionKeys    map[string][]byte
-	ConversionCallbackKey      []byte
+	WebConfig                    *web.FlagConfig
+	ExternalURL                  string
+	RoutePrefix                  string
+	CORSHandler                  func(http.Handler) http.Handler
+	GetConcurrency               int
+	HTTPTimeout                  time.Duration
+	ConnectUnaryConcurrency      int
+	ConnectStreamConcurrency     int
+	ConnectUnaryTimeout          time.Duration
+	ConnectStreamIdleTimeout     time.Duration
+	ConnectStreamLifetime        time.Duration
+	ConnectReadMaxBytes          int
+	ConnectSendMaxBytes          int
+	ConnectMaxRequestBodyBytes   int64
+	SilenceMutationKey           []byte
+	InhibitionKey                []byte
+	InhibitionObservations       bool
+	InhibitionObservationURL     string
+	InhibitionObservationKeyFile string
+	ConversionAdmissionKeys      map[string][]byte
+	ConversionCallbackKey        []byte
 
 	// Cluster.
 	ClusterBindAddr        string
