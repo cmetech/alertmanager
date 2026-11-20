@@ -8,9 +8,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,29 +82,49 @@ func TestManagedPublicationStopsAtOwnerBoundary(t *testing.T) {
 		var posts models.PostableAlerts
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&posts))
 		api.postAlertsHandler(alertops.PostAlertsParams{HTTPRequest: r, Alerts: posts}).WriteResponse(w, runtime.TextProducer())
-	}), map[string][]byte{"smtpreceiver/v1": key})
-	request := func(signed bool) *httptest.ResponseRecorder {
+	}), map[string][]byte{"smtpreceiver/v1": key, "webhookreceiver/v1": key})
+	request := func(actor string) *httptest.ResponseRecorder {
 		body, e := json.Marshal(models.PostableAlerts{post})
 		require.NoError(t, e)
 		r := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", bytes.NewReader(body))
-		if signed {
-			r = conversionRequest(body, "smtpreceiver", key)
+		if actor != "" {
+			r = conversionRequest(body, actor, key)
 		}
 		w := httptest.NewRecorder()
 		guard.ServeHTTP(w, r)
 		return w
 	}
-	require.Equal(t, 503, request(true).Code)
+	require.Equal(t, 503, request("smtpreceiver").Code)
 	fp := APILabelSetToModelLabelSet(labels).Fingerprint()
 	_, err = p.Get(fp)
 	require.Error(t, err)
-	post.Annotations[conversionAnnotation] = "unowned"
-	require.Equal(t, 400, request(true).Code)
-	delete(post.Annotations, conversionAnnotation)
+	for _, fields := range []models.LabelSet{labels, post.Annotations} {
+		for _, field := range []string{"fingerprint_override", "fingerprint_exclude", conversionAnnotation, "__oscar_fingerprint_fixture"} {
+			fields[field] = "node"
+			require.Equal(t, 400, request("smtpreceiver").Code, field)
+			delete(fields, field)
+		}
+	}
 	post.StartsAt = strfmt.DateTime(start.Add(time.Millisecond))
-	require.Equal(t, 400, request(true).Code)
+	require.Equal(t, 400, request("smtpreceiver").Code)
+	webhookLabels := maps.Clone(labels)
+	webhookLabels["source_id"] = "lab"
+	webhookLabels["correlation_key"] = "tl1:" + strings.Repeat("e", 64) + ":" + vectors.Valid["episode_id"].(string)
+	vectors.Valid["producer"] = "webhookreceiver"
+	vectors.Valid["locator"] = "east"
+	vectors.Valid["handler"] = "tl1_probe"
+	vectors.Valid["correlation"] = webhookLabels["correlation_key"]
+	webhookProof, err := json.Marshal(vectors.Valid)
+	require.NoError(t, err)
+	smtpPost := post
+	post = &models.PostableAlert{Alert: models.Alert{Labels: webhookLabels}, Annotations: models.LabelSet{managedAnnotation: string(webhookProof)}, StartsAt: strfmt.DateTime(start)}
+	require.Equal(t, 503, request("webhookreceiver").Code)
+	webhookLabels["source_id"] = "other"
+	require.Equal(t, 400, request("webhookreceiver").Code)
+	post = smtpPost
+
 	labels[managedAnnotation] = "untrusted"
-	require.Equal(t, 200, request(false).Code)
+	require.Equal(t, 200, request("").Code)
 	stored, err := p.Get(fp)
 	require.NoError(t, err)
 	require.NotContains(t, stored.Labels, model.LabelName(managedAnnotation))

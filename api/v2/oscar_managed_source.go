@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/prometheus/common/model"
 )
 
 const managedAnnotation = "__oscar_managed_lifecycle"
@@ -88,11 +90,13 @@ func validManagedOperation(raw, actor string, now int64) bool {
 		return false
 	}
 	correlation := fields["source_id"] + ":" + fields["tid"] + ":" + fields["episode_id"]
-	if fields["correlation"] != correlation {
+	if actor == "webhookreceiver" && fields["locator"] != "" {
 		parts := strings.Split(fields["correlation"], ":")
-		if actor != "webhookreceiver" || len(parts) != 3 || parts[0] != "tl1" || !managedHash.MatchString(parts[1]) || parts[2] != fields["episode_id"] {
+		if len(parts) != 3 || parts[0] != "tl1" || !managedHash.MatchString(parts[1]) || parts[2] != fields["episode_id"] {
 			return false
 		}
+	} else if fields["correlation"] != correlation {
+		return false
 	}
 	issue, end := ints["issued_at"], ints["deadline"]
 	if ints["expected_generation"] < 0 || issue <= 0 || end <= issue || end-issue > 10 || issue > now+5 || now >= end {
@@ -109,13 +113,18 @@ func validManagedOperation(raw, actor string, now int64) bool {
 	return (fields["kind"] == "raise" || fields["kind"] == "update") && fields["clear_at"] == ""
 }
 
-func managedPairMatches(raw string, start time.Time, node, correlation, kind, resolution string) bool {
+func managedPairMatches(raw string, start time.Time, node, source, correlation, kind, resolution string) bool {
 	var claims struct {
 		Tid, Correlation, Kind string
+		Producer, Locator      string
+		SourceID               string `json:"source_id"`
 		StartedAt              string `json:"started_at"`
 		ClearAt                string `json:"clear_at"`
 	}
 	if json.Unmarshal([]byte(raw), &claims) != nil || claims.Tid != node || claims.Correlation != correlation {
+		return false
+	}
+	if claims.Producer == "webhookreceiver" && claims.Locator != "" && claims.SourceID != source {
 		return false
 	}
 	expected := claims.StartedAt
@@ -129,4 +138,15 @@ func managedPairMatches(raw string, start time.Time, node, correlation, kind, re
 	}
 	instant, err := time.Parse(time.RFC3339Nano, expected)
 	return err == nil && start.Equal(instant)
+}
+
+func hasManagedFingerprintFields(alert model.Alert) bool {
+	for _, fields := range []model.LabelSet{alert.Labels, alert.Annotations} {
+		for name := range fields {
+			if name == "fingerprint_override" || name == "fingerprint_exclude" || strings.HasPrefix(string(name), "__oscar_fingerprint_") {
+				return true
+			}
+		}
+	}
+	return false
 }

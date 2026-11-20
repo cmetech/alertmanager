@@ -393,10 +393,13 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 			if actor != "" {
 				labels := alerts[i].Labels
 				if len(alerts) != 1 || !validManagedOperation(string(proof), actor, time.Now().Unix()) ||
-					!managedPairMatches(string(proof), alerts[i].StartsAt, string(labels["node"]), string(labels["correlation_key"]), string(labels["alert_type"]), string(labels["is_resolution"])) {
+					!managedPairMatches(string(proof), alerts[i].StartsAt, string(labels["node"]), string(labels["source_id"]), string(labels["correlation_key"]), string(labels["alert_type"]), string(labels["is_resolution"])) {
 					return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed operation")
 				}
-				if capsule := string(alerts[i].Annotations[conversionAnnotation]); capsule != "" && (actor == "smtpreceiver" || capsuleProducer(capsule) != actor) {
+				if actor == "smtpreceiver" && hasManagedFingerprintFields(alerts[i]) {
+					return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed fingerprint contribution")
+				}
+				if capsule := string(alerts[i].Annotations[conversionAnnotation]); capsule != "" && capsuleProducer(capsule) != actor {
 					return alert_ops.NewPostAlertsBadRequest().WithPayload("invalid managed fingerprint contribution")
 				}
 				// The episode owner and worker must both be installed before managed delivery.
