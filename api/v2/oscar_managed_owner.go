@@ -618,8 +618,8 @@ func (o *managedOwner) maintain() {
 		case <-ctx.Done():
 		}
 	}()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
 	restore := true
 	restoreFailed := false
 	cursor := ""
@@ -658,10 +658,12 @@ func (o *managedOwner) maintain() {
 			}
 		}
 		o.ready.Store(healthy && capability.Worker && !restore)
+		// A slow pass must leave a retry interval for ordinary source admission.
+		timer.Reset(time.Second)
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
