@@ -19,7 +19,10 @@ import (
 	"time"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/provider"
+	"github.com/prometheus/alertmanager/store"
 	"github.com/prometheus/common/model"
 )
 
@@ -165,6 +168,7 @@ type managedGate struct {
 	provenUnapplied   string
 }
 type managedOwner struct {
+	eligible func(context.Context, *alert.Alert, string, string) (bool, error)
 	epoch    string
 	client   *managedClient
 	store    managedStore
@@ -198,9 +202,64 @@ func (api *API) InstallManagedOwner(ca, key string, forbidden map[string][]byte,
 	var random [16]byte
 	_, _ = rand.Read(random[:])
 	o := &managedOwner{epoch: hex.EncodeToString(random[:]), store: store, client: client, gates: make(map[string]*managedGate)}
+	o.eligible = api.managedMemberEligible
 	api.managedOwner = o
 	go o.maintain()
 	return nil
+}
+
+// Re-evaluate membership on each actual webhook attempt, including native retries after History wait.
+func (api *API) managedMemberEligible(ctx context.Context, incoming *alert.Alert, receiver, group string) (bool, error) {
+	current, err := api.alerts.Get(incoming.Fingerprint())
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !current.ManagedReceiver || current.ManagedMember != incoming.ManagedMember || !current.StartsAt.Equal(incoming.StartsAt) {
+		return false, nil
+	}
+	now := time.Now()
+	if current.ResolvedAt(now) != incoming.ResolvedAt(now) {
+		return false, nil
+	}
+	api.mtx.RLock()
+	root, setStatus, timing := api.route, api.setAlertStatus, api.timing
+	api.mtx.RUnlock()
+	if root == nil || setStatus == nil || !api.conversionCallbackReady() {
+		return false, errors.New("managed notification eligibility unavailable")
+	}
+	state := predictAlertStatus(ctx, setStatus, current)
+	if len(state.SilencedBy) != 0 || len(state.InhibitedBy) != 0 || state.State == alert.AlertStateSuppressed {
+		return false, nil
+	}
+	for _, route := range root.Match(current.Labels) {
+		opts := route.RouteOpts
+		if opts.Receiver != receiver || dispatch.GroupKeyForAlert(current, route) != group {
+			continue
+		}
+		if len(opts.ActiveTimeIntervals)+len(opts.MuteTimeIntervals) != 0 {
+			if timing == nil || timing.Muter == nil {
+				return false, errors.New("managed route timing unavailable")
+			}
+			inactive, muted, err := notify.MutedByTimeIntervals(timing.Muter, opts.ActiveTimeIntervals, opts.MuteTimeIntervals, now)
+			if err != nil {
+				return false, err
+			}
+			if len(inactive)+len(muted) != 0 {
+				continue
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+func (o *managedOwner) attachMember(a *alert.Alert, key string, slot *ownerSlot) {
+	op := slot.claims()
+	a.ManagedMember = alert.ManagedMembership{Episode: key, Generation: slot.Generation, Event: op.EventID, Digest: op.Digest}
+	a.ManagedEligible = o.eligible
 }
 
 func (o *managedOwner) enter(key string) (*managedGate, func(), error) {
@@ -413,6 +472,7 @@ func (o *managedOwner) publish(ctx context.Context, raw json.RawMessage, a *aler
 			}
 			a = frozen
 		}
+		o.attachMember(a, key, slot)
 		err = o.store.ApplyManaged(ctx, key, a, slot.stamp(), func() error {
 			if ctx.Err() != nil || time.Now().Unix() >= op.Deadline {
 				return errors.New("managed native deadline")
@@ -601,6 +661,7 @@ func (o *managedOwner) maintainEpisode(ctx context.Context, key string, restore 
 	if err != nil {
 		return err
 	}
+	o.attachMember(a, key, s.Current)
 	if err = o.store.ApplyManaged(ctx, key, a, s.Current.stamp(), func() error { return ctx.Err() }); err != nil {
 		return err
 	}

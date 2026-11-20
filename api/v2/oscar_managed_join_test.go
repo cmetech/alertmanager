@@ -12,7 +12,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -22,11 +24,21 @@ import (
 
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/strfmt"
+	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/labelset"
+	"github.com/prometheus/alertmanager/marker"
+	"github.com/prometheus/alertmanager/nflog"
+	"github.com/prometheus/alertmanager/nflog/nflogpb"
+	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/notify/webhook"
+	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/client_golang/prometheus"
+	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/api/metrics"
@@ -60,7 +72,7 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 	provider.EnableManaged()
 	owner := &managedOwner{epoch: strings.Repeat("e", 32), store: provider, client: client, gates: map[string]*managedGate{}}
 	mode := os.Getenv("OSCAR_MANAGED_FIXTURE_MODE")
-	if mode != "joined" && mode != "restart-reservation" && mode != "future-start" {
+	if mode != "receiver-wire" && mode != "joined" && mode != "restart-reservation" && mode != "future-start" {
 		var capability struct {
 			Contract string
 			Worker   bool
@@ -77,7 +89,45 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 		var batch models.PostableAlerts
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&batch))
 		api.postAlertsHandler(alertops.PostAlertsParams{HTTPRequest: r, Alerts: batch}).WriteResponse(w, runtime.TextProducer())
-	}), map[string][]byte{"smtpreceiver/v1": sourceKey})
+	}), map[string][]byte{"smtpreceiver/v1": sourceKey, "webhookreceiver/v1": sourceKey, "trapreceiver/v1": sourceKey})
+	if mode == "receiver-wire" {
+		// The Python harness supplies the receiver's unmodified raw HTTP request to the native
+		// handler. Only the private AM client opens a network connection.
+		dir := os.Getenv("OSCAR_MANAGED_WIRE_DIR")
+		notifyMember := joinedWebhook(t, &api, provider, dir, ca, client)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "native-ready"), []byte("ready"), 0600))
+		for seq := 0; ; seq++ {
+			path := filepath.Join(dir, fmt.Sprintf("native-%d", seq))
+			var raw []byte
+			require.Eventually(t, func() bool {
+				raw, err = os.ReadFile(path)
+				return err == nil
+			}, 40*time.Second, 5*time.Millisecond)
+			if string(raw) == "stop" {
+				return
+			}
+			var packet struct {
+				Path    string
+				Headers map[string]string
+				Body    []byte
+			}
+			require.NoError(t, json.Unmarshal(raw, &packet))
+			req := httptest.NewRequest(http.MethodPost, packet.Path, bytes.NewReader(packet.Body))
+			for k, v := range packet.Headers {
+				req.Header.Set(k, v)
+			}
+			reply := httptest.NewRecorder()
+			if packet.Path == "/api/v2/fixture-notify" {
+				notifyMember(reply, packet.Body)
+			} else {
+				guard.ServeHTTP(reply, req)
+			}
+			result, err := json.Marshal(map[string]any{"status": reply.Code, "body": reply.Body.String()})
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(path+".tmp", result, 0600))
+			require.NoError(t, os.Rename(path+".tmp", path+".reply"))
+		}
+	}
 	var vectors struct{ Valid map[string]any }
 	raw, err := os.ReadFile("testdata/managed_operation_v1.json")
 	require.NoError(t, err)
@@ -448,4 +498,94 @@ func checkBlockedMaintenance(t *testing.T, startup bool) {
 	closeSlow()
 	require.NoError(t, <-blocked)
 	require.Eventually(t, func() bool { return retired.Load() > 0 && owner.ready.Load() }, 8*time.Second, 25*time.Millisecond)
+}
+
+type joinedNotificationLog struct {
+	notify.NotificationLog
+	entry *nflogpb.Entry
+}
+
+func (l *joinedNotificationLog) Query(...nflog.QueryParam) ([]*nflogpb.Entry, error) {
+	if l.entry == nil {
+		return nil, nflog.ErrNotFound
+	}
+	return []*nflogpb.Entry{l.entry}, nil
+}
+
+// Drive the same group deduplication, current provider/suppression check, webhook
+// serializer and authenticated HTTPS client as a native group flush. A retry keeps
+// its last successful notification-log entry; a repeat uses the newly recorded entry.
+func joinedWebhook(t *testing.T, api *API, provider *mem.Alerts, dir, ca string, client *managedClient) func(http.ResponseWriter, []byte) {
+	t.Helper()
+	keyfile := filepath.Join(dir, "callback.key")
+	api.conversionCallbackKey = bytes.Repeat([]byte("c"), 48)
+	require.NoError(t, os.WriteFile(keyfile, api.conversionCallbackKey, 0600))
+	cfg := &webhook.WebhookConfig{URL: "https://alertmanager-middleware:9400/api/v1/internal/fingerprint-conversion/alerts", HTTPConfig: &commoncfg.HTTPClientConfig{
+		TLSConfig: commoncfg.TLSConfig{CAFile: ca}, Authorization: &commoncfg.Authorization{Type: "Bearer", CredentialsFile: keyfile},
+	}}
+	cfg.VSendResolved = true
+	api.alertmanagerConfig.Receivers = []config.Receiver{{Name: "fixture", WebhookConfigs: []*webhook.WebhookConfig{cfg}}}
+	api.route = dispatch.NewRoute(&config.Route{Receiver: "fixture"}, nil)
+	var silenced atomic.Bool
+	api.setAlertStatus = func(ctx context.Context, labels labelset.LabelSet) {
+		m, _ := marker.FromContext(ctx)
+		var ids []string
+		if silenced.Load() {
+			ids = []string{"fixture"}
+		}
+		m.SetSilenced(labels.Fingerprint(), ids)
+	}
+	api.managedOwner.eligible = api.managedMemberEligible
+	tmpl, err := template.FromGlobs(nil)
+	require.NoError(t, err)
+	tmpl.ExternalURL = &url.URL{Scheme: "https", Host: "example.invalid"}
+	sender, err := webhook.New(cfg, tmpl, api.logger, commoncfg.WithDialContextFunc(client.http.Transport.(*http.Transport).DialContext))
+	require.NoError(t, err)
+	log := &joinedNotificationLog{}
+	stage := notify.NewDedupStage(cfg, log, &nflogpb.Receiver{GroupName: "fixture", Integration: "webhook"})
+	observed := map[string]*alert.Alert{}
+	return func(w http.ResponseWriter, raw []byte) {
+		var command struct {
+			Event                          string
+			Suppress, Repeat, Mixed, Stale bool
+		}
+		require.NoError(t, json.Unmarshal(raw, &command))
+		members, _ := provider.SnapshotWithSequence(func() uint64 { return 0 })
+		if command.Stale {
+			require.Contains(t, observed, command.Event)
+			members = []*alert.Alert{observed[command.Event]}
+		}
+		for _, a := range members {
+			if a.ManagedMember.Event != command.Event {
+				continue
+			}
+			if !command.Stale {
+				observed[command.Event] = a
+			}
+			silenced.Store(command.Suppress)
+			ctx := notify.WithGroupKey(t.Context(), dispatch.GroupKeyForAlert(a, api.route))
+			ctx = notify.WithGroupLabels(ctx, model.LabelSet{})
+			ctx = notify.WithReceiverName(ctx, "fixture")
+			ctx = notify.WithRepeatInterval(ctx, time.Nanosecond)
+			source := []*alert.Alert{a}
+			if command.Mixed {
+				source = append(source, alert.New(model.Alert{Labels: model.LabelSet{"alertname": "ordinary-sibling"},
+					StartsAt: a.StartsAt, EndsAt: a.EndsAt}, time.Now(), false))
+			}
+			ctx, batch, err := stage.Exec(ctx, api.logger, source...)
+			require.NoError(t, err)
+			require.Len(t, batch, len(source))
+			if err := sender.Notify(ctx, batch...).Err(); err != nil {
+				http.Error(w, err.Error(), 503)
+				return
+			}
+			if command.Repeat {
+				firing, _ := notify.FiringAlerts(ctx)
+				log.entry = &nflogpb.Entry{Timestamp: timestamppb.Now(), FiringAlerts: firing}
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Error(w, "missing native member", 404)
+	}
 }

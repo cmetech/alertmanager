@@ -58,7 +58,19 @@ func New(conf *WebhookConfig, t *template.Template, l *slog.Logger, httpOpts ...
 }
 
 // Message defines the JSON object send to webhook endpoints.
+type managedMember struct {
+	alert.ManagedMembership
+	Index    int  `json:"index"`
+	Eligible bool `json:"eligible"`
+}
+
+type managedCallback struct {
+	Baseline int64           `json:"baseline"`
+	Members  []managedMember `json:"members"`
+}
+
 type Message struct {
+	Managed *managedCallback `json:"oscarManagedCallback,omitempty"`
 	*template.Data
 
 	// The protocol version.
@@ -93,6 +105,30 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		Data:            data,
 		GroupKey:        groupKey.String(),
 		TruncatedAlerts: numTruncated,
+	}
+
+	for index, a := range alerts {
+		if !a.ManagedReceiver {
+			continue
+		}
+		previous, known := notify.PreviousNotification(ctx)
+		receiver, receiverKnown := notify.ReceiverName(ctx)
+		target := string(n.conf.URL)
+		const canonical = "https://alertmanager-middleware:9400/api/v1/internal/fingerprint-conversion/alerts"
+		if !known || !receiverKnown || a.ManagedEligible == nil ||
+			(target != canonical && target != canonical+"?notifier_type=oscaradmin") ||
+			n.conf.HTTPConfig == nil || n.conf.HTTPConfig.FollowRedirects || n.conf.HTTPConfig.TLSConfig.InsecureSkipVerify ||
+			n.conf.Payload != nil || n.conf.MaxAlerts != 0 {
+			return notify.Retry(0, errors.New("managed callback eligibility unavailable"), notify.DefaultReason)
+		}
+		eligible, err := a.ManagedEligible(ctx, a, receiver, groupKey.String())
+		if err != nil {
+			return notify.Retry(0, err, notify.DefaultReason)
+		}
+		if msg.Managed == nil {
+			msg.Managed = &managedCallback{Baseline: previous}
+		}
+		msg.Managed.Members = append(msg.Managed.Members, managedMember{a.ManagedMember, index, eligible})
 	}
 
 	var buf bytes.Buffer

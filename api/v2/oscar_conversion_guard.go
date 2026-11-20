@@ -170,6 +170,20 @@ func (api *API) conversionCallbackReady() bool {
 		if len(receiver.WebhookConfigs) == 0 {
 			return false
 		}
+		if api.managedOwner != nil {
+			// A commissioned route may deliver only via the canonical eligibility-aware webhook.
+			// JSON omitempty covers integrations added by future upstream versions as well.
+			configured, err := json.Marshal(receiver)
+			var fields map[string]json.RawMessage
+			if err != nil || json.Unmarshal(configured, &fields) != nil || len(receiver.WebhookConfigs) != 1 {
+				return false
+			}
+			for field := range fields {
+				if strings.HasSuffix(field, "_configs") && field != "webhook_configs" {
+					return false
+				}
+			}
+		}
 		for _, webhook := range receiver.WebhookConfigs {
 			target, err := url.Parse(string(webhook.URL))
 			if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" ||

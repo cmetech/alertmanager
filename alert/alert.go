@@ -14,6 +14,7 @@
 package alert
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -34,6 +35,14 @@ const (
 	EndTimeSourceAlertmanagerTimeout EndTimeSource = "alertmanager_timeout"
 )
 
+// ManagedMembership binds a provider snapshot to one authenticated observation.
+type ManagedMembership struct {
+	Episode    string `json:"episode_key"`
+	Generation int64  `json:"generation"`
+	Event      string `json:"event_id"`
+	Digest     string `json:"source_digest"`
+}
+
 // Alert wraps a model.Alert with additional information relevant
 // to internal of the Alertmanager.
 // The type is never exposed to external communication and the
@@ -41,10 +50,12 @@ const (
 type Alert struct {
 	model.Alert
 
+	ManagedReceiver bool                                                        `json:"-"`
+	ManagedMember   ManagedMembership                                           `json:"-"`
+	ManagedEligible func(context.Context, *Alert, string, string) (bool, error) `json:"-"`
 	// The authoritative timestamp.
-	ManagedReceiver bool `json:"-"`
-	UpdatedAt       time.Time
-	Timeout         bool
+	UpdatedAt time.Time
+	Timeout   bool
 	// EndTimeSource and ResolveTimeout describe the effective EndsAt. They are
 	// separate from Timeout, whose existing value controls native merge behavior.
 	EndTimeSource  EndTimeSource

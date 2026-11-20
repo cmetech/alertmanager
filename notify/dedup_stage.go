@@ -153,6 +153,11 @@ func (n *DedupStage) Exec(ctx context.Context, _ *slog.Logger, alerts ...*alert.
 		return ctx, nil, fmt.Errorf("unexpected entry result size %d", len(entries))
 	}
 
+	var baseline int64
+	if entry != nil && entry.Timestamp != nil {
+		baseline = entry.Timestamp.AsTime().UnixNano()
+	}
+	ctx = context.WithValue(ctx, keyManagedPreviousNotification, baseline)
 	now := n.now()
 	if ctxNow, ok := Now(ctx); ok {
 		now = ctxNow
