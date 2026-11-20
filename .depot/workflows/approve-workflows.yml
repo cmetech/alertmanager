@@ -1,0 +1,33 @@
+# Depot CI Migration
+# Source: .github/workflows/approve-workflows.yml
+#
+# Changes made:
+# - Changed GitHub runs-on labels to their Depot equivalents
+
+---
+###
+# This action is synced from https://github.com/prometheus/prometheus
+###
+name: Approve pending workflows
+
+# GitLab runners are the default; Depot execution is opt-in.
+on:
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  approve:
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/workflow-approve' &&
+      (github.repository_owner == 'prometheus' || github.repository_owner == 'prometheus-community')
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: prometheus/promci/approve_workflows@872d318d090d73df349cb6ed90aadd072ca478f7 # v0.10.0
+        with:
+          github_token: ${{ github.token }}
