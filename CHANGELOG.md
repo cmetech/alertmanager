@@ -1,3 +1,8 @@
+## Unreleased — Managed receiver operation admission
+
+- The exact-body native guard recognizes the confined SMTP producer and validates one managed operation against its actor, bounded attempt, labels and original or clear start. The native endpoint returns unavailable until the episode owner and worker are installed. Ordinary writes scrub the reserved lifecycle claim.
+- Deploy with the matching OSCAR backend and secret bootstrap. Default unconfigured operation requires no data migration.
+
 ## OSCAR runtime branding — 2026-11-15
 
 - Mantine UI uses OSCAR's managed favicon and appearance-specific logo through the public branding asset endpoint. Uploaded branding takes precedence; standalone deployments retain a text header if OSCAR assets are unavailable.
