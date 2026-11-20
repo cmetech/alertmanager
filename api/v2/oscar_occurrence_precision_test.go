@@ -23,8 +23,10 @@ func TestOscarOccurrencePrecisionSerialization(t *testing.T) {
 		}
 		starts, err := time.Parse(time.RFC3339Nano, raw)
 		require.NoError(t, err)
-		source := alert.New(model.Alert{Labels: model.LabelSet{"alertname": model.LabelValue(name)},
-			StartsAt: starts, EndsAt: starts.Add(time.Hour)}, starts.Add(time.Second), false)
+		source := alert.New(model.Alert{
+			Labels:   model.LabelSet{"alertname": model.LabelValue(name)},
+			StartsAt: starts, EndsAt: starts.Add(time.Hour),
+		}, starts.Add(time.Second), false)
 		encoded, err := json.Marshal(AlertToOpenAPIAlert(source, alert.AlertStatus{State: alert.AlertStateActive}, []string{"default"}, nil))
 		require.NoError(t, err)
 		var record map[string]any

@@ -33,9 +33,11 @@ func TestConversionResolutionCurrentOnly(t *testing.T) {
 	require.NoError(t, err)
 	now := time.Now()
 	start := now.Add(-time.Minute).Truncate(time.Microsecond)
-	original := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A", "host": "h"},
+	original := alert.New(model.Alert{
+		Labels:      model.LabelSet{"alertname": "A", "host": "h"},
 		Annotations: model.LabelSet{"__oscar_fingerprint_conversion": "producer-a", "summary": "unchanged"},
-		StartsAt:    start, EndsAt: now.Add(time.Hour), GeneratorURL: "http://example.test"}, now, false)
+		StartsAt:    start, EndsAt: now.Add(time.Hour), GeneratorURL: "http://example.test",
+	}, now, false)
 	require.NoError(t, p.Put(context.Background(), original))
 	clear := *original
 	clear.Annotations = original.Annotations.Clone()
@@ -68,9 +70,11 @@ func TestConversionResolutionCannotResurrectReplacedOrDeletedState(t *testing.T)
 			p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), nil, nil)
 			require.NoError(t, err)
 			now := time.Now()
-			old := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "A"},
+			old := alert.New(model.Alert{
+				Labels:      model.LabelSet{"alertname": "A"},
 				Annotations: model.LabelSet{"__oscar_fingerprint_conversion": "old"},
-				StartsAt:    now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+				StartsAt:    now.Add(-time.Minute), EndsAt: now.Add(time.Hour),
+			}, now, false)
 			if action == "removed" {
 				old.EndsAt = now.Add(-2 * time.Second)
 			}
@@ -122,8 +126,11 @@ func TestConversionResolutionClockTolerance(t *testing.T) {
 		requested time.Duration
 		accepted  bool
 	}{
-		{"past", -time.Nanosecond, true}, {"now", 0, true}, {"future-clamped", time.Nanosecond, true},
-		{"five-seconds-clamped", 5 * time.Second, true}, {"beyond-five-seconds", 5*time.Second + time.Nanosecond, false},
+		{"past", -time.Nanosecond, true},
+		{"now", 0, true},
+		{"future-clamped", time.Nanosecond, true},
+		{"five-seconds-clamped", 5 * time.Second, true},
+		{"beyond-five-seconds", 5*time.Second + time.Nanosecond, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
