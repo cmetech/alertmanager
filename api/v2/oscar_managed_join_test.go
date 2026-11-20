@@ -547,8 +547,8 @@ func joinedWebhook(t *testing.T, api *API, provider *mem.Alerts, dir, ca string,
 	observed := map[string]*alert.Alert{}
 	return func(w http.ResponseWriter, raw []byte) {
 		var command struct {
-			Event                          string
-			Suppress, Repeat, Mixed, Stale bool
+			Event                                       string
+			Suppress, Repeat, Mixed, Stale, OmitManaged bool
 		}
 		require.NoError(t, json.Unmarshal(raw, &command))
 		members, _ := provider.SnapshotWithSequence(func() uint64 { return 0 })
@@ -569,7 +569,10 @@ func joinedWebhook(t *testing.T, api *API, provider *mem.Alerts, dir, ca string,
 			ctx = notify.WithReceiverName(ctx, "fixture")
 			ctx = notify.WithRepeatInterval(ctx, time.Nanosecond)
 			source := []*alert.Alert{a}
-			if command.Mixed {
+			if command.OmitManaged {
+				source = nil
+			}
+			if command.Mixed || command.OmitManaged {
 				source = append(source, alert.New(model.Alert{Labels: model.LabelSet{"alertname": "ordinary-sibling"},
 					StartsAt: a.StartsAt, EndsAt: a.EndsAt}, time.Now(), false))
 			}
