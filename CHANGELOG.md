@@ -1,5 +1,7 @@
 ## Unreleased — Managed History notification callbacks
 
+- A terminal clear keeps its notification context until native expiry and provider removal, including group waits longer than the stale-write barrier.
+
 - Verified native group webhooks include the applied episode, generation, event and last successful notification-log timestamp. Each send rechecks current provider membership, routing, mute intervals, inhibition and silence. Install with the matching private AM callback and ordinary History worker. Commission one verified OSCAR webhook per receiver. Default installations keep their existing transport.
 
 ## Unreleased — Managed native episode owner
