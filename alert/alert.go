@@ -50,9 +50,10 @@ type ManagedMembership struct {
 type Alert struct {
 	model.Alert
 
-	ManagedReceiver bool                                                        `json:"-"`
-	ManagedMember   ManagedMembership                                           `json:"-"`
-	ManagedEligible func(context.Context, *Alert, string, string) (bool, error) `json:"-"`
+	ManagedOperationKind string                                                      `json:"-"`
+	ManagedReceiver      bool                                                        `json:"-"`
+	ManagedMember        ManagedMembership                                           `json:"-"`
+	ManagedEligible      func(context.Context, *Alert, string, string) (bool, error) `json:"-"`
 	// The authoritative timestamp.
 	UpdatedAt time.Time
 	Timeout   bool

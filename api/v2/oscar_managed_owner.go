@@ -270,6 +270,7 @@ func (api *API) managedMemberEligible(ctx context.Context, incoming *alert.Alert
 
 func (o *managedOwner) attachMember(a *alert.Alert, key string, slot *ownerSlot) {
 	op := slot.claims()
+	a.ManagedOperationKind = op.Kind
 	a.ManagedMember = alert.ManagedMembership{Episode: key, Generation: slot.Generation, Event: op.EventID, Digest: op.Digest}
 	a.ManagedEligible = o.eligible
 }
