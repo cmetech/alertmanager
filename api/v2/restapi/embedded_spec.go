@@ -1069,8 +1069,20 @@ func init() {
           "format": "uuid"
         },
         "permit_expires_at": {
+          "description": "Exact permit expiry for the next recovery's previous_permit_expires_at.",
           "type": "string",
           "format": "date-time",
+          "x-elm-exact-date-time": true,
+          "x-go-type": {
+            "hints": {
+              "kind": "object",
+              "noValidation": true
+            },
+            "import": {
+              "package": "time"
+            },
+            "type": "Time"
+          },
           "x-nullable": true
         },
         "reason": {
@@ -1230,8 +1242,20 @@ func init() {
           "format": "uuid"
         },
         "permit_expires_at": {
+          "description": "Exact permit expiry for the next recovery's previous_permit_expires_at.",
           "type": "string",
           "format": "date-time",
+          "x-elm-exact-date-time": true,
+          "x-go-type": {
+            "hints": {
+              "kind": "object",
+              "noValidation": true
+            },
+            "import": {
+              "package": "time"
+            },
+            "type": "Time"
+          },
           "x-nullable": true
         },
         "reason": {
@@ -2959,8 +2983,20 @@ func init() {
           "format": "uuid"
         },
         "permit_expires_at": {
+          "description": "Exact permit expiry for the next recovery's previous_permit_expires_at.",
           "type": "string",
           "format": "date-time",
+          "x-elm-exact-date-time": true,
+          "x-go-type": {
+            "hints": {
+              "kind": "object",
+              "noValidation": true
+            },
+            "import": {
+              "package": "time"
+            },
+            "type": "Time"
+          },
           "x-nullable": true
         },
         "reason": {
@@ -3109,8 +3145,20 @@ func init() {
           "format": "uuid"
         },
         "permit_expires_at": {
+          "description": "Exact permit expiry for the next recovery's previous_permit_expires_at.",
           "type": "string",
           "format": "date-time",
+          "x-elm-exact-date-time": true,
+          "x-go-type": {
+            "hints": {
+              "kind": "object",
+              "noValidation": true
+            },
+            "import": {
+              "package": "time"
+            },
+            "type": "Time"
+          },
           "x-nullable": true
         },
         "reason": {

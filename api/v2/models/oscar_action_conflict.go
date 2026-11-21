@@ -25,6 +25,8 @@ import (
 	stderrors "errors"
 	"strconv"
 
+	timeext "time"
+
 	"github.com/go-openapi/errors"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
@@ -46,9 +48,8 @@ type OscarActionConflict struct {
 	// Format: uuid
 	OperationID strfmt.UUID `json:"operation_id,omitempty"`
 
-	// permit expires at
-	// Format: date-time
-	PermitExpiresAt *strfmt.DateTime `json:"permit_expires_at,omitempty"`
+	// Exact permit expiry for the next recovery's previous_permit_expires_at.
+	PermitExpiresAt *timeext.Time `json:"permit_expires_at,omitempty"`
 
 	// reason
 	// Required: true
@@ -75,10 +76,6 @@ func (m *OscarActionConflict) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validateOperationID(formats); err != nil {
-		res = append(res, err)
-	}
-
-	if err := m.validatePermitExpiresAt(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -133,18 +130,6 @@ func (m *OscarActionConflict) validateOperationID(formats strfmt.Registry) error
 	}
 
 	if err := validate.FormatOf("operation_id", "body", "uuid", m.OperationID.String(), formats); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (m *OscarActionConflict) validatePermitExpiresAt(formats strfmt.Registry) error {
-	if swag.IsZero(m.PermitExpiresAt) { // not required
-		return nil
-	}
-
-	if err := validate.FormatOf("permit_expires_at", "body", "date-time", m.PermitExpiresAt.String(), formats); err != nil {
 		return err
 	}
 

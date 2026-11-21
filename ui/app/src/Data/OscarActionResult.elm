@@ -29,7 +29,7 @@ type alias OscarActionResult =
     , episodeRef : OscarEpisodeRef
     , severityRevision : ActionNatural.Natural
     , floorApplied : Maybe String
-    , permitExpiresAt : Maybe DateTime
+    , permitExpiresAt : Maybe String
     , targets : List OscarActionTargetResult
     }
 
@@ -53,7 +53,7 @@ decoder =
         |> required "episode_ref" OscarEpisodeRef.decoder
         |> required "severity_revision" ActionNatural.decodeNatural
         |> required "floor_applied" (Decode.nullable Decode.string)
-        |> required "permit_expires_at" (Decode.nullable DateTime.decoder)
+        |> required "permit_expires_at" (Decode.nullable (Decode.map2 always Decode.string DateTime.decoder))
         |> required "targets" (Decode.list OscarActionTargetResult.decoder)
 
 
@@ -66,7 +66,7 @@ encoder model =
         , ( "episode_ref", OscarEpisodeRef.encoder model.episodeRef )
         , ( "severity_revision", ActionNatural.encodeNatural model.severityRevision )
         , ( "floor_applied", (Maybe.withDefault Encode.null << Maybe.map Encode.string) model.floorApplied )
-        , ( "permit_expires_at", (Maybe.withDefault Encode.null << Maybe.map DateTime.encoder) model.permitExpiresAt )
+        , ( "permit_expires_at", (Maybe.withDefault Encode.null << Maybe.map Encode.string) model.permitExpiresAt )
         , ( "targets", Encode.list OscarActionTargetResult.encoder model.targets )
         ]
 

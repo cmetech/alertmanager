@@ -2,6 +2,7 @@ module OscarActionWire exposing (suite)
 
 import Data.OscarActionConflict as Conflict
 import Data.OscarActionRequest as Request
+import Data.OscarActionResult as Receipt
 import Data.OscarEpisodeRef as Ref
 import Data.OscarPolicyBinding as Binding
 import Expect
@@ -20,6 +21,24 @@ suite =
     let
         body =
             """{"version":1,"operation_id":"11111111-1111-4111-8111-111111111111","episode_ref":""" ++ reference "1" ++ ""","kind":"acknowledge","target_scope":[],"actor":{"kind":"operator","id":"alice"},"policy_binding":null,"target_severity":null}"""
+
+        exactExpiry =
+            "2026-11-21T14:30:00.123456Z"
+
+        renewalExpiry decoder encoder state =
+            let
+                receipt =
+                    """{"operation_id":"11111111-1111-4111-8111-111111111111","episode_ref":"""
+                        ++ reference "1"
+                        ++ ""","state":"""
+                        ++ Encode.encode 0 (Encode.string state)
+                        ++ ""","reason":null,"severity_revision":0,"floor_applied":null,"permit_expires_at":"2026-11-21T14:30:00.123456Z","targets":[]}"""
+            in
+            Decode.decodeString decoder receipt
+                |> Result.map encoder
+                |> Result.andThen (Decode.decodeValue (Decode.field "permit_expires_at" Decode.string))
+                |> Result.map (\previous -> Encode.object [ ( "previous_permit_expires_at", Encode.string previous ) ])
+                |> Result.andThen (Decode.decodeValue (Decode.field "previous_permit_expires_at" Decode.string))
     in
     describe "Native action wire"
         [ test "operator null fields survive encoding" <|
@@ -54,6 +73,12 @@ suite =
                 ]
                     |> List.map (Decode.decodeString Conflict.decoder >> Result.map .operationId)
                     |> Expect.equal [ Ok Nothing, Ok (Just "11111111-1111-4111-8111-111111111111") ]
+        , test "accepted and conflict receipts preserve the expiry used in the next renewal" <|
+            \() ->
+                [ renewalExpiry Receipt.decoder Receipt.encoder "accepted"
+                , renewalExpiry Conflict.decoder Conflict.encoder "held"
+                ]
+                    |> Expect.equal [ Ok exactExpiry, Ok exactExpiry ]
         , test "largest exactly supported generation is preserved" <|
             \() ->
                 Decode.decodeString Ref.decoder (reference "9007199254740991")

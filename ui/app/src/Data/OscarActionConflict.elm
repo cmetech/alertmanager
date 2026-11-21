@@ -31,7 +31,7 @@ type alias OscarActionConflict =
     , episodeRef : Maybe OscarEpisodeRef
     , severityRevision : Maybe ActionNatural.Natural
     , floorApplied : Maybe String
-    , permitExpiresAt : Maybe DateTime
+    , permitExpiresAt : Maybe String
     , targets : Maybe (List OscarActionTargetResult)
     }
 
@@ -55,7 +55,7 @@ decoder =
         |> optional "episode_ref" (Decode.nullable OscarEpisodeRef.decoder) Nothing
         |> optional "severity_revision" (Decode.nullable ActionNatural.decodeNatural) Nothing
         |> optional "floor_applied" (Decode.nullable Decode.string) Nothing
-        |> optional "permit_expires_at" (Decode.nullable DateTime.decoder) Nothing
+        |> optional "permit_expires_at" (Decode.nullable (Decode.map2 always Decode.string DateTime.decoder)) Nothing
         |> optional "targets" (Decode.nullable (Decode.list OscarActionTargetResult.decoder)) Nothing
 
 
@@ -68,7 +68,7 @@ encoder model =
         , ( "episode_ref", Maybe.withDefault Encode.null (Maybe.map OscarEpisodeRef.encoder model.episodeRef) )
         , ( "severity_revision", Maybe.withDefault Encode.null (Maybe.map ActionNatural.encodeNatural model.severityRevision) )
         , ( "floor_applied", (Maybe.withDefault Encode.null << Maybe.map Encode.string) model.floorApplied )
-        , ( "permit_expires_at", (Maybe.withDefault Encode.null << Maybe.map DateTime.encoder) model.permitExpiresAt )
+        , ( "permit_expires_at", (Maybe.withDefault Encode.null << Maybe.map Encode.string) model.permitExpiresAt )
         , ( "targets", Maybe.withDefault Encode.null (Maybe.map (Encode.list OscarActionTargetResult.encoder) model.targets) )
         ]
 

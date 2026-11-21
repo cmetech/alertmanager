@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-openapi/runtime"
+	"github.com/go-openapi/spec"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/require"
@@ -229,5 +230,62 @@ func TestGeneratedActionRequestWire(t *testing.T) {
 		var roundTrip ActionRequestV1
 		require.True(t, decodeAction(body, &roundTrip))
 		require.Equal(t, req, roundTrip)
+	}
+}
+
+func TestGeneratedActionReceiptRenewalExpiry(t *testing.T) {
+	t.Parallel()
+	const stamp = "2026-11-21T14:30:00.123456Z"
+	expiry, err := time.Parse(time.RFC3339Nano, stamp)
+	require.NoError(t, err)
+	var req ActionRequestV1
+	require.True(t, decodeAction([]byte(actionBody), &req))
+	for _, tc := range []struct {
+		state string
+		model any
+	}{
+		{"accepted", &models.OscarActionResult{}},
+		{"held", &models.OscarActionConflict{}},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			sent := ActionResultV1{OperationID: req.OperationID, EpisodeRef: req.EpisodeRef, State: tc.state, PermitExpiresAt: &expiry, Targets: []TargetResult{}}
+			require.NoError(t, json.Unmarshal(mustRaw(t, sent), tc.model))
+			var wire struct {
+				Expiry string `json:"permit_expires_at"`
+			}
+			require.NoError(t, json.Unmarshal(mustRaw(t, tc.model), &wire))
+			require.Equal(t, stamp, wire.Expiry)
+
+			resume := policyRecovery{Mode: "resume", CurrentRef: req.EpisodeRef, TargetKeys: []string{}, PreviousPermit: &wire.Expiry}
+			var received policyRecovery
+			require.True(t, decodeAction(mustRaw(t, resume), &received))
+			require.True(t, received.valid())
+			require.NotNil(t, received.PreviousPermit)
+			previous, err := time.Parse(time.RFC3339Nano, *received.PreviousPermit)
+			require.NoError(t, err)
+			require.True(t, sent.PermitExpiresAt.Equal(previous))
+		})
+	}
+}
+
+func TestServedActionSchemaZeroBounds(t *testing.T) {
+	api, err := NewAPI(nil, nil, nil, nil, promslog.NewNopLogger(), prometheus.NewRegistry())
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	api.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/swagger.json", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var served spec.Swagger
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &served))
+	for model, field := range map[string]string{
+		"oscarPolicyBinding":     "cancellation_generation",
+		"oscarActionResult":      "severity_revision",
+		"oscarActionConflict":    "severity_revision",
+		"oscarActionEligibility": "severity_revision",
+	} {
+		property := served.Definitions[model].Properties[field]
+		require.NotNil(t, property.Minimum, "%s.%s", model, field)
+		require.Equal(t, float64(0), *property.Minimum, "%s.%s", model, field)
+		require.False(t, property.ExclusiveMinimum, "%s.%s", model, field)
 	}
 }

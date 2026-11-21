@@ -1115,8 +1115,8 @@ func getSwaggerSpec() (*loads.Document, *analysis.Spec, error) {
 		return swaggerSpecCache, swaggerSpecAnalysisCache, nil
 	}
 
-	// Load embedded swagger file.
-	swaggerSpec, err := loads.Analyzed(restapi.SwaggerJSON, "")
+	// The flattened spec preserves explicit zero bounds lost in go-swagger's original-spec copy.
+	swaggerSpec, err := loads.Analyzed(restapi.FlatSwaggerJSON, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load embedded swagger file: %w", err)
 	}

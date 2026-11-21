@@ -557,7 +557,16 @@ definitions:
       episode_ref: {$ref: '#/definitions/oscarEpisodeRef'}
       severity_revision: {type: integer, format: uint64, x-elm-integer: Natural, minimum: 0}
       floor_applied: {type: string, x-nullable: true}
-      permit_expires_at: {type: string, format: date-time, x-nullable: true}
+      permit_expires_at:
+        type: string
+        format: date-time
+        description: Exact permit expiry for the next recovery's previous_permit_expires_at.
+        x-nullable: true
+        x-go-type:
+          type: Time
+          import: {package: time}
+          hints: {kind: object, noValidation: true}
+        x-elm-exact-date-time: true
       targets: {type: array, items: {$ref: '#/definitions/oscarActionTargetResult'}}
   oscarActionConflict:
     x-elm-natural-fields: true
