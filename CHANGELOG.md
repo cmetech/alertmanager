@@ -1,3 +1,8 @@
+## Unreleased — Native action delivery contract
+
+- The fork defines the signed native action webhook and immutable dispatch view. The normal notifier continues to emit its existing webhook format. The durable owner must be installed before action delivery can be enabled. Matching Python verifier and source matrix land in OSCAR. No migration or operator configuration change.
+- The shared protocol vector is frozen at SHA256 `ec481659f721adce5b5531669a065b2cf925f6a3bfe437205cac97fdeeb1c94c`. Go behavior and runtime qualification await operator execution.
+
 ## Unreleased — Configured internal managed-owner transport
 
 - Managed episode ownership accepts the deployment's explicit internal HTTP or HTTPS scheme through `--oscar.managed-owner-scheme`. Existing callers default to HTTPS. The destination remains fixed to `alertmanager-middleware:9400`; callback and owner schemes must agree. HTTP uses the existing protected internal network, while HTTPS still requires the configured CA and hostname verification. Both retain independent owner/callback credentials, signed operations, and redirect rejection. OSCAR Compose must pass the scheme selected by its existing internal transport configuration; no global TLS migration is required. No schema or state migration.
