@@ -61,7 +61,7 @@ func TestManagedNativeJoinedOwner(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "127.0.0.1", host)
 	ca, keyfile := os.Getenv("OSCAR_MANAGED_FIXTURE_CA"), os.Getenv("OSCAR_MANAGED_FIXTURE_KEY")
-	client, err := newManagedClient(ca, keyfile)
+	client, err := newManagedClient("https", ca, keyfile)
 	require.NoError(t, err)
 	client.http.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		require.Equal(t, "alertmanager-middleware:9400", address)
@@ -356,12 +356,12 @@ func TestManagedRestartEvidenceAndCloseCompensation(t *testing.T) {
 	row := ownerState{State: "reserved", Phase: "reserved", Key: key, Identity: signed, Generation: 1, Pending: slot}
 	var calls []string
 	transport := ownerTransport(func(r *http.Request) (*http.Response, error) {
-		action := strings.TrimPrefix(r.URL.String(), managedAuthority)
+		action := strings.TrimPrefix(r.URL.String(), "https://"+managedAuthority)
 		calls = append(calls, action)
 		response, _ := json.Marshal(row)
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(response)), Header: make(http.Header)}, nil
 	})
-	owner := &managedOwner{epoch: strings.Repeat("b", 32), store: p, client: &managedClient{http: &http.Client{Transport: transport}}}
+	owner := &managedOwner{epoch: strings.Repeat("b", 32), store: p, client: &managedClient{scheme: "https", http: &http.Client{Transport: transport}}}
 	// Prior to full restore the replacement cannot supersede an unpromoted operation.
 	require.Error(t, owner.recover(t.Context(), key, &managedGate{}, row))
 	require.Empty(t, calls)
@@ -483,7 +483,7 @@ func checkBlockedMaintenance(t *testing.T, startup bool) {
 		body, e := json.Marshal(reply)
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(body))}, e
 	})
-	owner := &managedOwner{epoch: strings.Repeat("f", 32), store: p, client: &managedClient{http: &http.Client{Transport: transport}}, gates: map[string]*managedGate{}}
+	owner := &managedOwner{epoch: strings.Repeat("f", 32), store: p, client: &managedClient{scheme: "https", http: &http.Client{Transport: transport}}, gates: map[string]*managedGate{}}
 	go owner.maintain()
 	require.Eventually(t, func() bool { return caps.Load() >= 2 && redrives.Load() > 0 }, 8*time.Second, 25*time.Millisecond, "A must not block capability polling or B's acknowledged-but-missing worker recovery")
 	require.Zero(t, retired.Load())
