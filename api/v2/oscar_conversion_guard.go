@@ -194,10 +194,10 @@ func (api *API) conversionCallbackReady() bool {
 			}
 			if owner := api.managedOwner; owner != nil {
 				cfg := webhook.HTTPConfig
-				if target.Scheme != "https" || target.Host != "alertmanager-middleware:9400" || target.User != nil ||
+				if target.Scheme != owner.client.scheme || target.Host != "alertmanager-middleware:9400" || target.User != nil ||
 					target.Fragment != "" || target.RawPath != "" || (target.RawQuery != "" && target.RawQuery != "notifier_type=oscaradmin") ||
-					cfg.FollowRedirects || cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.CAFile != owner.client.caFile ||
-					(cfg.TLSConfig.ServerName != "" && cfg.TLSConfig.ServerName != "alertmanager-middleware") {
+					cfg.FollowRedirects || (target.Scheme == "https" && (cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.CAFile != owner.client.caFile ||
+					(cfg.TLSConfig.ServerName != "" && cfg.TLSConfig.ServerName != "alertmanager-middleware"))) {
 					return false
 				}
 			}

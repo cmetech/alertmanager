@@ -26,24 +26,35 @@ import (
 	"github.com/prometheus/common/model"
 )
 
-const managedAuthority = "https://alertmanager-middleware:9400/api/v1/internal/managed-receiver/"
+const managedAuthority = "alertmanager-middleware:9400/api/v1/internal/managed-receiver/"
 const managedContract = "managed-episode-owner-v1"
 const maxManagedRows = 4096
 
 type managedClient struct {
+	scheme string
 	caFile string
 	http   *http.Client
 	token  string
 }
 
-func newManagedClient(caFile, keyFile string) (*managedClient, error) {
-	ca, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, err
+func newManagedClient(scheme, caFile, keyFile string) (*managedClient, error) {
+	if scheme == "" {
+		scheme = "https"
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(ca) {
-		return nil, errors.New("invalid managed CA")
+	if scheme != "http" && scheme != "https" {
+		return nil, errors.New("invalid managed owner scheme")
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if scheme == "https" {
+		ca, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca) {
+			return nil, errors.New("invalid managed CA")
+		}
+		tlsConfig.RootCAs = pool
 	}
 	key, err := os.ReadFile(keyFile)
 	if err != nil {
@@ -53,10 +64,10 @@ func newManagedClient(caFile, keyFile string) (*managedClient, error) {
 	if len(key) < 32 || len(key) > 256 {
 		return nil, errors.New("invalid managed credential")
 	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+	transport := &http.Transport{TLSClientConfig: tlsConfig,
 		MaxConnsPerHost: 16, MaxIdleConnsPerHost: 8, TLSHandshakeTimeout: time.Second, ResponseHeaderTimeout: 2 * time.Second,
 		IdleConnTimeout: 30 * time.Second, MaxResponseHeaderBytes: 8192, DisableCompression: true}
-	return &managedClient{caFile: caFile, token: string(key), http: &http.Client{Transport: transport, Timeout: 3 * time.Second,
+	return &managedClient{scheme: scheme, caFile: caFile, token: string(key), http: &http.Client{Transport: transport, Timeout: 3 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
@@ -70,7 +81,7 @@ func (c *managedClient) call(ctx context.Context, action string, body any, resul
 	if err != nil || len(data) > 128<<10 {
 		return errors.New("invalid managed command")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, managedAuthority+action, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.scheme+"://"+managedAuthority+action, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -179,11 +190,11 @@ type managedOwner struct {
 	gates    map[string]*managedGate
 }
 
-func (api *API) InstallManagedOwner(ca, key string, forbidden map[string][]byte, callback []byte) error {
+func (api *API) InstallManagedOwner(scheme, ca, key string, forbidden map[string][]byte, callback []byte) error {
 	if ca == "" && key == "" {
 		return nil
 	}
-	client, err := newManagedClient(ca, key)
+	client, err := newManagedClient(scheme, ca, key)
 	if err != nil {
 		return err
 	}

@@ -394,6 +394,7 @@ func (a *App) setup() error {
 		ConnectSendMaxBytes:        opts.ConnectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: opts.ConnectMaxRequestBodyBytes,
 		SilenceMutationKey:         opts.SilenceMutationKey,
+		ManagedOwnerScheme:         opts.ManagedOwnerScheme,
 		ManagedOwnerCA:             opts.ManagedOwnerCA, ManagedOwnerKeyFile: opts.ManagedOwnerKeyFile,
 		ConversionAdmissionKeys: opts.ConversionAdmissionKeys,
 		ConversionCallbackKey:   opts.ConversionCallbackKey,

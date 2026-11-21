@@ -1,3 +1,7 @@
+## Unreleased — Configured internal managed-owner transport
+
+- Managed episode ownership accepts the deployment's explicit internal HTTP or HTTPS scheme through `--oscar.managed-owner-scheme`. Existing callers default to HTTPS. The destination remains fixed to `alertmanager-middleware:9400`; callback and owner schemes must agree. HTTP uses the existing protected internal network, while HTTPS still requires the configured CA and hostname verification. Both retain independent owner/callback credentials, signed operations, and redirect rejection. OSCAR Compose must pass the scheme selected by its existing internal transport configuration; no global TLS migration is required. No schema or state migration.
+
 ## Unreleased — Managed History notification callbacks
 
 - The local native qualification fixture can advance the same notification group with only an ordinary member present. This exercises managed target receipt recovery when the member later reappears.

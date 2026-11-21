@@ -176,3 +176,39 @@ tls_client_config:
   # Disable validation of the server certificate.
   [ insecure_skip_verify: <boolean> | default = false]
 ```
+
+
+## OSCAR managed-owner transport
+
+The OSCAR fork's optional managed episode owner contacts only
+`alertmanager-middleware:9400/api/v1/internal/managed-receiver/`. Select its internal
+transport with `--oscar.managed-owner-scheme=http` or
+`--oscar.managed-owner-scheme=https`. The default is `https`, preserving existing
+native invocations and application embeddings that omit the setting. Invalid
+schemes fail startup; failed HTTPS never retries over HTTP.
+
+OSCAR Compose supplies the scheme from the existing `ENABLE_SSL_INTERNAL_API`
+setting and enables this owner separately with `MANAGED_RECEIVER_ENABLED`.
+Enabling managed ownership does not require changing the installation's internal
+transport. For an installation configured for internal HTTP, Compose passes
+`--oscar.managed-owner-scheme=http`; a CA file is not required for that connection.
+HTTP belongs on the deployment's existing trusted internal network. The TL1
+probe's external credential and webhook requests continue to use HTTPS through
+OSCAR's reverse proxy, with their scoped API keys.
+
+For internal HTTPS, provide `--oscar.managed-owner-ca-file` with the CA that signed
+the `alertmanager-middleware` service certificate. The native client verifies the
+certificate chain and that hostname, with TLS 1.2 or newer. Managed notification
+webhooks must use the same selected scheme, the canonical internal callback
+`/api/v1/internal/fingerprint-conversion/alerts`, and `follow_redirects: false`.
+HTTPS callbacks must use the same CA file without `insecure_skip_verify` or an
+alternate server name. The optional `notifier_type=oscaradmin` query remains
+supported.
+
+Both modes retain the separate `--oscar.managed-owner-key-file` credential,
+conversion ingress signatures, and callback bearer authentication. The owner key
+must differ from the callback and producer keys. Changing the transport does not
+change those keys, endpoint authority, retained episode state, or History
+qualification requirements. Both owner requests and managed callbacks reject
+redirects. Coordinate the native flags and matching OSCAR backend configuration
+before enabling a source; this is not an automatic transport migration.

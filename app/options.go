@@ -52,7 +52,7 @@ const (
 // fields default to their zero value (which generally matches the kingpin
 // flag default).
 type Options struct {
-	ManagedOwnerCA, ManagedOwnerKeyFile string
+	ManagedOwnerScheme, ManagedOwnerCA, ManagedOwnerKeyFile string
 	// Storage and lifecycle.
 	ConfigFile                  string
 	DataDir                     string
