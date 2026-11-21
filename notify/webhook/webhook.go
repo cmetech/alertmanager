@@ -22,7 +22,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
+	"time"
 
 	commoncfg "github.com/prometheus/common/config"
 
@@ -70,13 +72,81 @@ type managedCallback struct {
 }
 
 type Message struct {
-	Managed *managedCallback `json:"oscarManagedCallback,omitempty"`
+	NativeDeliveries []alert.NativeDeliveryMember `json:"oscarNativeDeliveries,omitempty"`
+	Managed          *managedCallback             `json:"oscarManagedCallback,omitempty"`
 	*template.Data
 
 	// The protocol version.
 	Version         string `json:"version"`
 	GroupKey        string `json:"groupKey"`
 	TruncatedAlerts uint64 `json:"truncatedAlerts"`
+}
+
+// nativeDeliveryRequest is for the durable native owner. Ordinary Notify never mints action authority.
+func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, msg *Message, members []alert.NativeDeliveryMember, key []byte) (*http.Request, error) {
+	target := string(n.conf.URL)
+	base := "https://alertmanager-middleware:9400"
+	if strings.HasPrefix(target, "http://") {
+		base = "http://alertmanager-middleware:9400"
+	}
+	path, canonical := strings.CutPrefix(target, base)
+	cfg := n.conf.HTTPConfig
+	if !canonical || (path != alert.NativeCallbackPath && path != alert.NativeCallbackPath+"?notifier_type=oscaradmin") ||
+		n.conf.URLFile != "" || n.conf.Payload != nil || n.conf.MaxAlerts != 0 || cfg == nil || cfg.FollowRedirects || cfg.TLSConfig.InsecureSkipVerify ||
+		cfg.Authorization == nil || cfg.Authorization.Type != "Bearer" || cfg.Authorization.CredentialsFile == "" {
+		return nil, errors.New("native delivery requires the private callback")
+	}
+	if msg == nil || msg.Data == nil || msg.Receiver != regexp.QuoteMeta(receiver) || msg.TruncatedAlerts != 0 || len(members) == 0 || len(members) != len(msg.Alerts) {
+		return nil, errors.New("incomplete native delivery batch")
+	}
+	variants := map[alert.NativeVariant]bool{}
+	ids := map[string]bool{}
+	for i, member := range members {
+		delivery := member.Delivery
+		if err := delivery.Validate(receiver); err != nil {
+			return nil, err
+		}
+		a := msg.Alerts[i]
+		v := delivery.NativeVariant
+		t, err := time.Parse(time.RFC3339Nano, v.StartsAt)
+		if err != nil {
+			return nil, err
+		}
+		v.StartsAt = t.UTC().Format(time.RFC3339Nano)
+		severity := strings.ToLower(a.Labels["severity"])
+		if strings.TrimSpace(severity) == "" {
+			severity = "major"
+			if a.Status == "resolved" {
+				severity = "cleared"
+			}
+		}
+		if member.Index != i || variants[v] || ids[delivery.DeliveryID] || a.Fingerprint != v.Fingerprint ||
+			!a.StartsAt.Equal(t) || delivery.State != a.Status || delivery.EffectiveSeverity != severity {
+			return nil, errors.New("native delivery member mismatch")
+		}
+		variants[v], ids[delivery.DeliveryID] = true, true
+	}
+	data := *msg.Data
+	data.Receiver = receiver
+	signed := *msg
+	signed.Data, signed.NativeDeliveries = &data, members
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(&signed); err != nil {
+		return nil, err
+	}
+	headers, err := alert.NativeDeliveryHeaders(buf.Bytes(), receiver, path, key)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
+	return req, nil
 }
 
 func truncateAlerts(maxAlerts uint64, alerts []*alert.Alert) ([]*alert.Alert, uint64) {
