@@ -1,3 +1,9 @@
+## Unreleased — Native firing-member dispatch checkpoint
+
+- Stage effective route/group and inhibition updates, exact provider identity on notification copies, and per-member firing coverage for selected and ordinary webhook dispatch.
+- The source checkpoint keeps native action version zero. The CLI cannot advertise or commission this reader. Terminal receipt semantics, transport coverage, and restart publication remain open.
+- No database migration, new configuration, or release pin change accompanies this checkpoint. The A2 migration and matching OSCAR consumers remain deployment prerequisites. See [native action dispatch](doc/design/oscar-native-action-dispatch.md).
+
 ## Unreleased — Native action admission
 
 - Add signed action, lookup and eligibility endpoints, a leased episode owner and bounded notification-entry permits. Native requires the matching OSCAR store protocol and a commissioned v1 dispatch reader before advertising readiness. Existing deployments default to disabled.
