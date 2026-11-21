@@ -6,6 +6,7 @@ import (
 	"os"
 	"regexp"
 	"testing"
+	"time"
 
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
@@ -116,4 +117,53 @@ func TestOscarActionManagedClearWebhook(t *testing.T) {
 	msg.Managed = nil
 	src.ManagedReceiver = false
 	require.Error(t, build())
+}
+
+func TestOscarActionManagedExpiryRequiresCurrentProviderEnd(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("../../api/v2/testdata/oscar_actions_managed_clear_v1.json")
+	require.NoError(t, err)
+	var vector struct {
+		Body    string
+		TestKey string `json:"test_key"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &vector))
+	msg := Message{Data: &template.Data{}}
+	require.NoError(t, json.Unmarshal([]byte(vector.Body), &msg))
+	end := time.Now().UTC().Add(-time.Minute)
+	start := end.Add(-time.Hour)
+	labels := model.LabelSet{"severity": "major"}
+	src := alert.New(model.Alert{Labels: labels, StartsAt: start, EndsAt: end}, start, true)
+	src.ManagedReceiver = true
+	src.ManagedMember = msg.Managed.Members[0].ManagedMembership
+	src.ManagedOperationKind = "raise"
+	rendered := &msg.Alerts[0]
+	rendered.Status, rendered.StartsAt, rendered.EndsAt, rendered.Fingerprint = "resolved", start, end, src.Fingerprint().String()
+	rendered.Labels = template.KV{"severity": "major"}
+	proof := &msg.NativeDeliveries[0].Delivery
+	proof.ActiveSince, proof.SourceSeverity, proof.EffectiveSeverity = start.Format(time.RFC3339Nano), "major", "major"
+	proof.NativeVariant = alert.NativeVariant{Fingerprint: rendered.Fingerprint, StartsAt: start.Format(time.RFC3339Nano)}
+	notifier := Notifier{conf: &WebhookConfig{URL: "https://alertmanager-middleware:9400" + alert.NativeCallbackPath, HTTPConfig: &commoncfg.HTTPClientConfig{
+		Authorization: &commoncfg.Authorization{Type: "Bearer", CredentialsFile: "/run/secrets/native-callback"}}}}
+	build := func() error {
+		req, err := notifier.nativeDeliveryRequest(t.Context(), msg.Receiver, &msg, []*alert.Alert{src}, msg.NativeDeliveries, []byte(vector.TestKey))
+		if err == nil {
+			req.Body.Close()
+		}
+		return err
+	}
+	for _, kind := range []string{"raise", "update"} {
+		src.ManagedOperationKind = kind
+		src.EndsAt, rendered.EndsAt = end, end
+		require.NoError(t, build())
+		src.EndsAt = end.Add(time.Nanosecond)
+		require.Error(t, build())
+		rendered.EndsAt = src.EndsAt
+		require.NoError(t, build())
+		src.EndsAt = time.Now().Add(time.Hour)
+		rendered.EndsAt = src.EndsAt
+		require.Error(t, build())
+		src.EndsAt, rendered.EndsAt = time.Time{}, time.Time{}
+		require.Error(t, build())
+	}
 }

@@ -149,8 +149,8 @@ func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, m
 			case "clear":
 				logical = "resolved"
 			case "raise", "update":
-				if logical != "firing" {
-					return nil, errors.New("managed problem is no longer firing")
+				if logical == "resolved" && (!source.Resolved() || !source.EndsAt.Equal(a.EndsAt) || a.EndsAt.Before(source.StartsAt)) {
+					return nil, errors.New("managed native expiry mismatch")
 				}
 			default:
 				return nil, errors.New("managed operation kind unavailable")
