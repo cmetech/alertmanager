@@ -189,7 +189,10 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 				}
 				goto done
 			}
-			a := item.Data
+			a := api.actionView(item.Data)
+			if a == nil {
+				continue
+			}
 			if (!a.EndsAt.IsZero() && a.EndsAt.Before(now)) || !alertMatchesFilterLabels(&a.Alert, matchers) {
 				continue
 			}
@@ -211,7 +214,7 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 			if severity != "" && fold.String(string(a.Labels["severity"])) != severity {
 				continue
 			}
-			fp := a.Fingerprint().String()
+			fp := a.ProviderSource().Fingerprint().String()
 			if search != "" && !strings.Contains(fold.String(string(a.Labels["alertname"])), search) && !strings.Contains(fold.String(string(status.State)), search) && !strings.Contains(fold.String(string(a.Labels["severity"])), search) && !strings.Contains(fold.String(string(a.Annotations["summary"])), search) && !strings.Contains(fold.String(fp), search) {
 				continue
 			}

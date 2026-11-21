@@ -782,3 +782,53 @@ func TestPreparedOrdinaryTakeoverRequiresExactLaterInterval(t *testing.T) {
 		})
 	}
 }
+
+func TestOscarActionUntrackedEntryFencesEnrollment(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(context.Context, string, map[string]any, any) error {
+		t.Fatal("verified negative must not access the journal")
+		return nil
+	}), testActionDispatch{})
+	o.readSource = func(_, _ string, read func(*alert.Alert)) { read(a) }
+	o.recovered, o.lease = true, actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
+	p, pass, err := o.InspectOrdinary(t.Context(), a)
+	require.NoError(t, err)
+	require.Nil(t, p)
+	require.True(t, pass.Enter())
+	_, err = o.Project(t.Context(), a)
+	require.Error(t, err)
+	pass.Finish(false)
+	_, err = o.Project(t.Context(), a)
+	require.Error(t, err)
+	_, _, err = o.InspectOrdinary(t.Context(), a)
+	require.Error(t, err)
+}
+
+func TestOscarActionMembershipCandidateMissNeverEnrolls(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	reads := 0
+	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, p map[string]any, out any) error {
+		require.Equal(t, "recover", cmd)
+		require.Equal(t, "source", p["projection"])
+		reads++
+		*out.(*[]EpisodeProjection) = []EpisodeProjection{}
+		return nil
+	}), testActionDispatch{})
+	o.readSource = func(_, _ string, read func(*alert.Alert)) { read(source) }
+	o.recovered = true
+	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
+	key := sourceKey("", source.Fingerprint().String())
+	bucket, bit := membershipBit(key)
+	o.membership[bucket] |= bit
+	p, pass, err := o.InspectOrdinary(t.Context(), source)
+	require.NoError(t, err)
+	require.Nil(t, p)
+	require.Empty(t, o.byKey)
+	require.Equal(t, 1, reads)
+	o.slot(key, true)
+	require.False(t, pass.Enter(), "enrollment after a checked negative revokes its entry")
+}

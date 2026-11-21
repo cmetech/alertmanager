@@ -23,6 +23,7 @@ import (
 
 	"github.com/prometheus/common/model"
 
+	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/api"
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
@@ -52,6 +53,7 @@ import (
 // (stop old, build new, start + wait-for-loading, then publish) — in one
 // cohesive, independently testable place.
 type reloader struct {
+	actions *nativeActions
 	// Long-lived components: created once during startup.
 	alerts            provider.Alerts
 	apih              *api.API
@@ -154,10 +156,21 @@ func (r *reloader) reload(conf *config.Config) error {
 	// Apply tracing first: it is the last step that can fail, and doing
 	// it before stopping the old components keeps them running if it
 	// errors.
+	var actionTargets map[string][]actionIntegration
+	var supported bool
+	if r.actions != nil {
+		actionTargets, supported, err = actionDestinations(conf, receivers)
+		if err != nil {
+			return err
+		}
+	}
 	if err := r.tracingMgr.ApplyConfig(conf.TracingConfig); err != nil {
 		return fmt.Errorf("failed to apply tracing config: %w", err)
 	}
 	r.apih.PauseTiming()
+	if r.actions != nil {
+		r.actions.pause()
+	}
 	if r.afterTimingPause != nil {
 		r.afterTimingPause()
 	}
@@ -197,10 +210,23 @@ func (r *reloader) reload(conf *config.Config) error {
 	r.metrics.configuredIntegrations.Set(float64(integrationsNum))
 	r.metrics.configuredInhibitionRules.Set(float64(len(conf.InhibitRules)))
 
+	var stage notify.Stage = pipeline
+	var graph *actionGraph
+	if actions := r.actions; actions != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		graph = &actionGraph{supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
+		newInhibitor.Project = actions.readView
+		stage = notify.StageFunc(func(ctx context.Context, l *slog.Logger, members ...*alert.Alert) (context.Context, []*alert.Alert, error) {
+			reader := func(ctx context.Context, receiver, name string, index int, members []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
+				return actions.prepare(ctx, graph, receiver, name, index, members, due)
+			}
+			return pipeline.Exec(notify.WithOrdinaryReader(ctx, reader), l, members...)
+		})
+	}
 	newDispatcher := dispatch.NewDispatcher(
 		r.alerts,
 		routes,
-		pipeline,
+		stage,
 		intervener,
 		r.timeoutFunc,
 		r.dispatchMaintenanceInterval,
@@ -232,6 +258,10 @@ func (r *reloader) reload(conf *config.Config) error {
 	// Populate the new inhibition cache before publishing a route and status
 	// callback from the same configuration generation. In-flight readers retain
 	// the old callback and its inhibitor after the reload.
+	if graph != nil {
+		graph.dispatcher = newDispatcher
+		newDispatcher.Project = r.actions.readView
+	}
 	go newInhibitor.Run()
 	newInhibitor.WaitForLoading()
 	r.inhibitor.Store(newInhibitor)
@@ -263,6 +293,11 @@ func (r *reloader) reload(conf *config.Config) error {
 		r.beforeTimingPublish()
 	}
 	r.apih.PublishTiming(conf, timingIntegrations, intervener, timingLookup)
+	if graph != nil {
+		r.actions.mu.Lock()
+		r.actions.graph = graph
+		r.actions.mu.Unlock()
+	}
 
 	return nil
 }
@@ -272,6 +307,9 @@ func (r *reloader) reload(conf *config.Config) error {
 // config has been applied yet (both pointers nil).
 func (r *reloader) stop() error {
 	r.apih.PauseTiming()
+	if r.actions != nil {
+		r.actions.pause()
+	}
 	if i := r.inhibitor.Load(); i != nil {
 		i.Stop()
 	}

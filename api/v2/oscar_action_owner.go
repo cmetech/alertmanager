@@ -98,6 +98,7 @@ type episodeUpdate struct {
 	ManagedOwner   *sourceOwner        `json:"managed_owner"`
 }
 type EpisodeProjection struct {
+	PreviousEffective string `json:"-"`
 	episodeUpdate
 	ID               string `json:"id"`
 	Floor            string `json:"floor"`
@@ -179,14 +180,17 @@ type nativeActionOwner struct {
 	dbAnchor, localAnchor time.Time
 	lease                 actionLease
 	recovered             bool
-	deferredRecovery      bool // An omitted durable source must be checked on later enrollment.
+	enrollments           uint64
+	membership            [1 << 16]uint64  // Conservative per-owner recovery index; collisions require an indexed source lookup.
+	untracked             map[string]uint8 // Entered direct contacts fence enrollment until conclusive settlement.
+	deferredRecovery      bool             // An omitted durable source must be checked on later enrollment.
 	slots                 chan struct{}
 }
 
 func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *nativeActionOwner {
 	return &nativeActionOwner{
 		authority: authority, owner: uuid.NewString(), rpc: rpc, dispatch: d,
-		byKey: map[string]*episodeSlot{}, byID: map[string]*episodeSlot{}, slots: make(chan struct{}, 32),
+		untracked: make(map[string]uint8), byKey: map[string]*episodeSlot{}, byID: map[string]*episodeSlot{}, slots: make(chan struct{}, 32),
 	}
 }
 func variantOf(a *alert.Alert) alert.NativeVariant {
@@ -202,7 +206,10 @@ func (o *nativeActionOwner) slot(key string, create bool) *episodeSlot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	s := o.byKey[key]
-	if s == nil && create && len(o.byKey) < maxActionEpisodes {
+	if s == nil && create && len(o.byKey) < maxActionEpisodes && o.untracked[key] == 0 {
+		bucket, bit := membershipBit(key)
+		o.membership[bucket] |= bit
+		o.enrollments++
 		s = &episodeSlot{needsRestore: o.deferredRecovery}
 		o.byKey[key] = s
 	}
@@ -351,6 +358,10 @@ func (o *nativeActionOwner) restoreEpisode(p EpisodeProjection) error {
 		return err
 	}
 	slotKey := sourceKey(key, p.NativeVariant.Fingerprint)
+	bucket, bit := membershipBit(slotKey)
+	o.mu.Lock()
+	o.membership[bucket] |= bit
+	o.mu.Unlock()
 	s := o.slot(slotKey, false)
 	if o.readSource != nil {
 		o.readSource(key, p.NativeVariant.Fingerprint, func(a *alert.Alert) {
@@ -777,6 +788,10 @@ func (s *episodeSlot) latest() *alert.Alert { s.local.Lock(); defer s.local.Unlo
 // Project returns a journaled lifecycle for the exact current provider member.
 // Every tracked ordinary dispatch and signed callback must pass this gate.
 func (o *nativeActionOwner) Project(ctx context.Context, source *alert.Alert) (EpisodeProjection, error) {
+	return o.projectSource(ctx, source, true)
+}
+
+func (o *nativeActionOwner) projectSource(ctx context.Context, source *alert.Alert, enroll bool) (EpisodeProjection, error) {
 	ctx = o.withEpoch(ctx)
 	if source == nil || !o.ready() {
 		return EpisodeProjection{}, unavailable
@@ -788,7 +803,7 @@ func (o *nativeActionOwner) Project(ctx context.Context, source *alert.Alert) (E
 			if current != source {
 				return
 			}
-			s = o.slot(sourceKey(key, fp), true)
+			s = o.slot(sourceKey(key, fp), enroll)
 			if s != nil && s.latest() == nil {
 				o.observe(key, current, false)
 			}
@@ -853,7 +868,13 @@ func (o *nativeActionOwner) publish(ctx context.Context, s *episodeSlot, p Episo
 		err = s.current(p, source, false)
 	}
 	if err == nil {
-		err = o.dispatch.Publish(ctx, p)
+		if reader, ok := o.dispatch.(interface {
+			PublishSource(context.Context, EpisodeProjection, *alert.Alert) error
+		}); ok {
+			err = reader.PublishSource(ctx, p, source)
+		} else {
+			err = o.dispatch.Publish(ctx, p)
+		}
 	}
 	s.needsPublish = err != nil
 	return err
@@ -1006,6 +1027,7 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 		}
 	}
 	proposed := p
+	proposed.PreviousEffective = p.EffectiveSeverity()
 	var floor *string
 	if req.TargetSeverity != nil && firingRanks[*req.TargetSeverity] > firingRanks[p.Floor] {
 		floor = req.TargetSeverity
@@ -1259,7 +1281,7 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 	}
 	o := newNativeActionOwner(c.AuthorityID, actionClient{client}, c.Dispatch)
 	api.actionOwner = o
-	o.callbackReady = func() bool { return api.callbackReadyFor(client) }
+	o.callbackReady = func() bool { return api.callbacksReadyFor(client, true) }
 	ready := o.ready
 	api.Handler = actionRoutes(api.Handler, keys, o, ready)
 	if c.Dispatch == nil {
@@ -1286,4 +1308,16 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 	go func() { <-store.ManagedShutdown(); cancel() }()
 	go o.maintain(ctx)
 	return nil
+}
+
+// actionView returns effective routing labels without performing a journal read on a list endpoint.
+func (api *API) actionView(source *alert.Alert) *alert.Alert {
+	if o := api.actionOwner; o != nil {
+		if reader, ok := o.dispatch.(interface {
+			ReadView(*alert.Alert) *alert.Alert
+		}); ok {
+			return reader.ReadView(source)
+		}
+	}
+	return source
 }

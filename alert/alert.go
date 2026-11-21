@@ -64,7 +64,8 @@ type Alert struct {
 
 	// The fingerprint of Labels, computed once by New. The labels must not
 	// be modified after construction.
-	fingerprint model.Fingerprint
+	fingerprint    model.Fingerprint
+	providerSource *Alert // Original provider member for a notification or effective view.
 }
 
 // New returns an Alert wrapping the given model.Alert. All Alerts must be

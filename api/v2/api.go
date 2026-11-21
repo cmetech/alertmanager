@@ -357,6 +357,12 @@ func (api *API) getAlertsHandler(params alert_ops.GetAlertsParams) middleware.Re
 			break
 		}
 
+		if readManaged, _ := params.HTTPRequest.Context().Value(managedReadKey{}).(string); readManaged == "" {
+			alrt = api.actionView(alrt)
+			if alrt == nil {
+				continue
+			}
+		}
 		routes := api.route.Match(alrt.Labels)
 		receivers := make([]string, 0, len(routes))
 		for _, r := range routes {
@@ -651,7 +657,7 @@ func (api *API) getAlertGroupsHandler(params alertgroup_ops.GetAlertGroupsParams
 		}
 
 		for _, alrt := range alertGroup.Alerts {
-			fp := alrt.Fingerprint()
+			fp := alrt.ProviderSource().Fingerprint()
 			receivers := allReceivers[fp]
 			status, ok := alertGroup.AlertStatuses[fp]
 			if !ok {

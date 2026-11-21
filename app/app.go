@@ -379,6 +379,8 @@ func (a *App) setup() error {
 		clusterPeer = peer
 	}
 
+	// The CLI keeps the action reader dormant until terminal contacts and native transport coverage are settled.
+	actions, _ := opts.ActionOwner.Dispatch.(*nativeActions)
 	apih, err := api.New(api.Options{
 		Alerts:                     alerts,
 		Silences:                   silences,
@@ -469,6 +471,7 @@ func (a *App) setup() error {
 	// at shutdown. The long-lived singletons above are updated in place
 	// (apih.Update, eventRec/tracing ApplyConfig) rather than rebuilt.
 	r = &reloader{
+		actions:                     actions,
 		alerts:                      alerts,
 		apih:                        apih,
 		dispatcherMetrics:           dispatch.NewDispatcherMetrics(false, reg, ff),

@@ -91,7 +91,13 @@ func (n *MuteStage) Exec(ctx context.Context, logger *slog.Logger, alerts ...*al
 	for _, a := range alerts {
 		// TODO(fabxc): increment total alerts counter.
 		// Do not send the alert if muted.
-		if n.muter.Mutes(ctx, a.LabelSet()) {
+		var suppress bool
+		if ih, ok := n.muter.(*inhibit.Inhibitor); ok {
+			suppress = ih.MutesSource(ctx, a.LabelSet(), a.ProviderSource().Fingerprint())
+		} else {
+			suppress = n.muter.Mutes(ctx, a.LabelSet())
+		}
+		if suppress {
 			muted = append(muted, a)
 		} else {
 			filtered = append(filtered, a)

@@ -163,7 +163,7 @@ func (a *Alerts) SetUnlessObsoleteResolved(alrt *alert.Alert) (bool, error) {
 	if a.destroyed {
 		return false, ErrDestroyed
 	}
-	if current, ok := a.alerts[alrt.Fingerprint()]; ok &&
+	if current, ok := a.alerts[alrt.ProviderSource().Fingerprint()]; ok &&
 		!alrt.Timeout && alrt.Resolved() && alrt.EndsAt.Before(current.StartsAt) {
 		return false, nil
 	}
@@ -177,7 +177,7 @@ func (a *Alerts) setLocked(alrt *alert.Alert) error {
 		return ErrDestroyed
 	}
 
-	fp := alrt.Fingerprint()
+	fp := alrt.ProviderSource().Fingerprint()
 	name := alrt.Name()
 
 	// Apply per alert limits if necessary
@@ -202,7 +202,7 @@ func (a *Alerts) DeleteIfNotModified(alerts alert.AlertSlice, destroyIfEmpty boo
 	a.Lock()
 	defer a.Unlock()
 	for _, alrt := range alerts {
-		fp := alrt.Fingerprint()
+		fp := alrt.ProviderSource().Fingerprint()
 		if other, ok := a.alerts[fp]; ok && alrt.UpdatedAt.Equal(other.UpdatedAt) {
 			delete(a.alerts, fp)
 		}

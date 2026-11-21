@@ -42,6 +42,8 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/inhibit")
 // currently active alerts and a set of inhibition rules. It implements the
 // Muter interface.
 type Inhibitor struct {
+	// Project supplies the current effective member under the publication fence. Set before Run.
+	Project    func(*alert.Alert, func(*alert.Alert))
 	alerts     provider.Alerts
 	rules      []*InhibitRule
 	logger     *slog.Logger
@@ -108,6 +110,10 @@ func (ih *Inhibitor) run(ctx context.Context) {
 }
 
 func (ih *Inhibitor) processAlert(ctx context.Context, a *alert.Alert) {
+	if ih.Project != nil {
+		ih.Project(a, func(current *alert.Alert) { ih.UpdateProjection(a.Fingerprint(), current) })
+		return
+	}
 	_, span := tracer.Start(ctx, "inhibit.Inhibitor.processAlert",
 		trace.WithAttributes(
 			attribute.String("alerting.alert.name", a.Name()),
@@ -124,6 +130,17 @@ func (ih *Inhibitor) processAlert(ctx context.Context, a *alert.Alert) {
 			span.AddEvent("alert matched rule source", trace.WithAttributes(attr))
 			span.SetAttributes(attr)
 			r.cache.set(a)
+		}
+	}
+}
+
+// UpdateProjection replaces or removes a source in every inhibition rule.
+func (ih *Inhibitor) UpdateProjection(source model.Fingerprint, effective *alert.Alert) {
+	for _, rule := range ih.rules {
+		if effective != nil && rule.SourceMatchers.Matches(effective.Labels) {
+			rule.cache.replace(source, effective)
+		} else {
+			rule.cache.replace(source, nil)
 		}
 	}
 }
@@ -176,6 +193,11 @@ func (ih *Inhibitor) Stop() {
 // Mutes returns true iff the given label set is muted.  It implements the
 // Muter interface.
 func (ih *Inhibitor) Mutes(ctx context.Context, lset labelset.LabelSet) bool {
+	return ih.MutesSource(ctx, lset, lset.Fingerprint())
+}
+
+// MutesSource excludes the same provider member even when its routing labels changed.
+func (ih *Inhibitor) MutesSource(ctx context.Context, lset labelset.LabelSet, source model.Fingerprint) bool {
 	fp := lset.Fingerprint()
 
 	_, span := tracer.Start(ctx, "inhibit.Inhibitor.Mutes",
@@ -206,7 +228,7 @@ func (ih *Inhibitor) Mutes(ctx context.Context, lset labelset.LabelSet) bool {
 		)
 		// If we are here, the target side matches. If the source side matches, too, we
 		// need to exclude inhibiting alerts for which the same is true.
-		if inhibitedByFP, eq := r.hasEqual(lset.LabelSet, r.SourceMatchers.Matches(lset.LabelSet), now); eq {
+		if inhibitedByFP, eq := r.findEqual(lset.LabelSet, r.SourceMatchers.Matches(lset.LabelSet), now, &source); eq {
 			inhibitedBy = append(inhibitedBy, inhibitedByFP.String())
 			span.AddEvent("alert inhibited",
 				trace.WithAttributes(
@@ -319,7 +341,11 @@ func NewInhibitRule(cr amcommoncfg.InhibitRule) *InhibitRule {
 // is returned. If excludeTwoSidedMatch is true, alerts that match both the
 // source and the target side of the rule are disregarded.
 func (r *InhibitRule) hasEqual(lset model.LabelSet, excludeTwoSidedMatch bool, now time.Time) (model.Fingerprint, bool) {
-	return r.cache.find(lset, now, func(a *alert.Alert) bool {
-		return !excludeTwoSidedMatch || !r.TargetMatchers.Matches(a.Labels)
+	return r.findEqual(lset, excludeTwoSidedMatch, now, nil)
+}
+
+func (r *InhibitRule) findEqual(lset model.LabelSet, excludeTwoSidedMatch bool, now time.Time, source *model.Fingerprint) (model.Fingerprint, bool) {
+	return r.cache.find(lset, now, func(fp model.Fingerprint, a *alert.Alert) bool {
+		return (source == nil || fp != *source) && (!excludeTwoSidedMatch || !r.TargetMatchers.Matches(a.Labels))
 	})
 }

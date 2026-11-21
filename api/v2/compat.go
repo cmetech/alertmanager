@@ -154,7 +154,7 @@ func AlertToOpenAPIAlert(source *alert.Alert, status alert.AlertStatus, receiver
 		apiReceivers = append(apiReceivers, &open_api_models.ReceiverReference{Name: &receivers[i]})
 	}
 
-	fp := source.Fingerprint().String()
+	fp := source.ProviderSource().Fingerprint().String()
 
 	state := string(status.State)
 	if len(mutedBy) > 0 {
@@ -185,7 +185,7 @@ func AlertToOpenAPIAlert(source *alert.Alert, status alert.AlertStatus, receiver
 		aa.Annotations["__oscar_managed_native"] = "managed-episode-owner-v1"
 	}
 	if source.Annotations[conversionAnnotation] != "" {
-		aa.Annotations["__oscar_fingerprint_conversion_resolution"] = alert.ConversionResolutionReceipt(source)
+		aa.Annotations["__oscar_fingerprint_conversion_resolution"] = alert.ConversionResolutionReceipt(source.ProviderSource())
 	}
 	if aa.Status.SilencedBy == nil {
 		aa.Status.SilencedBy = []string{}

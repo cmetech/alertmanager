@@ -87,3 +87,20 @@ func TestOscarActionManagedClearWire(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, fixture.Headers, headers)
 }
+
+func TestOscarActionNotificationMemberPreservesProviderExpiry(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 21, 12, 0, 0, 123456789, time.UTC)
+	source := New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: start, EndsAt: start.Add(time.Hour)}, start, true)
+	ref := EpisodeRef{"11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", 1, 1}
+	view, err := BuildDispatchView(source, ref, "critical", 1)
+	require.NoError(t, err)
+	effective := view.NotificationMember()
+	member := effective.NotificationCopy(start)
+	require.Same(t, source, member.ProviderSource())
+	require.Equal(t, source.EndsAt, effective.EndsAt)
+	require.True(t, member.EndsAt.IsZero())
+	require.Equal(t, effective.Labels.Fingerprint(), member.Fingerprint())
+	require.NotEqual(t, source.Fingerprint(), member.Fingerprint())
+	require.Equal(t, source.EndsAt, effective.NotificationCopy(source.EndsAt).EndsAt)
+}

@@ -742,3 +742,25 @@ func BenchmarkFingerprintEquals(b *testing.B) {
 		})
 	}
 }
+
+func TestOscarActionInhibitionReprojection(t *testing.T) {
+	t.Parallel()
+	ih := NewInhibitor(nil, []amcommoncfg.InhibitRule{
+		{SourceMatch: map[string]string{"role": "source"}, TargetMatch: map[string]string{"role": "target"}, Equal: []string{"severity"}},
+		{SourceMatch: map[string]string{"severity": "critical"}, TargetMatch: map[string]string{"severity": "warning"}, Equal: []string{"cluster"}},
+	}, nopLogger, eventrecorder.NopRecorder())
+	now := time.Now()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"role": "source", "cluster": "c", "severity": "warning"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	effective := source.Alert
+	effective.Labels = source.Labels.Clone()
+	effective.Labels["severity"] = "critical"
+	projected := alert.New(effective, now, false)
+	ih.processAlert(context.Background(), source)
+	ih.UpdateProjection(source.Fingerprint(), projected)
+	checkMutes(t, ih, model.LabelSet{"role": "target", "severity": "warning"}, false)
+	checkMutes(t, ih, model.LabelSet{"role": "target", "severity": "critical"}, true)
+	checkMutes(t, ih, model.LabelSet{"cluster": "c", "severity": "warning"}, true)
+	require.False(t, ih.MutesSource(context.Background(), source.LabelSet(), source.Fingerprint()))
+	ih.UpdateProjection(source.Fingerprint(), nil)
+	checkMutes(t, ih, model.LabelSet{"cluster": "c", "severity": "warning"}, false)
+}

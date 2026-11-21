@@ -54,12 +54,26 @@ func (c *cache) fingerprintEquals(lset model.LabelSet) model.Fingerprint {
 
 // set adds or replaces the given source alert.
 func (c *cache) set(a *alert.Alert) {
-	fp := a.Fingerprint()
-	eq := c.fingerprintEquals(a.Labels)
+	c.replace(a.Fingerprint(), a)
+}
+
+// replace indexes effective labels by the original provider fingerprint.
+func (c *cache) replace(fp model.Fingerprint, a *alert.Alert) {
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
+	if prev := c.alerts[fp]; prev != nil {
+		if a != nil && a.Fingerprint() == prev.Fingerprint() {
+			c.alerts[fp] = a
+			return
+		}
+		c.remove(fp, prev)
+	}
+	if a == nil {
+		return
+	}
+	eq := c.fingerprintEquals(a.Labels)
 	c.alerts[fp] = a
 	set, ok := c.index[eq]
 	if !ok {
@@ -71,7 +85,7 @@ func (c *cache) set(a *alert.Alert) {
 
 // find returns the fingerprint of a cached source alert that shares the equal
 // labels of lset, is active at now, and satisfies match.
-func (c *cache) find(lset model.LabelSet, now time.Time, match func(*alert.Alert) bool) (model.Fingerprint, bool) {
+func (c *cache) find(lset model.LabelSet, now time.Time, match func(model.Fingerprint, *alert.Alert) bool) (model.Fingerprint, bool) {
 	eq := c.fingerprintEquals(lset)
 
 	c.mtx.RLock()
@@ -82,7 +96,7 @@ func (c *cache) find(lset model.LabelSet, now time.Time, match func(*alert.Alert
 		if a.ResolvedAt(now) {
 			continue
 		}
-		if !match(a) {
+		if !match(fp, a) {
 			continue
 		}
 		return fp, true
@@ -112,13 +126,17 @@ func (c *cache) gc() {
 		if !a.Resolved() {
 			continue
 		}
-		delete(c.alerts, fp)
+		c.remove(fp, a)
+	}
+}
 
-		eq := c.fingerprintEquals(a.Labels)
-		set := c.index[eq]
-		delete(set, fp)
-		if len(set) == 0 {
-			delete(c.index, eq)
-		}
+// remove is called with the cache locked.
+func (c *cache) remove(fp model.Fingerprint, a *alert.Alert) {
+	delete(c.alerts, fp)
+	eq := c.fingerprintEquals(a.Labels)
+	set := c.index[eq]
+	delete(set, fp)
+	if len(set) == 0 {
+		delete(c.index, eq)
 	}
 }

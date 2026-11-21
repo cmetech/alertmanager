@@ -26,8 +26,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/alertmanager/alert"
+	v2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/alertmanager/notify"
@@ -239,4 +241,46 @@ func TestReloaderTimingFollowsNativeIntegrationIndexesAfterReorder(t *testing.T)
 	require.Equal(t, want, states())
 	require.NoError(t, r.reload(configFor("http://127.0.0.1:65532/", "http://127.0.0.1:65531/")))
 	require.Equal(t, want, states(), "native log keys follow integration indices after destination reorder")
+}
+
+func TestOscarActionScopesRequireCanonicalTransport(t *testing.T) {
+	t.Parallel()
+	id, action := "11111111-1111-4111-8111-111111111111", "ticket"
+	scope := []alert.TargetScopeEntry{{ReceiverID: "team", NotifierID: &id, Action: &action}}
+	_, ok := actionScope("team", false, scope)
+	require.False(t, ok)
+	got, ok := actionScope("team", true, scope)
+	require.True(t, ok)
+	require.Equal(t, scope, got)
+	_, ok = actionScope("other", true, scope)
+	require.False(t, ok)
+}
+
+func TestOscarActionFloorRebuildsGroupsAndInhibitorOnReload(t *testing.T) {
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	now := time.Now().UTC()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "severity": "major", "cluster": "x"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	require.NoError(t, r.alerts.Put(t.Context(), source))
+	current, err := r.alerts.Get(source.Fingerprint())
+	require.NoError(t, err)
+	cfg, err := config.Load("route:\n  receiver: base\n  group_wait: 1h\n  routes:\n  - receiver: escalated\n    matchers: ['severity=critical']\nreceivers:\n- name: base\n- name: escalated\ninhibit_rules:\n- source_matchers: ['severity=critical']\n  target_matchers: ['severity=minor']\n  equal: [cluster]\n")
+	require.NoError(t, err)
+	r.actions = newNativeActions(func(_, _ string, read func(*alert.Alert)) { read(current) }, nil, r.logger)
+	require.NoError(t, r.reload(cfg))
+	var p v2.EpisodeProjection
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"lifecycle_seq":1,"active_since":%q,"state":"firing","source_severity":"major","floor":"critical","severity_revision":1}`, current.Fingerprint().String(), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))), &p))
+	require.NoError(t, r.actions.PublishSource(t.Context(), p, current))
+	for _, reload := range []bool{false, true} {
+		if reload {
+			require.NoError(t, r.reload(cfg))
+		}
+		groups, _, err := r.groups(t.Context(), func(*dispatch.Route) bool { return true }, func(*alert.Alert, time.Time) (alert.AlertStatus, bool) { return alert.AlertStatus{}, true })
+		require.NoError(t, err)
+		require.Len(t, groups, 1)
+		require.Equal(t, "escalated", groups[0].Receiver)
+		require.Same(t, current, groups[0].Alerts[0].ProviderSource())
+		require.Equal(t, model.LabelValue("major"), current.Labels["severity"])
+		require.True(t, r.inhibitor.Load().Mutes(t.Context(), labelset.FromModel(model.LabelSet{"cluster": "x", "severity": "minor"})))
+	}
 }

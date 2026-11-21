@@ -62,6 +62,13 @@ func (n SetNotifiesStage) mutedAlerts(ctx context.Context) []uint64 {
 
 // Exec implements the Stage interface.
 func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*alert.Alert) (context.Context, []*alert.Alert, error) {
+	if _, selected := selectedAction(ctx); selected {
+		return ctx, alerts, nil
+	}
+	batch, ordinary := ctx.Value(ordinaryBatchKey{}).(OrdinaryBatch)
+	if ordinary && !batch.WriteGroup {
+		return ctx, alerts, batch.Held
+	}
 	gkey, ok := GroupKey(ctx)
 	if !ok {
 		return ctx, nil, errors.New("group key missing")
@@ -100,5 +107,8 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*a
 
 	// Extract receiver data from context if present (it's ok for it to be nil).
 	store, _ := NflogStore(ctx)
-	return ctx, alerts, n.nflog.Log(n.recv, gkey, firing, resolved, muted, store, expiry)
+	if err := n.nflog.Log(n.recv, gkey, firing, resolved, muted, store, expiry); err != nil {
+		return ctx, nil, err
+	}
+	return ctx, alerts, batch.Held
 }

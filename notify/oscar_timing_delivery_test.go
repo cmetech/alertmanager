@@ -69,3 +69,43 @@ func TestNativeRepeatIsStrictlyAfterEstimatedThreshold(t *testing.T) {
 	require.Equal(t, ReasonDoNotNotify, stage.needsUpdate(entry, firing, nil, interval, baseline.Add(interval)))
 	require.Equal(t, ReasonRepeatIntervalElapsed, stage.needsUpdate(entry, firing, nil, interval, baseline.Add(interval).Add(time.Nanosecond)))
 }
+
+func TestOscarActionSelectedMemberPreservesSiblingAndClock(t *testing.T) {
+	t.Parallel()
+	log, err := nflog.New(nflog.Options{Retention: time.Hour, Metrics: prometheus.NewRegistry()})
+	require.NoError(t, err)
+	recv := &nflogpb.Receiver{GroupName: "team", Integration: "webhook"}
+	a := alert.New(model.Alert{Labels: model.LabelSet{"member": "A"}}, time.Now(), false)
+	b := alert.New(model.Alert{Labels: model.LabelSet{"member": "B"}}, time.Now(), false)
+	hashes := []uint64{HashAlert(a), HashAlert(b)}
+	require.NoError(t, log.Log(recv, "group", hashes, nil, nil, nil, time.Hour))
+	baseline := log.LookupTiming("group", recv, hashes, 2)
+	selected := WithSelectedAction(WithRepeatInterval(WithGroupKey(context.Background(), "group"), time.Hour),
+		SelectedAction{Source: a, Receiver: "team", Integration: "webhook", Index: 0,
+			Invoke: func(ctx context.Context, integration *Integration, member *alert.Alert) NotifyVerdict {
+				require.Same(t, a, member.ProviderSource())
+				return integration.Notify(ctx, member)
+			}})
+	var calls int
+	stage := func(index int) MultiStage {
+		integration := NewIntegration(notifierFunc(func(_ context.Context, members ...*alert.Alert) NotifyVerdict {
+			calls++
+			require.Equal(t, []*alert.Alert{a}, members)
+			return Success()
+		}), sendResolved(true), "webhook", index, "team")
+		key := &nflogpb.Receiver{GroupName: "team", Integration: "webhook", Idx: uint32(index)}
+		return MultiStage{
+			NewDedupStage(&integration, log, key),
+			NewRetryStage(integration, "team", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), eventrecorder.NopRecorder()),
+			NewSetNotifiesStage(log, key, featurecontrol.NoopFlags{}),
+		}
+	}
+	_, _, err = stage(1).Exec(selected, promslog.NewNopLogger(), a)
+	require.NoError(t, err)
+	_, _, err = stage(0).Exec(selected, promslog.NewNopLogger(), a, b)
+	require.Error(t, err)
+	_, _, err = stage(0).Exec(selected, promslog.NewNopLogger(), a)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls)
+	require.Equal(t, baseline, log.LookupTiming("group", recv, hashes, 2))
+}

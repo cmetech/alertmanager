@@ -5,6 +5,8 @@ package v2
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"reflect"
 	"slices"
@@ -23,13 +25,19 @@ type Entry struct {
 	target                        DispatchTarget
 	expires                       time.Time
 	valid                         func() bool
+	ready                         func() bool
 }
 
-func (e Entry) Valid() bool { return e.valid != nil && e.valid() && time.Now().Before(e.expires) }
+func (e Entry) Valid() bool { return (e.ready == nil || e.ready()) && e.LocalValid() }
+
+// LocalValid checks the lease, publication and source after all blocking preparation is complete.
+func (e Entry) LocalValid() bool { return e.valid != nil && e.valid() && time.Now().Before(e.expires) }
 
 // ActionJournal is the pipeline's A3 handoff. Until Bind returns and Version
 // reports 1 the A4 reader must fence tracked ordinary delivery and callback signing.
 type ActionJournal interface {
+	ObservationValid(*alert.Alert, EpisodeProjection) bool
+	InspectOrdinary(context.Context, *alert.Alert) (*EpisodeProjection, *OrdinaryPass, error)
 	Lookup(context.Context, string) (ActionResultV1, error)
 	Delivery(context.Context, *alert.Alert, string, string, *Entry) (alert.NativeDeliveryV1, error)
 	Project(context.Context, *alert.Alert) (EpisodeProjection, error)
@@ -227,10 +235,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 		}
 		logical = &i.LogicalActionID
 	}
-	e := Entry{OperationID: id, TargetKey: key, token: entry.Token, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, valid: func() bool {
-		if !o.ready() {
-			return false
-		}
+	e := Entry{OperationID: id, TargetKey: key, token: entry.Token, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, ready: o.ready, valid: func() bool {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		s.local.Lock()
@@ -253,4 +258,101 @@ func (o *nativeActionOwner) Settle(ctx context.Context, e Entry, outcome, eviden
 	}
 	err := o.read(ctx, "settle-target", map[string]any{"operation_id": e.OperationID, "target_key": e.TargetKey, "entry_token": e.token, "receipt": map[string]string{"outcome": outcome, "evidence": evidence}}, &r)
 	return r, err
+}
+
+// OrdinaryPass is a local entry fence for a verified untracked provider member.
+type OrdinaryPass struct {
+	Enter func() bool
+	// Finish releases conclusive entries. Unknown acceptance keeps the source fenced.
+	Finish func(conclusive bool)
+}
+
+// InspectOrdinary checks membership without enrolling an unknown source.
+func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.Alert) (*EpisodeProjection, *OrdinaryPass, error) {
+	if source == nil || o.readSource == nil {
+		return nil, nil, unverified
+	}
+	fp, owner := source.Fingerprint().String(), source.ManagedMember.Episode
+	key := sourceKey(owner, fp)
+	bucket, bit := membershipBit(key)
+	o.mu.Lock()
+	epoch := o.lease.Epoch
+	enrollments := o.enrollments
+	live := o.recovered && o.lease.ExpiresAt.After(time.Now())
+	tracked := o.byKey[key] != nil
+	candidate := o.membership[bucket]&bit != 0
+	held := o.untracked[key] != 0
+	o.mu.Unlock()
+	if !live || held {
+		return nil, nil, reconcile
+	}
+	if !tracked && candidate {
+		var rows []EpisodeProjection
+		var managed any
+		if owner != "" {
+			managed = owner
+		}
+		if err := o.read(ctx, "recover", map[string]any{"projection": "source", "fingerprint": fp, "managed_key": managed}, &rows); err != nil {
+			return nil, nil, err
+		}
+		if rows == nil || len(rows) > 1 {
+			return nil, nil, reconcile
+		}
+		if len(rows) == 1 {
+			row := rows[0]
+			currentOwner, err := o.projectionKey(row)
+			if err != nil || row.State != "firing" || !managedUUID.MatchString(row.ID) || currentOwner != owner || owner == "" && row.NativeVariant.Fingerprint != fp {
+				return nil, nil, reconcile
+			}
+			if err := o.restoreEpisode(row); err != nil {
+				return nil, nil, err
+			}
+			tracked = true
+		}
+	}
+	if tracked {
+		p, err := o.projectSource(ctx, source, false)
+		return &p, nil, err
+	}
+	entered := false
+	pass := &OrdinaryPass{}
+	pass.Enter = func() bool {
+		ok := false
+		o.readSource(owner, fp, func(current *alert.Alert) {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if current == source && !entered && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && o.byKey[key] == nil && o.untracked[key] == 0 && len(o.untracked) < maxActionEpisodes &&
+				(candidate && o.enrollments == enrollments || !candidate && o.membership[bucket]&bit == 0) {
+				o.untracked[key] = 1
+				entered, ok = true, true
+			}
+		})
+		return ok
+	}
+	pass.Finish = func(conclusive bool) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if entered && conclusive {
+			delete(o.untracked, key)
+		}
+		entered = false
+	}
+	return nil, pass, nil
+}
+
+// membershipBit only selects candidates for the indexed source lookup.
+func membershipBit(key string) (uint16, uint64) {
+	sum := sha256.Sum256([]byte(key))
+	return binary.BigEndian.Uint16(sum[:2]), uint64(1) << (sum[2] & 63)
+}
+
+// ObservationValid checks local lifecycle and lease state for a signed terminal observation.
+func (o *nativeActionOwner) ObservationValid(source *alert.Alert, p EpisodeProjection) bool {
+	s, err := o.episode(p.EpisodeRef)
+	if err != nil || !o.ready() {
+		return false
+	}
+	s.turn.Lock()
+	defer s.turn.Unlock()
+	return !s.uncertain && s.projection.EpisodeRef == p.EpisodeRef && s.projection.LifecycleSeq == p.LifecycleSeq && s.projection.SeverityRevision == p.SeverityRevision && s.current(s.projection, source, false) == nil
 }

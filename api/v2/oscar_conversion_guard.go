@@ -174,18 +174,22 @@ func (api *API) conversionCallbackReady() bool {
 }
 
 func (api *API) callbackReadyFor(transport *managedClient) bool {
+	return api.callbacksReadyFor(transport, false)
+}
+
+func (api *API) callbacksReadyFor(transport *managedClient, allowDirect bool) bool {
 	api.mtx.RLock()
 	cfg := api.alertmanagerConfig
 	key := bytes.Clone(api.conversionCallbackKey)
 	api.mtx.RUnlock()
-	if cfg == nil || len(key) < 32 || len(cfg.Receivers) == 0 {
+	if cfg == nil || !allowDirect && len(key) < 32 || len(cfg.Receivers) == 0 {
 		return false
 	}
 	for _, receiver := range cfg.Receivers {
-		if len(receiver.WebhookConfigs) == 0 {
+		if !allowDirect && len(receiver.WebhookConfigs) == 0 {
 			return false
 		}
-		if transport != nil {
+		if !allowDirect && transport != nil {
 			// A commissioned route may deliver only via the canonical eligibility-aware webhook.
 			// JSON omitempty covers integrations added by future upstream versions as well.
 			configured, err := json.Marshal(receiver)
@@ -201,7 +205,10 @@ func (api *API) callbackReadyFor(transport *managedClient) bool {
 		}
 		for _, webhook := range receiver.WebhookConfigs {
 			target, err := url.Parse(string(webhook.URL))
-			if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" ||
+			if allowDirect && (err != nil || !strings.EqualFold(target.Hostname(), "alertmanager-middleware") && target.Path != "/api/v1/internal/fingerprint-conversion/alerts") {
+				continue
+			}
+			if len(key) < 32 || webhook.URLFile != "" || err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Host == "" ||
 				target.Path != "/api/v1/internal/fingerprint-conversion/alerts" || strings.ContainsAny(string(webhook.URL), "{}") ||
 				webhook.HTTPConfig == nil || webhook.HTTPConfig.Authorization == nil || webhook.HTTPConfig.Authorization.Type != "Bearer" ||
 				webhook.HTTPConfig.Authorization.CredentialsFile == "" || webhook.MaxAlerts != 0 || webhook.Payload != nil || !webhook.SendResolved() {

@@ -242,6 +242,10 @@ func (api *API) managedMemberEligible(ctx context.Context, incoming *alert.Alert
 	if root == nil || setStatus == nil || !api.conversionCallbackReady() {
 		return false, errors.New("managed notification eligibility unavailable")
 	}
+	current = api.actionView(current)
+	if current == nil {
+		return false, nil
+	}
 	state := predictAlertStatus(ctx, setStatus, current)
 	if len(state.SilencedBy) != 0 || len(state.InhibitedBy) != 0 || state.State == alert.AlertStateSuppressed {
 		return false, nil

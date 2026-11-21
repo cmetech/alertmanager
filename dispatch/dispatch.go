@@ -57,9 +57,11 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/dispatch")
 // Dispatcher sorts incoming alerts into aggregation groups and
 // assigns the correct notifiers to each.
 type Dispatcher struct {
-	route  *Route
-	alerts provider.Alerts
-	stage  notify.Stage
+	// Project reads an effective member under the action adapter's publication fence. Installed before Run.
+	Project func(*alert.Alert, func(*alert.Alert))
+	route   *Route
+	alerts  provider.Alerts
+	stage   notify.Stage
 	// timeMuter resolves the time intervals referenced by route. It comes from
 	// the same configuration as route so that route names always resolve.
 	timeMuter  notify.TimeMuter
@@ -266,7 +268,44 @@ func (d *Dispatcher) run(it provider.AlertIterator) {
 	<-d.ctx.Done()
 }
 
-func (d *Dispatcher) routeAlert(ctx context.Context, alrt *alert.Alert) {
+func (d *Dispatcher) routeAlert(ctx context.Context, source *alert.Alert) {
+	if d.Project != nil {
+		d.Project(source, func(current *alert.Alert) { d.routeMember(ctx, current) })
+		return
+	}
+	d.routeMember(ctx, source)
+}
+
+// ReplaceProjection updates group membership without a synthetic resolution or group timer reset.
+func (d *Dispatcher) ReplaceProjection(ctx context.Context, old, current *alert.Alert) {
+	if old != nil {
+		for _, route := range d.route.Match(old.Labels) {
+			group := getGroupLabels(old, route).Fingerprint()
+			if el, ok := d.routeGroupsSlice[route.Idx].groups.Load(group); ok {
+				ag := el.(*aggrGroup)
+				// Keep an unchanged group and its original clock.
+				stays := false
+				if current != nil && old.ProviderSource().Fingerprint() == current.ProviderSource().Fingerprint() {
+					for _, matched := range d.route.Match(current.Labels) {
+						if route == matched && group == getGroupLabels(current, route).Fingerprint() {
+							stays = true
+							break
+						}
+					}
+				}
+				if !stays {
+					_ = ag.alerts.DeleteIfNotModified(alert.AlertSlice{old}, true)
+					ag.invalidateRouteLabels()
+				}
+			}
+		}
+	}
+	if current != nil {
+		d.routeMember(ctx, current)
+	}
+}
+
+func (d *Dispatcher) routeMember(ctx context.Context, alrt *alert.Alert) {
 	d.logger.Debug("Received alert", "alert", alrt)
 
 	ctx, span := tracer.Start(ctx, "dispatch.Dispatcher.routeAlert",
@@ -417,7 +456,7 @@ func (d *Dispatcher) Groups(ctx context.Context, routeFilter func(*Route) bool, 
 					continue
 				}
 
-				fp := a.Fingerprint()
+				fp := a.ProviderSource().Fingerprint()
 				statuses[fp] = status
 				if r, ok := receivers[fp]; ok {
 					// Receivers slice already exists. Add
@@ -982,14 +1021,11 @@ func (ag *aggrGroup) flush(notify func(...*alert.Alert) bool) {
 		now           = time.Now()
 	)
 	for _, alrt := range alerts {
-		a := *alrt
-		// Ensure that alerts don't resolve as time move forwards.
+		a := alrt.NotificationCopy(now)
 		if a.ResolvedAt(now) {
-			resolvedSlice = append(resolvedSlice, &a)
-		} else {
-			a.EndsAt = time.Time{}
+			resolvedSlice = append(resolvedSlice, a)
 		}
-		alertsSlice = append(alertsSlice, &a)
+		alertsSlice = append(alertsSlice, a)
 	}
 	sort.Stable(alertsSlice)
 
@@ -1014,7 +1050,7 @@ func (ag *aggrGroup) flush(notify func(...*alert.Alert) bool) {
 			}
 			// Delete markers for resolved alerts that are not in the store.
 			for _, alrt := range resolvedSlice {
-				_, err := ag.alerts.Get(alrt.Fingerprint())
+				_, err := ag.alerts.Get(alrt.ProviderSource().Fingerprint())
 				if errors.Is(err, store.ErrNotFound) {
 					ag.marker.Delete(alrt.Fingerprint())
 				}
@@ -1043,3 +1079,19 @@ func (ag *aggrGroup) alertGroupInfo() eventrecorder.AlertGroup {
 type nilLimits struct{}
 
 func (n nilLimits) MaxNumberOfAggregationGroups() int { return 0 }
+
+// SelectedContext supplies route metadata for one authorized member without touching a group timer.
+func (d *Dispatcher) SelectedContext(ctx context.Context, r *Route, member *alert.Alert) context.Context {
+	opts := r.RouteOpts
+	labels := getGroupLabels(member, r)
+	ctx = notify.WithGroupKey(ctx, groupKey(r, labels))
+	ctx = notify.WithGroupLabels(ctx, labels)
+	ctx = notify.WithReceiverName(ctx, opts.Receiver)
+	ctx = notify.WithRepeatInterval(ctx, opts.RepeatInterval)
+	ctx = notify.WithActiveTimeIntervals(ctx, opts.ActiveTimeIntervals)
+	ctx = notify.WithMuteTimeIntervals(ctx, opts.MuteTimeIntervals)
+	ctx = notify.WithGroupMatchers(ctx, r.Matchers)
+	ctx = notify.WithNow(ctx, time.Now())
+	ag := aggrGroup{opts: &r.RouteOpts, labels: labels, tmpl: d.tmpl, logger: d.logger}
+	return notify.WithRouteLabels(ctx, ag.renderRouteLabels(member))
+}

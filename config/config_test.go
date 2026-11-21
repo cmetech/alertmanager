@@ -2027,3 +2027,17 @@ receivers:
 		t.Errorf("expected local proxy_url %q, got %q", "http://local-proxy.example.com:8080", got)
 	}
 }
+
+func TestOscarActionIntegrationDigestChangesOnlyWithConfiguration(t *testing.T) {
+	t.Parallel()
+	digest := func(target, group string) string {
+		c, err := Load("route:\n  receiver: ops\n  group_by: [" + group + "]\nreceivers:\n- name: ops\n  webhook_configs:\n  - url: " + target + "\n")
+		require.NoError(t, err)
+		ds, err := c.ActionIntegrationDigests()
+		require.NoError(t, err)
+		return ds["ops"]["webhook"][0]
+	}
+	original := digest("https://one.example/notify", "name")
+	require.Equal(t, original, digest("https://one.example/notify", "severity"))
+	require.NotEqual(t, original, digest("https://two.example/notify", "name"))
+}

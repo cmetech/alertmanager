@@ -15,6 +15,7 @@ package notify
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -475,6 +476,11 @@ func hashAlert(a *alert.Alert) uint64 {
 		b = append(b, sep)
 	}
 
+	if source := a.ProviderSource().Fingerprint(); source != a.Fingerprint() {
+		// Extra separators distinguish projected membership from every UTF-8 label tuple.
+		b = append(b, sep, sep)
+		b = binary.BigEndian.AppendUint64(b, uint64(source))
+	}
 	hash := xxhash.Sum64(b)
 
 	return hash

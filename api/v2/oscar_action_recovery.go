@@ -291,6 +291,11 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	defer o.mu.Unlock()
 	if o.lease.Epoch != l.Epoch {
 		o.recovered = false
+		clear(o.membership[:])
+		for key := range o.byKey {
+			bucket, bit := membershipBit(key)
+			o.membership[bucket] |= bit
+		}
 	}
 	// SQL sampled its clock after this request started. This deliberately shortens local validity by the round trip.
 	o.dbAnchor = l.ExpiresAt.Add(-30 * time.Second)

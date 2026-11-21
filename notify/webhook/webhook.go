@@ -221,13 +221,17 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		receiver, receiverKnown := notify.ReceiverName(ctx)
 		target := string(n.conf.URL)
 		const canonical = "https://alertmanager-middleware:9400/api/v1/internal/fingerprint-conversion/alerts"
-		if !known || !receiverKnown || a.ManagedEligible == nil ||
-			(target != canonical && target != canonical+"?notifier_type=oscaradmin") ||
+		allowTarget := target == canonical || target == canonical+"?notifier_type=oscaradmin"
+		if entry := notify.CurrentProviderEntry(ctx); entry != nil && len(entry.Members) > 0 {
+			httpTarget := strings.Replace(canonical, "https:", "http:", 1)
+			allowTarget = allowTarget || target == httpTarget || target == httpTarget+"?notifier_type=oscaradmin"
+		}
+		if !known || !receiverKnown || a.ManagedEligible == nil || !allowTarget ||
 			n.conf.HTTPConfig == nil || n.conf.HTTPConfig.FollowRedirects || n.conf.HTTPConfig.TLSConfig.InsecureSkipVerify ||
 			n.conf.Payload != nil || n.conf.MaxAlerts != 0 {
 			return notify.Retry(0, errors.New("managed callback eligibility unavailable"), notify.DefaultReason)
 		}
-		eligible, err := a.ManagedEligible(ctx, a, receiver, groupKey.String())
+		eligible, err := a.ManagedEligible(ctx, a.ProviderSource(), receiver, groupKey.String())
 		if err != nil {
 			return notify.Retry(0, err, notify.DefaultReason)
 		}
@@ -278,7 +282,38 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		ctx = postCtx
 	}
 
-	resp, err := notify.PostJSON(ctx, n.client, url, &buf)
+	entry := notify.CurrentProviderEntry(ctx)
+	var resp *http.Response
+	if entry != nil {
+		var req *http.Request
+		if len(entry.Members) > 0 {
+			sources := make([]*alert.Alert, len(alerts))
+			for i, a := range alerts {
+				sources[i] = a.ProviderSource()
+			}
+			receiver, _ := notify.ReceiverName(ctx)
+			req, err = n.nativeDeliveryRequest(ctx, receiver, msg, sources, entry.Members, entry.Key)
+		} else {
+			req, err = http.NewRequestWithContext(ctx, http.MethodPost, url, &buf)
+		}
+		if err != nil {
+			return notify.Unrecoverable(err, notify.DefaultReason)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", notify.UserAgentHeader)
+		req.GetBody = nil
+		client := *n.client
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		if ctx.Err() != nil || entry.Begin == nil || !entry.Begin() {
+			return notify.Unrecoverable(errors.New("native entry invalidated before webhook contact"), notify.DefaultReason)
+		}
+		resp, err = client.Do(req)
+		if err != nil {
+			return notify.Unrecoverable(notify.RedactURL(err), notify.DefaultReason)
+		}
+	} else {
+		resp, err = notify.PostJSON(ctx, n.client, url, &buf)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			err = fmt.Errorf("%w: %w", err, context.Cause(ctx))
@@ -290,7 +325,7 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 	shouldRetry, err := n.retrier.Check(resp.StatusCode, resp.Body)
 	if err != nil {
 		reason := notify.GetFailureReasonFromStatusCode(resp.StatusCode)
-		if shouldRetry {
+		if entry == nil && shouldRetry {
 			return notify.Retry(0, err, reason)
 		}
 		return notify.Unrecoverable(err, reason)

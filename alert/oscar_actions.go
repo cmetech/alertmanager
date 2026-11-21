@@ -156,6 +156,7 @@ type DispatchView struct {
 	NativeVariant    NativeVariant
 	EffectiveLabels  model.LabelSet
 	SeverityRevision uint64
+	source           *Alert
 }
 
 // BuildDispatchView projects severity without modifying the source or its fingerprint.
@@ -172,5 +173,36 @@ func BuildDispatchView(source *Alert, ref EpisodeRef, severity string, revision 
 	}
 	labels := source.Labels.Clone()
 	labels["severity"] = model.LabelValue(severity)
-	return DispatchView{ref, NativeVariant{source.Fingerprint().String(), source.StartsAt.UTC().Format(time.RFC3339Nano)}, labels, revision}, nil
+	return DispatchView{
+		EpisodeRef:      ref,
+		NativeVariant:   NativeVariant{source.Fingerprint().String(), source.StartsAt.UTC().Format(time.RFC3339Nano)},
+		EffectiveLabels: labels, SeverityRevision: revision, source: source,
+	}, nil
+}
+
+// ProviderSource returns the immutable provider member behind a notification copy.
+func (a *Alert) ProviderSource() *Alert {
+	if a.providerSource != nil {
+		return a.providerSource
+	}
+	return a
+}
+
+// NotificationMember gives effective labels their own fingerprint, retaining the exact source.
+func (view DispatchView) NotificationMember() *Alert {
+	member := *view.source
+	member.providerSource = view.source.ProviderSource()
+	member.Labels = view.EffectiveLabels
+	member.fingerprint = member.Labels.Fingerprint()
+	return &member
+}
+
+// NotificationCopy freezes firing status at the flush time without clearing the provider expiry.
+func (a *Alert) NotificationCopy(now time.Time) *Alert {
+	copy := *a
+	copy.providerSource = a.ProviderSource()
+	if !a.ResolvedAt(now) {
+		copy.EndsAt = time.Time{}
+	}
+	return &copy
 }

@@ -580,3 +580,47 @@ func TestWebhookCustomPayloadPreservesYAMLLikeStrings(t *testing.T) {
 		string(capturedPayload),
 	)
 }
+
+type acceptedThenLost func(*http.Request) (*http.Response, error)
+
+func (f acceptedThenLost) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestOscarActionWebhookLostResponse(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	for _, canonical := range []bool{false, true} {
+		url := "https://direct.example/alerts"
+		cfg := &commoncfg.HTTPClientConfig{}
+		entry := &notify.ProviderEntry{}
+		if canonical {
+			url = "https://alertmanager-middleware:9400" + alert.NativeCallbackPath
+			cfg.Authorization = &commoncfg.Authorization{Type: "Bearer", CredentialsFile: "unused"}
+			entry.Key = bytes.Repeat([]byte("x"), 32)
+			entry.Members = []alert.NativeDeliveryMember{{Index: 0, Delivery: alert.NativeDeliveryV1{
+				Version: 1, EpisodeRef: alert.EpisodeRef{AuthorityID: "11111111-1111-4111-8111-111111111111", EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1},
+				NativeVariant: alert.NativeVariant{Fingerprint: a.Fingerprint().String(), StartsAt: now.UTC().Format(time.RFC3339Nano)}, LifecycleSeq: 1,
+				State: "firing", ActiveSince: now.UTC().Format(time.RFC3339Nano), SourceSeverity: "major", EffectiveSeverity: "major", DeliveryID: "33333333-3333-4333-8333-333333333333", TargetScope: []alert.TargetScopeEntry{},
+			}}}
+		}
+		n, err := New(&WebhookConfig{URL: amcommoncfg.SecretTemplateURL(url), HTTPConfig: cfg}, test.CreateTmpl(t), promslog.NewNopLogger())
+		require.NoError(t, err)
+		var calls int
+		n.client.Transport = acceptedThenLost(func(r *http.Request) (*http.Response, error) {
+			calls++
+			_, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.Equal(t, canonical, r.Header.Get("X-Oscar-Native-Signature") != "")
+			return nil, io.ErrUnexpectedEOF
+		})
+		ctx := notify.WithProviderEntry(notify.WithReceiverName(notify.WithGroupKey(t.Context(), "group"), "team"), entry)
+		entry.Begin = func() bool { return false }
+		require.Error(t, n.Notify(ctx, a.NotificationCopy(now)).Err())
+		require.Zero(t, calls)
+		entry.Begin = func() bool { return true }
+		result := n.Notify(ctx, a.NotificationCopy(now))
+		require.Error(t, result.Err())
+		require.False(t, result.ShouldRetry())
+		require.Equal(t, 1, calls)
+	}
+}
