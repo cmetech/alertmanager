@@ -614,3 +614,12 @@ func TestManagedVisibleTerminalClearSurvivesStaleWriteBarrier(t *testing.T) {
 	slot.Projection.Alert.EndsAt = now.Add(-time.Second)
 	require.NoError(t, owner.recover(t.Context(), key, &managedGate{}, state))
 }
+
+func TestOscarActionManagedStampUsesOwnerOperation(t *testing.T) {
+	t.Parallel()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"alert_type": "problem"}}, time.Now(), false)
+	slot := &ownerSlot{Generation: 2, Operation: json.RawMessage(`{"kind":"clear","event_id":"source-event","source_digest":"digest"}`)}
+	(&managedOwner{}).attachMember(a, "episode", slot)
+	require.Equal(t, "clear", a.ManagedOperationKind)
+	require.Equal(t, alert.ManagedMembership{Episode: "episode", Generation: 2, Event: "source-event", Digest: "digest"}, a.ManagedMember)
+}

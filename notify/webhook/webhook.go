@@ -83,7 +83,7 @@ type Message struct {
 }
 
 // nativeDeliveryRequest is for the durable native owner. Ordinary Notify never mints action authority.
-func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, msg *Message, members []alert.NativeDeliveryMember, key []byte) (*http.Request, error) {
+func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, msg *Message, sources []*alert.Alert, members []alert.NativeDeliveryMember, key []byte) (*http.Request, error) {
 	target := string(n.conf.URL)
 	base := "https://alertmanager-middleware:9400"
 	if strings.HasPrefix(target, "http://") {
@@ -96,8 +96,20 @@ func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, m
 		cfg.Authorization == nil || cfg.Authorization.Type != "Bearer" || cfg.Authorization.CredentialsFile == "" {
 		return nil, errors.New("native delivery requires the private callback")
 	}
-	if msg == nil || msg.Data == nil || msg.Receiver != regexp.QuoteMeta(receiver) || msg.TruncatedAlerts != 0 || len(members) == 0 || len(members) != len(msg.Alerts) {
+	if msg == nil || msg.Data == nil || msg.Receiver != regexp.QuoteMeta(receiver) || msg.TruncatedAlerts != 0 || len(members) == 0 || len(members) != len(msg.Alerts) || len(sources) != len(members) {
 		return nil, errors.New("incomplete native delivery batch")
+	}
+	managed := make(map[int]alert.ManagedMembership)
+	if msg.Managed != nil {
+		if msg.Managed.Baseline < 0 || len(msg.Managed.Members) == 0 {
+			return nil, errors.New("invalid managed callback")
+		}
+		for _, m := range msg.Managed.Members {
+			if _, dup := managed[m.Index]; dup || m.Index < 0 || m.Index >= len(sources) {
+				return nil, errors.New("invalid managed callback index")
+			}
+			managed[m.Index] = m.ManagedMembership
+		}
 	}
 	variants := map[alert.NativeVariant]bool{}
 	ids := map[string]bool{}
@@ -120,8 +132,32 @@ func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, m
 				severity = "cleared"
 			}
 		}
+		source := sources[i]
+		stamp, enrolled := managed[i]
+		if source == nil || enrolled != source.ManagedReceiver || source.Fingerprint().String() != v.Fingerprint || !source.StartsAt.Equal(t) {
+			return nil, errors.New("native source binding mismatch")
+		}
+		logical := a.Status
+		if logical != "firing" && logical != "resolved" {
+			return nil, errors.New("invalid native transport state")
+		}
+		if enrolled {
+			if stamp != source.ManagedMember || stamp.Generation <= 0 || stamp.Episode == "" || stamp.Event == "" || stamp.Digest == "" {
+				return nil, errors.New("managed source membership mismatch")
+			}
+			switch source.ManagedOperationKind {
+			case "clear":
+				logical = "resolved"
+			case "raise", "update":
+				if logical != "firing" {
+					return nil, errors.New("managed problem is no longer firing")
+				}
+			default:
+				return nil, errors.New("managed operation kind unavailable")
+			}
+		}
 		if member.Index != i || variants[v] || ids[delivery.DeliveryID] || a.Fingerprint != v.Fingerprint ||
-			!a.StartsAt.Equal(t) || delivery.State != a.Status || delivery.EffectiveSeverity != severity {
+			!a.StartsAt.Equal(t) || delivery.State != logical || delivery.EffectiveSeverity != severity {
 			return nil, errors.New("native delivery member mismatch")
 		}
 		variants[v], ids[delivery.DeliveryID] = true, true

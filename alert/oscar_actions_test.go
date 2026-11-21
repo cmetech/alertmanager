@@ -61,3 +61,26 @@ func TestOscarActionDispatchView(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+
+func TestOscarActionManagedClearWire(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("../api/v2/testdata/oscar_actions_managed_clear_v1.json")
+	require.NoError(t, err)
+	var fixture struct {
+		Body       string
+		TestKey    string `json:"test_key"`
+		ReceiverID string `json:"receiver_id"`
+		Headers    map[string]string
+	}
+	require.NoError(t, json.Unmarshal(raw, &fixture))
+	var msg struct {
+		Alerts  []struct{ Status string }
+		Members []NativeDeliveryMember `json:"oscarNativeDeliveries"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(fixture.Body), &msg))
+	require.Equal(t, "firing", msg.Alerts[0].Status)
+	require.Equal(t, "resolved", msg.Members[0].Delivery.State)
+	headers, err := NativeDeliveryHeaders([]byte(fixture.Body), fixture.ReceiverID, NativeCallbackPath, []byte(fixture.TestKey))
+	require.NoError(t, err)
+	require.Equal(t, fixture.Headers, headers)
+}
