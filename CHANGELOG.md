@@ -1,5 +1,6 @@
 ## Unreleased — Native action delivery contract
 
+- The signed native callback builder accepts a resolved managed raise/update when the delivered end matches the provider member’s elapsed end. Its same-generation renewal regression awaits operator execution. No configuration or migration change.
 - The confined signed delivery builder binds its real provider member and owner-issued operation kind. A managed clear can report a resolved logical episode while the transport is still firing. The ordinary webhook continues to use its existing status. Operator qualification is pending; no migration or configuration change.
 - The fork defines the signed native action webhook and immutable dispatch view. The normal notifier continues to emit its existing webhook format. The durable owner must be installed before action delivery can be enabled. Matching Python verifier and source matrix land in OSCAR. No migration or operator configuration change.
 - The shared protocol vector is frozen at SHA256 `ec481659f721adce5b5531669a065b2cf925f6a3bfe437205cac97fdeeb1c94c`. Go behavior and runtime qualification await operator execution.
