@@ -67,12 +67,14 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/api/v2")
 
 // API represents an Alertmanager API v2.
 type API struct {
-	managedOwner *managedOwner
-	peer         cluster.ClusterPeer
-	silences     *silence.Silences
-	alerts       provider.Alerts
-	alertGroups  groupsFn
-	uptime       time.Time
+	managedOwner    *managedOwner
+	actionOwner     *nativeActionOwner
+	actionForbidden map[string][]byte
+	peer            cluster.ClusterPeer
+	silences        *silence.Silences
+	alerts          provider.Alerts
+	alertGroups     groupsFn
+	uptime          time.Time
 
 	// mtx protects alertmanagerConfig, setAlertStatus and route.
 	mtx sync.RWMutex
@@ -150,6 +152,17 @@ func NewAPI(
 		return docui.ServeSpec(swaggerSpec.Raw(), swaggerContext.RoutesHandler(b), docui.WithSpecPath("/swagger.json"))
 	}
 
+	// actionRoutes authenticates the original request bytes before Swagger binding.
+	// A parsed operation has no authority to invoke the owner independently.
+	openAPI.AlertExecuteOscarActionHandler = alert_ops.ExecuteOscarActionHandlerFunc(func(alert_ops.ExecuteOscarActionParams) middleware.Responder {
+		return alert_ops.NewExecuteOscarActionUnauthorized()
+	})
+	openAPI.AlertGetOscarActionHandler = alert_ops.GetOscarActionHandlerFunc(func(alert_ops.GetOscarActionParams) middleware.Responder {
+		return alert_ops.NewGetOscarActionUnauthorized()
+	})
+	openAPI.AlertGetOscarActionEligibilityHandler = alert_ops.GetOscarActionEligibilityHandlerFunc(func(alert_ops.GetOscarActionEligibilityParams) middleware.Responder {
+		return alert_ops.NewGetOscarActionEligibilityUnauthorized()
+	})
 	openAPI.AlertGetOscarAlertsPageHandler = alert_ops.GetOscarAlertsPageHandlerFunc(api.getOscarAlertsPageHandler)
 	openAPI.AlertGetAlertsHandler = alert_ops.GetAlertsHandlerFunc(api.getAlertsHandler)
 	openAPI.AlertPostAlertsHandler = alert_ops.PostAlertsHandlerFunc(api.postAlertsHandler)

@@ -160,7 +160,7 @@ type DispatchView struct {
 
 // BuildDispatchView projects severity without modifying the source or its fingerprint.
 func BuildDispatchView(source *Alert, ref EpisodeRef, severity string, revision uint64) (DispatchView, error) {
-	if source == nil || source.StartsAt.IsZero() || !ref.valid() || revision == 0 {
+	if source == nil || source.StartsAt.IsZero() || !ref.valid() {
 		return DispatchView{}, errors.New("invalid native dispatch source")
 	}
 	src := strings.ToLower(string(source.Labels["severity"]))

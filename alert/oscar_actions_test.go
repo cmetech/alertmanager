@@ -46,6 +46,9 @@ func TestOscarActionDispatchView(t *testing.T) {
 	source := New(model.Alert{Labels: model.LabelSet{"alertname": "disk", "severity": "major"}, StartsAt: start}, start, false)
 	fingerprint := source.Fingerprint()
 	ref := EpisodeRef{"11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", 1, 2}
+	base, err := BuildDispatchView(source, ref, "major", 0)
+	require.NoError(t, err)
+	require.Zero(t, base.SeverityRevision)
 	view, err := BuildDispatchView(source, ref, "critical", 3)
 	require.NoError(t, err)
 	require.Equal(t, ref, view.EpisodeRef)

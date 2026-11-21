@@ -1,3 +1,10 @@
+## Unreleased — Native action admission
+
+- Add signed action, lookup and eligibility endpoints, a leased episode owner and bounded notification-entry permits. Native requires the matching OSCAR store protocol and a commissioned v1 dispatch reader before advertising readiness. Existing deployments default to disabled.
+- Journal managed changes after durable promotion or closure. During lease takeover, retire superseded ordinary observations and hold unproven resident intervals until definitive provider garbage collection. Revalidate the source before effects and preserve late delivery evidence.
+- Require a fresh Middleware recovery grant for held policy work and successor creation. Execute conflicts include the linked child operation ID when the store returns a receipt. The generated Go and Elm clients expose that receipt.
+- Deployment requires the matching OSCAR database migration, separate action credentials and dispatch integration. Runtime and load qualification remain pending.
+
 ## Unreleased — Native action delivery contract
 
 - The signed native callback builder accepts a resolved managed raise/update when the delivered end matches the provider member’s elapsed end. Its same-generation renewal regression awaits operator execution. No configuration or migration change.

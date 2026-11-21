@@ -70,13 +70,62 @@ type ClientOption func(*runtime.ClientOperation)
 
 // ClientService is the interface for Client methods
 type ClientService interface {
+	ExecuteOscarAction(params *ExecuteOscarActionParams, opts ...ClientOption) (*ExecuteOscarActionOK, *ExecuteOscarActionAccepted, error)
+
 	GetAlerts(params *GetAlertsParams, opts ...ClientOption) (*GetAlertsOK, error)
+
+	GetOscarAction(params *GetOscarActionParams, opts ...ClientOption) (*GetOscarActionOK, error)
+
+	GetOscarActionEligibility(params *GetOscarActionEligibilityParams, opts ...ClientOption) (*GetOscarActionEligibilityOK, error)
 
 	GetOscarAlertsPage(params *GetOscarAlertsPageParams, opts ...ClientOption) (*GetOscarAlertsPageOK, error)
 
 	PostAlerts(params *PostAlertsParams, opts ...ClientOption) (*PostAlertsOK, error)
 
 	SetTransport(transport runtime.ClientTransport)
+}
+
+/*
+ExecuteOscarAction Admit one exact native episode operation. Requires an exact-body Middleware action assertion.
+*/
+func (a *Client) ExecuteOscarAction(params *ExecuteOscarActionParams, opts ...ClientOption) (*ExecuteOscarActionOK, *ExecuteOscarActionAccepted, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewExecuteOscarActionParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "executeOscarAction",
+		Method:             "POST",
+		PathPattern:        "/oscar/actions",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ExecuteOscarActionReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// several success responses have to be checked
+	switch value := result.(type) {
+	case *ExecuteOscarActionOK:
+		return value, nil, nil
+	case *ExecuteOscarActionAccepted:
+		return nil, value, nil
+	}
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for alert: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
 }
 
 /*
@@ -119,6 +168,92 @@ func (a *Client) GetAlerts(params *GetAlertsParams, opts ...ClientOption) (*GetA
 	//
 	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
 	msg := fmt.Sprintf("unexpected success response for getAlerts: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+GetOscarAction Look up a durable operation receipt. Requires an exact-body Middleware action assertion.
+*/
+func (a *Client) GetOscarAction(params *GetOscarActionParams, opts ...ClientOption) (*GetOscarActionOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewGetOscarActionParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "getOscarAction",
+		Method:             "GET",
+		PathPattern:        "/oscar/actions/{operation_id}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetOscarActionReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*GetOscarActionOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for getOscarAction: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+GetOscarActionEligibility Evaluate current eligibility without issuing a permit. Requires an exact-body Middleware action assertion.
+*/
+func (a *Client) GetOscarActionEligibility(params *GetOscarActionEligibilityParams, opts ...ClientOption) (*GetOscarActionEligibilityOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewGetOscarActionEligibilityParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "getOscarActionEligibility",
+		Method:             "POST",
+		PathPattern:        "/oscar/actions/eligibility",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetOscarActionEligibilityReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*GetOscarActionEligibilityOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for getOscarActionEligibility: API contract not enforced by server. Client expected to get an error, but got: %T", result)
 	panic(msg)
 }
 

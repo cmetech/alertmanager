@@ -223,6 +223,221 @@ func init() {
         }
       }
     },
+    "/oscar/actions": {
+      "post": {
+        "description": "Admit one exact native episode operation. Requires an exact-body Middleware action assertion.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "executeOscarAction",
+        "parameters": [
+          {
+            "$ref": "#/parameters/oscarActionSender"
+          },
+          {
+            "$ref": "#/parameters/oscarActionKeyId"
+          },
+          {
+            "$ref": "#/parameters/oscarActionTime"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSubject"
+          },
+          {
+            "$ref": "#/parameters/oscarActionGrant"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSignature"
+          },
+          {
+            "type": "string",
+            "description": "Signed recovery directive required only for a freshly fenced policy recovery submission.",
+            "name": "X-Oscar-Action-Recovery",
+            "in": "header"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarActionRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation or eligibility projection",
+            "schema": {
+              "$ref": "#/definitions/oscarActionResult"
+            }
+          },
+          "202": {
+            "description": "Durably accepted",
+            "schema": {
+              "$ref": "#/definitions/oscarActionResult"
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Action permission denied"
+          },
+          "404": {
+            "description": "Unknown operation"
+          },
+          "409": {
+            "description": "A held or rejected operation receipt, or a reason-only lifecycle conflict.",
+            "schema": {
+              "$ref": "#/definitions/oscarActionConflict"
+            }
+          },
+          "413": {
+            "description": "Request too large"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
+    "/oscar/actions/eligibility": {
+      "post": {
+        "description": "Evaluate current eligibility without issuing a permit. Requires an exact-body Middleware action assertion.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "getOscarActionEligibility",
+        "parameters": [
+          {
+            "$ref": "#/parameters/oscarActionSender"
+          },
+          {
+            "$ref": "#/parameters/oscarActionKeyId"
+          },
+          {
+            "$ref": "#/parameters/oscarActionTime"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSubject"
+          },
+          {
+            "$ref": "#/parameters/oscarActionGrant"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSignature"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarActionBatch"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation or eligibility projection",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/oscarActionEligibility"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Action permission denied"
+          },
+          "404": {
+            "description": "Unknown operation"
+          },
+          "409": {
+            "description": "Native lifecycle or operation conflict"
+          },
+          "413": {
+            "description": "Request too large"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
+    "/oscar/actions/{operation_id}": {
+      "get": {
+        "description": "Look up a durable operation receipt. Requires an exact-body Middleware action assertion.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "getOscarAction",
+        "parameters": [
+          {
+            "$ref": "#/parameters/oscarActionSender"
+          },
+          {
+            "$ref": "#/parameters/oscarActionKeyId"
+          },
+          {
+            "$ref": "#/parameters/oscarActionTime"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSubject"
+          },
+          {
+            "$ref": "#/parameters/oscarActionGrant"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSignature"
+          },
+          {
+            "type": "string",
+            "format": "uuid",
+            "name": "operation_id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation or eligibility projection",
+            "schema": {
+              "$ref": "#/definitions/oscarActionResult"
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Action permission denied"
+          },
+          "404": {
+            "description": "Unknown operation"
+          },
+          "409": {
+            "description": "Native lifecycle or operation conflict"
+          },
+          "413": {
+            "description": "Request too large"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
     "/oscar/alerts/page": {
       "get": {
         "description": "Get a page of native alerts",
@@ -797,6 +1012,322 @@ func init() {
         "$ref": "#/definitions/matcher"
       }
     },
+    "oscarActionActor": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "operator",
+            "policy"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionBatch": {
+      "type": "object",
+      "required": [
+        "refs"
+      ],
+      "properties": {
+        "refs": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/oscarEpisodeRef"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionConflict": {
+      "description": "A durable conflict receipt includes its operation ID and projection. A pre-admission conflict contains only the reason.",
+      "type": "object",
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "floor_applied": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "permit_expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-nullable": true
+        },
+        "reason": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "severity_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "x-elm-integer": "Natural"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "held",
+            "rejected",
+            "confirmed",
+            "partial",
+            "unknown",
+            "superseded_no_effect"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarActionTargetResult"
+          }
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarActionEligibility": {
+      "type": "object",
+      "required": [
+        "episode_ref",
+        "actions",
+        "severity_revision"
+      ],
+      "properties": {
+        "actions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "allowed",
+              "reason"
+            ],
+            "properties": {
+              "allowed": {
+                "type": "boolean"
+              },
+              "reason": {
+                "type": "string",
+                "x-nullable": true
+              }
+            }
+          }
+        },
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "severity_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "x-elm-integer": "Natural",
+          "x-nullable": true
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarActionRequest": {
+      "type": "object",
+      "required": [
+        "version",
+        "operation_id",
+        "episode_ref",
+        "kind",
+        "target_scope",
+        "actor",
+        "policy_binding",
+        "target_severity"
+      ],
+      "properties": {
+        "actor": {
+          "$ref": "#/definitions/oscarActionActor"
+        },
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "resend",
+            "escalate",
+            "acknowledge",
+            "ticket_create",
+            "ticket_associate"
+          ]
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "policy_binding": {
+          "$ref": "#/definitions/oscarPolicyBinding"
+        },
+        "target_scope": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/oscarActionScope"
+          }
+        },
+        "target_severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "minor",
+            "warning",
+            "major",
+            "critical"
+          ],
+          "x-nullable": true
+        },
+        "version": {
+          "type": "integer",
+          "enum": [
+            1
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionResult": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "state",
+        "reason",
+        "episode_ref",
+        "severity_revision",
+        "floor_applied",
+        "permit_expires_at",
+        "targets"
+      ],
+      "properties": {
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "floor_applied": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "permit_expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-nullable": true
+        },
+        "reason": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "severity_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "x-elm-integer": "Natural"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "held",
+            "rejected",
+            "confirmed",
+            "partial",
+            "unknown",
+            "superseded_no_effect"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarActionTargetResult"
+          }
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarActionScope": {
+      "type": "object",
+      "required": [
+        "receiver_id",
+        "notifier_id",
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "notification",
+            "ticket"
+          ],
+          "x-nullable": true
+        },
+        "notifier_id": {
+          "type": "string",
+          "format": "uuid",
+          "x-nullable": true
+        },
+        "receiver_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionTargetResult": {
+      "type": "object",
+      "required": [
+        "target_key",
+        "target",
+        "state",
+        "evidence",
+        "successor_id"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "confirmed",
+            "unknown",
+            "no_effect"
+          ]
+        },
+        "successor_id": {
+          "type": "string",
+          "format": "uuid",
+          "x-nullable": true
+        },
+        "target": {
+          "$ref": "#/definitions/oscarDispatchTarget"
+        },
+        "target_key": {
+          "type": "string"
+        }
+      }
+    },
     "oscarAlertPage": {
       "type": "object",
       "required": [
@@ -876,6 +1407,96 @@ func init() {
           "format": "date-time"
         }
       }
+    },
+    "oscarDispatchTarget": {
+      "type": "object",
+      "required": [
+        "receiver_id",
+        "integration_digest",
+        "scope",
+        "repeat_interval_us"
+      ],
+      "properties": {
+        "integration_digest": {
+          "type": "string"
+        },
+        "receiver_id": {
+          "type": "string"
+        },
+        "repeat_interval_us": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "x-elm-integer": "Positive"
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarActionScope"
+          }
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarEpisodeRef": {
+      "type": "object",
+      "required": [
+        "authority_id",
+        "episode_id",
+        "generation",
+        "variant_revision"
+      ],
+      "properties": {
+        "authority_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "episode_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "x-elm-integer": "Positive"
+        },
+        "variant_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "x-elm-integer": "Positive"
+        }
+      },
+      "additionalProperties": false,
+      "x-elm-natural-fields": true
+    },
+    "oscarPolicyBinding": {
+      "type": "object",
+      "required": [
+        "binding_id",
+        "revision_id",
+        "cancellation_generation"
+      ],
+      "properties": {
+        "binding_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cancellation_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "x-elm-integer": "Natural"
+        },
+        "revision_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "x-elm-natural-fields": true,
+      "x-elm-nullable-record": true,
+      "x-nullable": true
     },
     "oscarRepeatSchedule": {
       "type": "object",
@@ -1080,6 +1701,42 @@ func init() {
     }
   },
   "parameters": {
+    "oscarActionGrant": {
+      "type": "string",
+      "name": "X-Oscar-Action-Grant",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionKeyId": {
+      "type": "string",
+      "name": "X-Oscar-Action-Key-Id",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionSender": {
+      "type": "string",
+      "name": "X-Oscar-Action-Sender",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionSignature": {
+      "type": "string",
+      "name": "X-Oscar-Action-Signature",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionSubject": {
+      "type": "string",
+      "name": "X-Oscar-Action-Subject",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionTime": {
+      "type": "string",
+      "name": "X-Oscar-Action-Time",
+      "in": "header",
+      "required": true
+    },
     "receiverMatchers": {
       "type": "array",
       "items": {
@@ -1348,6 +2005,275 @@ func init() {
         }
       }
     },
+    "/oscar/actions": {
+      "post": {
+        "description": "Admit one exact native episode operation. Requires an exact-body Middleware action assertion.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "executeOscarAction",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Sender",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Key-Id",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Time",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Subject",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Grant",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Signature",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "Signed recovery directive required only for a freshly fenced policy recovery submission.",
+            "name": "X-Oscar-Action-Recovery",
+            "in": "header"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarActionRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation or eligibility projection",
+            "schema": {
+              "$ref": "#/definitions/oscarActionResult"
+            }
+          },
+          "202": {
+            "description": "Durably accepted",
+            "schema": {
+              "$ref": "#/definitions/oscarActionResult"
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Action permission denied"
+          },
+          "404": {
+            "description": "Unknown operation"
+          },
+          "409": {
+            "description": "A held or rejected operation receipt, or a reason-only lifecycle conflict.",
+            "schema": {
+              "$ref": "#/definitions/oscarActionConflict"
+            }
+          },
+          "413": {
+            "description": "Request too large"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
+    "/oscar/actions/eligibility": {
+      "post": {
+        "description": "Evaluate current eligibility without issuing a permit. Requires an exact-body Middleware action assertion.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "getOscarActionEligibility",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Sender",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Key-Id",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Time",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Subject",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Grant",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Signature",
+            "in": "header",
+            "required": true
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarActionBatch"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation or eligibility projection",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/oscarActionEligibility"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Action permission denied"
+          },
+          "404": {
+            "description": "Unknown operation"
+          },
+          "409": {
+            "description": "Native lifecycle or operation conflict"
+          },
+          "413": {
+            "description": "Request too large"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
+    "/oscar/actions/{operation_id}": {
+      "get": {
+        "description": "Look up a durable operation receipt. Requires an exact-body Middleware action assertion.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "getOscarAction",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Sender",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Key-Id",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Time",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Subject",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Grant",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Signature",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "format": "uuid",
+            "name": "operation_id",
+            "in": "path",
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current operation or eligibility projection",
+            "schema": {
+              "$ref": "#/definitions/oscarActionResult"
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Action permission denied"
+          },
+          "404": {
+            "description": "Unknown operation"
+          },
+          "409": {
+            "description": "Native lifecycle or operation conflict"
+          },
+          "413": {
+            "description": "Request too large"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
     "/oscar/alerts/page": {
       "get": {
         "description": "Get a page of native alerts",
@@ -1692,6 +2618,22 @@ func init() {
     }
   },
   "definitions": {
+    "OscarActionEligibilityActionsAnon": {
+      "type": "object",
+      "required": [
+        "allowed",
+        "reason"
+      ],
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "x-nullable": true
+        }
+      }
+    },
     "alert": {
       "type": "object",
       "required": [
@@ -1960,6 +2902,312 @@ func init() {
         "$ref": "#/definitions/matcher"
       }
     },
+    "oscarActionActor": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "operator",
+            "policy"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionBatch": {
+      "type": "object",
+      "required": [
+        "refs"
+      ],
+      "properties": {
+        "refs": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/oscarEpisodeRef"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionConflict": {
+      "description": "A durable conflict receipt includes its operation ID and projection. A pre-admission conflict contains only the reason.",
+      "type": "object",
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "floor_applied": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "permit_expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-nullable": true
+        },
+        "reason": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "severity_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "x-elm-integer": "Natural"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "held",
+            "rejected",
+            "confirmed",
+            "partial",
+            "unknown",
+            "superseded_no_effect"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarActionTargetResult"
+          }
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarActionEligibility": {
+      "type": "object",
+      "required": [
+        "episode_ref",
+        "actions",
+        "severity_revision"
+      ],
+      "properties": {
+        "actions": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/OscarActionEligibilityActionsAnon"
+          }
+        },
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "severity_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "x-elm-integer": "Natural",
+          "x-nullable": true
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarActionRequest": {
+      "type": "object",
+      "required": [
+        "version",
+        "operation_id",
+        "episode_ref",
+        "kind",
+        "target_scope",
+        "actor",
+        "policy_binding",
+        "target_severity"
+      ],
+      "properties": {
+        "actor": {
+          "$ref": "#/definitions/oscarActionActor"
+        },
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "resend",
+            "escalate",
+            "acknowledge",
+            "ticket_create",
+            "ticket_associate"
+          ]
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "policy_binding": {
+          "$ref": "#/definitions/oscarPolicyBinding"
+        },
+        "target_scope": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/oscarActionScope"
+          }
+        },
+        "target_severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "minor",
+            "warning",
+            "major",
+            "critical"
+          ],
+          "x-nullable": true
+        },
+        "version": {
+          "type": "integer",
+          "enum": [
+            1
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionResult": {
+      "type": "object",
+      "required": [
+        "operation_id",
+        "state",
+        "reason",
+        "episode_ref",
+        "severity_revision",
+        "floor_applied",
+        "permit_expires_at",
+        "targets"
+      ],
+      "properties": {
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "floor_applied": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "permit_expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "x-nullable": true
+        },
+        "reason": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "severity_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "x-elm-integer": "Natural"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "held",
+            "rejected",
+            "confirmed",
+            "partial",
+            "unknown",
+            "superseded_no_effect"
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarActionTargetResult"
+          }
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarActionScope": {
+      "type": "object",
+      "required": [
+        "receiver_id",
+        "notifier_id",
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "notification",
+            "ticket"
+          ],
+          "x-nullable": true
+        },
+        "notifier_id": {
+          "type": "string",
+          "format": "uuid",
+          "x-nullable": true
+        },
+        "receiver_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "oscarActionTargetResult": {
+      "type": "object",
+      "required": [
+        "target_key",
+        "target",
+        "state",
+        "evidence",
+        "successor_id"
+      ],
+      "properties": {
+        "evidence": {
+          "type": "string",
+          "x-nullable": true
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "confirmed",
+            "unknown",
+            "no_effect"
+          ]
+        },
+        "successor_id": {
+          "type": "string",
+          "format": "uuid",
+          "x-nullable": true
+        },
+        "target": {
+          "$ref": "#/definitions/oscarDispatchTarget"
+        },
+        "target_key": {
+          "type": "string"
+        }
+      }
+    },
     "oscarAlertPage": {
       "type": "object",
       "required": [
@@ -2039,6 +3287,97 @@ func init() {
           "format": "date-time"
         }
       }
+    },
+    "oscarDispatchTarget": {
+      "type": "object",
+      "required": [
+        "receiver_id",
+        "integration_digest",
+        "scope",
+        "repeat_interval_us"
+      ],
+      "properties": {
+        "integration_digest": {
+          "type": "string"
+        },
+        "receiver_id": {
+          "type": "string"
+        },
+        "repeat_interval_us": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "x-elm-integer": "Positive"
+        },
+        "scope": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/oscarActionScope"
+          }
+        }
+      },
+      "x-elm-natural-fields": true
+    },
+    "oscarEpisodeRef": {
+      "type": "object",
+      "required": [
+        "authority_id",
+        "episode_id",
+        "generation",
+        "variant_revision"
+      ],
+      "properties": {
+        "authority_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "episode_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "x-elm-integer": "Positive"
+        },
+        "variant_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "x-elm-integer": "Positive"
+        }
+      },
+      "additionalProperties": false,
+      "x-elm-natural-fields": true
+    },
+    "oscarPolicyBinding": {
+      "type": "object",
+      "required": [
+        "binding_id",
+        "revision_id",
+        "cancellation_generation"
+      ],
+      "properties": {
+        "binding_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cancellation_generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "x-elm-integer": "Natural"
+        },
+        "revision_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false,
+      "x-elm-natural-fields": true,
+      "x-elm-nullable-record": true,
+      "x-nullable": true
     },
     "oscarRepeatSchedule": {
       "type": "object",
@@ -2243,6 +3582,42 @@ func init() {
     }
   },
   "parameters": {
+    "oscarActionGrant": {
+      "type": "string",
+      "name": "X-Oscar-Action-Grant",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionKeyId": {
+      "type": "string",
+      "name": "X-Oscar-Action-Key-Id",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionSender": {
+      "type": "string",
+      "name": "X-Oscar-Action-Sender",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionSignature": {
+      "type": "string",
+      "name": "X-Oscar-Action-Signature",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionSubject": {
+      "type": "string",
+      "name": "X-Oscar-Action-Subject",
+      "in": "header",
+      "required": true
+    },
+    "oscarActionTime": {
+      "type": "string",
+      "name": "X-Oscar-Action-Time",
+      "in": "header",
+      "required": true
+    },
     "receiverMatchers": {
       "type": "array",
       "items": {

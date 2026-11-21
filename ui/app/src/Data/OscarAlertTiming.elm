@@ -56,7 +56,7 @@ encoder : OscarAlertTiming -> Encode.Value
 encoder model =
     Encode.object
         [ ( "end_time_source", endTimeSourceEncoder model.endTimeSource )
-        , ( "resolve_timeout_duration", Maybe.withDefault Encode.null (Maybe.map Encode.string) model.resolveTimeoutDuration )
+        , ( "resolve_timeout_duration", (Maybe.withDefault Encode.null << Maybe.map Encode.string) model.resolveTimeoutDuration )
         , ( "timing_as_of", DateTime.encoder model.timingAsOf )
         , ( "repeat_lookup_state", repeatLookupStateEncoder model.repeatLookupState )
         , ( "repeat_schedules", Encode.list OscarRepeatSchedule.encoder model.repeatSchedules )

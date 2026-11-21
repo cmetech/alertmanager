@@ -64,6 +64,13 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 			return middleware.NotImplemented("operation silence.DeleteSilence has not yet been implemented")
 		})
 	}
+	if api.AlertExecuteOscarActionHandler == nil {
+		api.AlertExecuteOscarActionHandler = alert.ExecuteOscarActionHandlerFunc(func(params alert.ExecuteOscarActionParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.ExecuteOscarAction has not yet been implemented")
+		})
+	}
 	if api.AlertgroupGetAlertGroupsHandler == nil {
 		api.AlertgroupGetAlertGroupsHandler = alertgroup.GetAlertGroupsHandlerFunc(func(params alertgroup.GetAlertGroupsParams) middleware.Responder {
 			_ = params
@@ -76,6 +83,20 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 			_ = params
 
 			return middleware.NotImplemented("operation alert.GetAlerts has not yet been implemented")
+		})
+	}
+	if api.AlertGetOscarActionHandler == nil {
+		api.AlertGetOscarActionHandler = alert.GetOscarActionHandlerFunc(func(params alert.GetOscarActionParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.GetOscarAction has not yet been implemented")
+		})
+	}
+	if api.AlertGetOscarActionEligibilityHandler == nil {
+		api.AlertGetOscarActionEligibilityHandler = alert.GetOscarActionEligibilityHandlerFunc(func(params alert.GetOscarActionEligibilityParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.GetOscarActionEligibility has not yet been implemented")
 		})
 	}
 	if api.AlertGetOscarAlertsPageHandler == nil {

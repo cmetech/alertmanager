@@ -184,6 +184,9 @@ func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert
 	if len(refs) == 0 {
 		delete(a.variants, owner)
 	}
+	if a.actionObserver != nil {
+		a.actionObserver(owner, incoming, incoming == nil)
+	}
 	metadata := map[string]string{}
 	a.propagator.Inject(ctx, propagation.MapCarrier(metadata))
 	messages := make([]*provider.Alert, 0, len(changes))

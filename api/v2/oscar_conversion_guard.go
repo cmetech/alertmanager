@@ -56,7 +56,10 @@ func (api *API) InstallConversionAdmission(keys map[string][]byte, callbackKey .
 	if api.conversionAdmissionHandler == nil {
 		api.conversionAdmissionHandler = api.Handler
 	}
-	api.Handler = conversionAdmissionGuard(api.conversionAdmissionHandler, copied, api.conversionCallbackReady)
+	api.actionForbidden = copied
+	api.Handler = conversionAdmissionGuard(api.conversionAdmissionHandler, copied, api.conversionCallbackReady, func() bool {
+		return api.actionOwner != nil && api.actionOwner.ready()
+	})
 }
 
 func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready ...func() bool) http.Handler {
@@ -73,7 +76,11 @@ func conversionAdmissionGuard(next http.Handler, keys map[string][]byte, ready .
 			if callbackReady() {
 				callback = "native-conversion-callback-v1"
 			}
-			json.NewEncoder(w).Encode(map[string]any{"contract": "native-conversion-ingress-v1", "actors": actors, "callback_contract": callback})
+			caps := map[string]any{"contract": "native-conversion-ingress-v1", "actors": actors, "callback_contract": callback}
+			if len(ready) > 1 && ready[1]() {
+				caps["native_action_contract"] = "native-actions-v1"
+			}
+			json.NewEncoder(w).Encode(caps)
 			return
 		}
 		path := r.URL.Path
@@ -159,6 +166,14 @@ func capsuleProducer(value string) string {
 }
 
 func (api *API) conversionCallbackReady() bool {
+	var transport *managedClient
+	if owner := api.managedOwner; owner != nil {
+		transport = owner.client
+	}
+	return api.callbackReadyFor(transport)
+}
+
+func (api *API) callbackReadyFor(transport *managedClient) bool {
 	api.mtx.RLock()
 	cfg := api.alertmanagerConfig
 	key := bytes.Clone(api.conversionCallbackKey)
@@ -170,7 +185,7 @@ func (api *API) conversionCallbackReady() bool {
 		if len(receiver.WebhookConfigs) == 0 {
 			return false
 		}
-		if api.managedOwner != nil {
+		if transport != nil {
 			// A commissioned route may deliver only via the canonical eligibility-aware webhook.
 			// JSON omitempty covers integrations added by future upstream versions as well.
 			configured, err := json.Marshal(receiver)
@@ -192,11 +207,11 @@ func (api *API) conversionCallbackReady() bool {
 				webhook.HTTPConfig.Authorization.CredentialsFile == "" || webhook.MaxAlerts != 0 || webhook.Payload != nil || !webhook.SendResolved() {
 				return false
 			}
-			if owner := api.managedOwner; owner != nil {
+			if transport != nil {
 				cfg := webhook.HTTPConfig
-				if target.Scheme != owner.client.scheme || target.Host != "alertmanager-middleware:9400" || target.User != nil ||
+				if target.Scheme != transport.scheme || target.Host != "alertmanager-middleware:9400" || target.User != nil ||
 					target.Fragment != "" || target.RawPath != "" || (target.RawQuery != "" && target.RawQuery != "notifier_type=oscaradmin") ||
-					cfg.FollowRedirects || (target.Scheme == "https" && (cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.CAFile != owner.client.caFile ||
+					cfg.FollowRedirects || (target.Scheme == "https" && (cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.CAFile != transport.caFile ||
 					(cfg.TLSConfig.ServerName != "" && cfg.TLSConfig.ServerName != "alertmanager-middleware"))) {
 					return false
 				}

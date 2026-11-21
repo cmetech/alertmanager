@@ -65,7 +65,7 @@ ui-mantine-test:
 ui-mantine-lint:
 	cd $(MANTINE_UI_DIR) && $(MAKE) lint
 
-$(FRONTEND_DIR)/src/Data: api/v2/openapi.yaml
+$(FRONTEND_DIR)/src/Data: api/v2/openapi.yaml $(FRONTEND_DIR)/Makefile $(wildcard $(FRONTEND_DIR)/codegen/elm/*.mustache)
 	cd $(FRONTEND_DIR) && $(MAKE) src/Data
 
 template/email.tmpl: template/email.html

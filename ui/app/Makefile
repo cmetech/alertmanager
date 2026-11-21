@@ -90,7 +90,7 @@ dist/.build_stamp: $(ELM_FILES) index.html vite.config.mjs package-lock.json
 	$(NPM) run build
 	@touch dist/.build_stamp
 
-src/Data: ../../api/v2/openapi.yaml
+src/Data: ../../api/v2/openapi.yaml $(wildcard codegen/elm/*.mustache) Makefile
 	-rm -rf src/Data src/DateTime.elm
 	$(CONTAINER_RUNTIME) run --rm \
 	  $(USER_ARGS) \
@@ -98,7 +98,9 @@ src/Data: ../../api/v2/openapi.yaml
 	  -v ${PWD}/../..:/local \
 	  -v ${PWD}/src:/output/src \
 	  $(OPENAPI_GEN_IMAGE) \
-	  -c 'java -jar /opt/openapi-generator/modules/openapi-generator-cli/target/openapi-generator-cli.jar generate -i /local/api/v2/openapi.yaml -g elm -o /tmp/openapi-gen && cp -r /tmp/openapi-gen/src/Data /output/src/Data && cp /tmp/openapi-gen/src/DateTime.elm /output/src/DateTime.elm'
+	  -c 'set -eu; cli=/opt/openapi-generator/modules/openapi-generator-cli/target/openapi-generator-cli.jar; \
+	    cd /tmp; unzip -q "$$cli" "elm/*"; cp /local/ui/app/codegen/elm/*.mustache /tmp/elm/; \
+	    java -jar "$$cli" generate -i /local/api/v2/openapi.yaml -g elm -t /tmp/elm --type-mappings UUID=String -o /tmp/openapi-gen && cp -r /tmp/openapi-gen/src/Data /output/src/Data && cp /tmp/openapi-gen/src/DateTime.elm /output/src/DateTime.elm'
 	$(MAKE) format
 
 .PHONY: clean

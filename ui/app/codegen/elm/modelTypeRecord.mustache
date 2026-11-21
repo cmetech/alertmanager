@@ -1,0 +1,30 @@
+{{#vendorExtensions.x-elm-nullable-record}}
+type alias {{classname}} = Maybe {{classname}}Value
+
+
+{{/vendorExtensions.x-elm-nullable-record}}type alias {{classname}}{{#vendorExtensions.x-elm-nullable-record}}Value{{/vendorExtensions.x-elm-nullable-record}} =
+    { {{#allVars}}{{^-first}}    , {{/-first}}{{name}} : {{^required}}{{^isNullable}}Maybe ({{/isNullable}}{{/required}}{{>recordFieldType}}{{^required}}{{^isNullable}}){{/isNullable}}{{/required}}
+{{/allVars}}    }
+{{#vars}}
+{{#isEnum}}
+
+
+{{>customType}}
+{{/isEnum}}
+{{/vars}}
+
+
+{{>recordDecoder}}
+
+
+{{>recordEncoder}}
+{{#vars}}
+{{#isEnum}}
+
+
+{{>customTypeDecoder}}
+
+
+{{>customTypeEncoder}}
+{{/isEnum}}
+{{/vars}}
