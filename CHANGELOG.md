@@ -1,7 +1,11 @@
 ## Unreleased — Native action delivery transports
 
+- Native transport review fixes preserve ordinary Telegram token redaction, validate direct expiry before later writes, and independently revalidate previously admitted recipients. Reduced groups use their actual rendered route labels and address. Incident.io freezes retained content before reservation and preserves resolved tails through dispatcher cleanup. Jira records a resolved no-send in the ordinary group lifecycle. SNS pins file-based addressing headers on its native HTTP path. Implementation `b4b813a5`.
+- Pair with OSCAR store `04aeee7ee` and its updated `add_native_alert_actions.sql` migration. The private lease now provides a stable per-authority recipient key, preserving contact ownership and repeat deadlines across authentication rotation. Pre-upgrade NULL authorities with retained work require verified continuity. Native action version remains zero. Operator qualification is pending.
+
+
 - The dormant Alertmanager action reader binds the configured recipients of all 18 receiver kinds and checks its entry permit before each provider mutation. Selected notifications use the chosen alert and detached group metadata. Group sends record the members accepted by incident.io after its payload-size fallback. SMTP finalization, Telegram diagnostics, Slack updates, Jira transitions and SNS FIFO publish use their configured provider semantics. Implementation `1f2d5361`.
-- This native-only checkpoint keeps action version zero. It introduces no database migration or new configuration. Operators must quiesce deliveries, reconcile outstanding contacts and account for old repeat deadlines before rotating the native store credential used for recipient bindings. Inhibition recovery, downstream commissioning and runtime qualification remain pending.
+- This native-only checkpoint keeps action version zero. It introduces no database migration or new configuration. That initial source checkpoint derived recipient bindings from the store credential. The paired transport review fix above supersedes that derivation. Inhibition recovery, downstream commissioning and runtime qualification remain pending.
 
 ## Unreleased — Tracked terminal contact checkpoint
 
