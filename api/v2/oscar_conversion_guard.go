@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/prometheus/alertmanager/config"
 )
 
 const conversionAnnotation = "__oscar_fingerprint_conversion"
@@ -182,6 +184,15 @@ func (api *API) callbacksReadyFor(transport *managedClient, allowDirect bool) bo
 	cfg := api.alertmanagerConfig
 	key := bytes.Clone(api.conversionCallbackKey)
 	api.mtx.RUnlock()
+	return callbackConfigReady(cfg, key, transport, allowDirect)
+}
+
+// ActionCallbackConfigReady validates the proposed action graph before replacing running readers.
+func ActionCallbackConfigReady(cfg *config.Config, key []byte, scheme, caFile string) bool {
+	return callbackConfigReady(cfg, key, &managedClient{scheme: scheme, caFile: caFile}, true)
+}
+
+func callbackConfigReady(cfg *config.Config, key []byte, transport *managedClient, allowDirect bool) bool {
 	if cfg == nil || !allowDirect && len(key) < 32 || len(cfg.Receivers) == 0 {
 		return false
 	}

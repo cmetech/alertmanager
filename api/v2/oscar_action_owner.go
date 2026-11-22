@@ -130,13 +130,14 @@ type actionIntent struct {
 	Result                 ActionResultV1  `json:"result"`
 }
 type actionLease struct {
-	Protocol          string    `json:"protocol"`
-	RecoverySelectors int       `json:"recovery_selectors"`
-	AuthorityID       string    `json:"authority_id"`
-	OwnerID           string    `json:"owner_id"`
-	Epoch             uint64    `json:"epoch"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	RenewSeconds      int       `json:"renew_seconds"`
+	TerminalObservations int       `json:"terminal_observations"`
+	Protocol             string    `json:"protocol"`
+	RecoverySelectors    int       `json:"recovery_selectors"`
+	AuthorityID          string    `json:"authority_id"`
+	OwnerID              string    `json:"owner_id"`
+	Epoch                uint64    `json:"epoch"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	RenewSeconds         int       `json:"renew_seconds"`
 }
 type actionEvent struct {
 	source *alert.Alert
@@ -181,10 +182,16 @@ type nativeActionOwner struct {
 	lease                 actionLease
 	recovered             bool
 	enrollments           uint64
-	membership            [1 << 16]uint64  // Conservative per-owner recovery index; collisions require an indexed source lookup.
-	untracked             map[string]uint8 // Entered direct contacts fence enrollment until conclusive settlement.
-	deferredRecovery      bool             // An omitted durable source must be checked on later enrollment.
-	slots                 chan struct{}
+	terminalMembership    [1 << 16]uint64
+	bootCursor            struct {
+		epoch                 uint64
+		activeAfter, keyAfter string
+		activeDone, keysDone  bool
+	} // Owned by the single recovery loop.
+	membership       [1 << 16]uint64  // Conservative per-owner recovery index; collisions require an indexed source lookup.
+	untracked        map[string]uint8 // Entered direct contacts fence enrollment until conclusive settlement.
+	deferredRecovery bool             // An omitted durable source must be checked on later enrollment.
+	slots            chan struct{}
 }
 
 func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *nativeActionOwner {
@@ -473,20 +480,14 @@ func (o *nativeActionOwner) nextUpdate(prev EpisodeProjection, e actionEvent) (e
 	return u, nil
 }
 
-// terminalBit indexes the exact source interval in bounded memory. A collision only triggers a lookup.
-func terminalBit(key string, v alert.NativeVariant) (uint16, uint64) {
-	start, _ := time.Parse(time.RFC3339Nano, v.StartsAt)
-	return membershipBit("terminal/" + key + "/" + v.Fingerprint + "/" + start.UTC().Format(time.RFC3339Nano))
-}
-
 func (o *nativeActionOwner) rememberTerminal(p EpisodeProjection) error {
 	owner, err := o.projectionKey(p)
 	if err != nil || p.State != "resolved" {
 		return reconcile
 	}
-	bucket, bit := terminalBit(sourceKey(owner, p.NativeVariant.Fingerprint), p.NativeVariant)
+	bucket, bit := membershipBit(sourceKey(owner, p.NativeVariant.Fingerprint))
 	o.mu.Lock()
-	o.membership[bucket] |= bit
+	o.terminalMembership[bucket] |= bit
 	o.mu.Unlock()
 	return nil
 }
@@ -495,9 +496,9 @@ func (o *nativeActionOwner) rememberTerminal(p EpisodeProjection) error {
 // identity decide whether the result can be restored. A firing lookalike cannot reopen it.
 func (o *nativeActionOwner) terminalCandidate(ctx context.Context, a *alert.Alert) (*EpisodeProjection, error) {
 	v, owner := variantOf(a), a.ManagedMember.Episode
-	bucket, bit := terminalBit(sourceKey(owner, v.Fingerprint), v)
+	bucket, bit := membershipBit(sourceKey(owner, v.Fingerprint))
 	o.mu.Lock()
-	possible := o.membership[bucket]&bit != 0
+	possible := o.terminalMembership[bucket]&bit != 0
 	o.mu.Unlock()
 	if !possible {
 		return nil, nil

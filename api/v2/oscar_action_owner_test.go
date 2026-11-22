@@ -205,7 +205,7 @@ func TestOscarActionExpiredWriterMayOnlySettleOriginalEntry(t *testing.T) {
 	require.ErrorIs(t, o.write(stale, "commit", map[string]any{}, nil), unavailable)
 	o.lease.ExpiresAt = time.Now().Add(-time.Second)
 	require.ErrorIs(t, o.write(o.withEpoch(t.Context()), "claim-target", map[string]any{}, nil), unavailable)
-	_, err := o.Settle(t.Context(), Entry{OperationID: id, TargetKey: key, token: token}, "confirmed", "original attempt receipt")
+	_, err := o.Settle(t.Context(), claimedEntry{OperationID: id, TargetKey: key, token: token}, "confirmed", "original attempt receipt")
 	require.NoError(t, err)
 	require.True(t, settled)
 }
@@ -220,7 +220,7 @@ func TestOscarActionReadinessNeedsVersionAndRejectsConflictingLease(t *testing.T
 		if foreign {
 			return unavailable
 		}
-		return json.Unmarshal(mustRaw(t, actionLease{Protocol: protocol, RecoverySelectors: selectors, OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
+		return json.Unmarshal(mustRaw(t, actionLease{Protocol: protocol, RecoverySelectors: selectors, TerminalObservations: 2, OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
 	})
 	o = newNativeActionOwner(defaultActionAuthority, rpc, nil)
 	require.ErrorIs(t, o.leaseTick(t.Context()), unavailable)
@@ -557,7 +557,7 @@ func TestFloorCommitFencesOutstandingEntryBeforeLostReply(t *testing.T) {
 
 func TestEntryExpiresDuringReadiness(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Millisecond)
-	e := Entry{expires: deadline, valid: func() bool { <-time.After(time.Until(deadline)); return true }}
+	e := claimedEntry{expires: deadline, valid: func() bool { <-time.After(time.Until(deadline)); return true }}
 	require.False(t, e.Valid())
 }
 
@@ -568,6 +568,10 @@ func TestOverflowGCAndDeferredRecoveryAtCapacity(t *testing.T) {
 	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
 		if cmd == "recover" {
 			if args["projection"] == "membership" {
+				*out.(*[]string) = []string{fp}
+				return nil
+			}
+			if args["projection"] == "episodes" {
 				rows := []EpisodeProjection{}
 				if args["after_id"] == nil {
 					rows = append(rows, p)
@@ -863,7 +867,10 @@ func TestOscarActionRecoverTerminalUsesExactInterval(t *testing.T) {
 		require.Equal(t, "recover", cmd)
 		require.Equal(t, "terminal", args["projection"])
 		lookups++
-		*out.(*[]EpisodeProjection) = []EpisodeProjection{p}
+		*out.(*[]EpisodeProjection) = []EpisodeProjection{}
+		if sameVariant(args["native_variant"].(alert.NativeVariant), p.NativeVariant) {
+			*out.(*[]EpisodeProjection) = []EpisodeProjection{p}
+		}
 		return nil
 	}), nil)
 	require.NoError(t, o.rememberTerminal(p))
@@ -875,71 +882,166 @@ func TestOscarActionRecoverTerminalUsesExactInterval(t *testing.T) {
 	_, err = o.terminalCandidate(t.Context(), &replacement)
 	require.Error(t, err)
 	replacement.StartsAt = now
-	// A conservative membership collision is permitted and correctly incurs a lookup.
-	key := sourceKey("", a.Fingerprint().String())
-	bucket, bit := terminalBit(key, variantOf(a))
-	for {
-		b, mask := terminalBit(key, variantOf(&replacement))
-		if b != bucket || mask != bit {
-			break
-		}
-		replacement.StartsAt = replacement.StartsAt.Add(time.Nanosecond)
-	}
+	// A new interval with the same historical source key still requires exact lookup.
 	got, err = o.terminalCandidate(t.Context(), &replacement)
 	require.NoError(t, err)
 	require.Nil(t, got)
-	require.Equal(t, 2, lookups)
+	require.Equal(t, 3, lookups)
 }
 
 func TestOscarActionTerminalClaimAndSignedMember(t *testing.T) {
 	t.Parallel()
+	for _, fault := range []string{"none", "lost claim reply", "annotation replacement on takeover", "promoted managed clear"} {
+		t.Run(fault, func(t *testing.T) {
+			now := time.Now().UTC()
+			source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-2 * time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
+			if fault == "promoted managed clear" {
+				source.ManagedReceiver, source.ManagedOperationKind = true, "clear"
+				source.EndsAt = now.Add(time.Hour)
+				source.ManagedMember = alert.ManagedMembership{Episode: strings.Repeat("b", 64), Generation: 2, Event: "44444444-4444-4444-8444-444444444444", Digest: strings.Repeat("d", 64)}
+			}
+			wire := source.NotificationCopy(now)
+			ref := EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1}
+			p := EpisodeProjection{ID: "11111111-1111-4111-8111-111111111111", episodeUpdate: episodeUpdate{EpisodeRef: ref, NativeVariant: variantOf(source), State: "resolved", LifecycleSeq: 2, SourceSeverity: "major", ActiveSince: variantOf(source).StartsAt}}
+			target := DispatchTarget{ReceiverID: "ops", Scope: []ScopeEntry{}, IntegrationDigest: strings.Repeat("b", 64), RepeatIntervalUS: 1000}
+			key, token := strings.Repeat("c", 64), strings.Repeat("a", 64)
+			id := "33333333-3333-4333-8333-333333333333"
+			expires := now.Add(time.Minute)
+			result := ActionResultV1{OperationID: id, EpisodeRef: ref, State: "accepted", PermitExpiresAt: &expires, Targets: []TargetResult{{Target: target, TargetKey: key, State: "pending"}}}
+			request := ordinaryRequest{Kind: "ordinary", OperationID: id, EpisodeRef: ref, Target: target, Terminal: &terminalObservation{wire.Resolved(), terminalSourceDigest(source), p.LifecycleSeq, p.NativeVariant, source.EndsAt}}
+			claims := 0
+			rpc := actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+				switch cmd {
+				case "reserve-terminal":
+					require.Equal(t, source.EndsAt.UTC(), args["source_ends_at"])
+					*out.(*ActionResultV1) = result
+				case "lookup":
+					*out.(**actionIntent) = &actionIntent{Request: mustRaw(t, request), Digest: key, Result: result}
+				case "claim-target":
+					claims++
+					if fault == "lost claim reply" {
+						result.Targets[0].State = "unknown"
+						return unavailable
+					}
+					return json.Unmarshal(mustRaw(t, map[string]any{"entry_token": token, "lease_expires_at": expires, "permit_expires_at": expires}), out)
+				case "settle-target":
+					require.Equal(t, token, args["entry_token"])
+					*out.(*ActionResultV1) = result
+				default:
+					t.Fatalf("unexpected %s", cmd)
+				}
+				return nil
+			})
+			o := newNativeActionOwner(defaultActionAuthority, rpc, singleActionDispatch{target: target})
+			o.lease = actionLease{Epoch: 1, ExpiresAt: expires}
+			o.recovered = true
+			slot := &episodeSlot{source: source, projection: p}
+			o.byKey[sourceKey(source.ManagedMember.Episode, p.NativeVariant.Fingerprint)], o.byID[ref.EpisodeID] = slot, slot
+			if source.ManagedReceiver {
+				m := source.ManagedMember
+				current := &ownerSlot{Generation: m.Generation, Projection: snapshot(source), Operation: mustRaw(t, map[string]string{"kind": "clear", "event_id": m.Event, "source_digest": m.Digest})}
+				closed := now.UnixMilli()
+				state := ownerState{Key: m.Episode, State: "exact_closed", Phase: "reserved", Generation: m.Generation, Closed: &closed, Pending: current}
+				o.verifyManaged = func(_ context.Context, a *alert.Alert, logical string) error {
+					return actionMemberProof(state, a, logical)
+				}
+				_, err := o.ReserveTerminal(t.Context(), wire, p, target)
+				require.Error(t, err)
+				state.Current, state.Pending, state.Phase = current, nil, "applied"
+			}
+			r, err := o.ReserveTerminal(t.Context(), wire, p, target)
+			require.NoError(t, err)
+			if fault == "annotation replacement on takeover" {
+				replacement := *source
+				replacement.Annotations = model.LabelSet{"changed": "new"}
+				o = newNativeActionOwner(defaultActionAuthority, rpc, singleActionDispatch{target: target})
+				o.recovered = true
+				o.lease = actionLease{Epoch: 2, ExpiresAt: expires}
+				o.byID[ref.EpisodeID] = &episodeSlot{source: &replacement, projection: p}
+				_, err = o.Claim(t.Context(), r.OperationID, key)
+				require.Error(t, err)
+				require.Zero(t, claims)
+				return
+			}
+			entry, err := o.Claim(t.Context(), r.OperationID, key)
+			if fault == "lost claim reply" {
+				require.Error(t, err)
+				require.Nil(t, entry)
+				entry, err = o.Claim(t.Context(), r.OperationID, key)
+				require.Error(t, err)
+				require.Nil(t, entry)
+				require.Equal(t, 1, claims)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, entry.ForMember(wire))
+			stamp, err := o.Delivery(t.Context(), source, target.ReceiverID, id, entry)
+			require.NoError(t, err)
+			require.Equal(t, "resolved", stamp.State)
+			require.Nil(t, stamp.OperationID)
+			require.Equal(t, p.LifecycleSeq, stamp.LifecycleSeq)
+			_, err = o.Delivery(t.Context(), source, target.ReceiverID, id, nil)
+			require.Error(t, err)
+			if source.ManagedReceiver {
+				require.False(t, wire.Resolved())
+				return
+			}
+			next := *source
+			next.StartsAt, next.EndsAt = now, expires
+			o.observe("", &next, false)
+			require.False(t, entry.LocalValid())
+			_, err = o.Settle(t.Context(), entry, "confirmed", "original acceptance")
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestTerminalEvidenceChangesOnAnnotationReplacement(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
-	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-2 * time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
-	ref := EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1}
-	p := EpisodeProjection{ID: "11111111-1111-4111-8111-111111111111", episodeUpdate: episodeUpdate{EpisodeRef: ref, NativeVariant: variantOf(source), State: "resolved", LifecycleSeq: 2, SourceSeverity: "major", ActiveSince: variantOf(source).StartsAt}}
-	target := DispatchTarget{ReceiverID: "ops", Scope: []ScopeEntry{}, IntegrationDigest: strings.Repeat("b", 64), RepeatIntervalUS: 1000}
-	key, token := strings.Repeat("c", 64), strings.Repeat("a", 64)
-	id := "33333333-3333-4333-8333-333333333333"
-	expires := now.Add(time.Minute)
-	result := ActionResultV1{OperationID: id, EpisodeRef: ref, State: "accepted", PermitExpiresAt: &expires, Targets: []TargetResult{{Target: target, TargetKey: key, State: "pending"}}}
-	request := ordinaryRequest{Kind: "ordinary", OperationID: id, EpisodeRef: ref, Target: target, Terminal: &terminalObservation{p.LifecycleSeq, p.NativeVariant, source.EndsAt}}
-	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
-		switch cmd {
-		case "reserve-terminal":
-			require.Equal(t, source.EndsAt.UTC(), args["source_ends_at"])
-			*out.(*ActionResultV1) = result
-		case "lookup":
-			*out.(**actionIntent) = &actionIntent{Request: mustRaw(t, request), Digest: key, Result: result}
-		case "claim-target":
-			return json.Unmarshal(mustRaw(t, map[string]any{"entry_token": token, "lease_expires_at": expires, "permit_expires_at": expires}), out)
-		case "settle-target":
-			require.Equal(t, token, args["entry_token"])
-			*out.(*ActionResultV1) = result
-		default:
-			t.Fatalf("unexpected %s", cmd)
+	s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Second), Annotations: model.LabelSet{"description": "original"}}, now, false)
+	digest := terminalSourceDigest(s)
+	restored := *s
+	require.Equal(t, digest, terminalSourceDigest(&restored))
+	restored.Annotations = model.LabelSet{"description": "replacement"}
+	require.NotEqual(t, digest, terminalSourceDigest(&restored))
+	restored = *s
+	restored.GeneratorURL = "https://replacement.invalid/alert"
+	require.NotEqual(t, digest, terminalSourceDigest(&restored))
+}
+
+func TestOscarActionIncompleteMembershipResumesAfterIntermediateFailure(t *testing.T) {
+	t.Parallel()
+	var cursors []string
+	var activePages int
+	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, _ string, args map[string]any, out any) error {
+		if args["projection"] == "episodes" {
+			activePages++
+			*out.(*[]EpisodeProjection) = []EpisodeProjection{}
+			return nil
 		}
+		key, _ := args["after_key"].(string)
+		cursors = append(cursors, key)
+		if key == "" {
+			keys := make([]string, 64)
+			for i := range keys {
+				keys[i] = fmt.Sprintf("%016x", i+1)
+			}
+			*out.(*[]string) = keys
+			return nil
+		}
+		if len(cursors) == 2 {
+			return unavailable
+		}
+		*out.(*[]string) = []string{"0000000000000041"}
 		return nil
-	}), singleActionDispatch{target: target})
-	o.lease = actionLease{Epoch: 1, ExpiresAt: expires}
-	o.recovered = true
-	slot := &episodeSlot{source: source, projection: p}
-	o.byKey[sourceKey("", p.NativeVariant.Fingerprint)], o.byID[ref.EpisodeID] = slot, slot
-	r, err := o.ReserveTerminal(t.Context(), source, p, target)
-	require.NoError(t, err)
-	entry, err := o.Claim(t.Context(), r.OperationID, key)
-	require.NoError(t, err)
-	require.True(t, entry.ForSource(source))
-	stamp, err := o.Delivery(t.Context(), source, target.ReceiverID, id, &entry)
-	require.NoError(t, err)
-	require.Equal(t, "resolved", stamp.State)
-	require.Nil(t, stamp.OperationID)
-	require.Equal(t, p.LifecycleSeq, stamp.LifecycleSeq)
-	_, err = o.Delivery(t.Context(), source, target.ReceiverID, id, nil)
-	require.Error(t, err)
-	next := *source
-	next.StartsAt, next.EndsAt = now, expires
-	o.observe("", &next, false)
-	require.False(t, entry.LocalValid())
-	_, err = o.Settle(t.Context(), entry, "confirmed", "original acceptance")
-	require.NoError(t, err)
+	}), testActionDispatch{})
+	o.lease = actionLease{Epoch: 2, ExpiresAt: time.Now().Add(time.Hour)}
+	require.Error(t, o.recoverEpisodes(t.Context()))
+	require.False(t, o.ready())
+	require.Error(t, o.recoverEpisodes(t.Context()))
+	require.False(t, o.ready())
+	require.NoError(t, o.recoverEpisodes(t.Context()))
+	require.Equal(t, 1, activePages)
+	require.Equal(t, []string{"", "0000000000000040", "0000000000000040"}, cursors)
 }

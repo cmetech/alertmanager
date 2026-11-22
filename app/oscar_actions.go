@@ -54,16 +54,17 @@ type publishedMember struct {
 	member *alert.Alert
 }
 type nativeActions struct {
-	version  int
-	mu       sync.RWMutex
-	graph    *actionGraph
-	journal  v2.ActionJournal
-	sources  map[model.Fingerprint]publishedMember
-	episodes map[string]publishedMember
-	pending  map[string]bool
-	read     func(string, string, func(*alert.Alert))
-	key      []byte
-	logger   *slog.Logger
+	scheme, caFile string
+	version        int
+	mu             sync.RWMutex
+	graph          *actionGraph
+	journal        v2.ActionJournal
+	sources        map[model.Fingerprint]publishedMember
+	episodes       map[string]publishedMember
+	pending        map[string]bool
+	read           func(string, string, func(*alert.Alert))
+	key            []byte
+	logger         *slog.Logger
 }
 
 func newNativeActions(read func(string, string, func(*alert.Alert)), key []byte, logger *slog.Logger) *nativeActions {
@@ -344,7 +345,7 @@ func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id 
 			cctx := g.dispatcher.SelectedContext(ctx, c.route, member)
 			s := notify.SelectedAction{Source: source, Receiver: c.ReceiverID, Integration: c.integration.name, Index: c.integration.index,
 				Invoke: func(ctx context.Context, i *notify.Integration, m *alert.Alert) notify.NotifyVerdict {
-					return a.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: id, target: t, contact: c, p: pub.p}})
+					return a.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: id, target: t, contact: c, p: pub.p}}, 0)
 				}}
 			_, _, err = g.pipeline.Exec(notify.WithSelectedAction(cctx, s), a.logger, member)
 			result = errors.Join(result, err)
@@ -372,107 +373,87 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		return result, actionHeld
 	}
 	i := g.targets[receiver][match]
-	var ordinary, tracked []*alert.Alert
-	contacts := map[*alert.Alert]ordinaryContact{}
-	var held error
+	var ordinary []*alert.Alert
+	contacts := make(map[*alert.Alert]ordinaryContact, len(members))
 	for _, m := range members {
-		s := m.ProviderSource()
-		p, pass, err := a.journal.InspectOrdinary(ctx, s)
+		source := m.ProviderSource()
+		p, pass, err := a.journal.InspectOrdinary(ctx, source)
 		if err != nil {
-			held = err
+			result.Held = err
 			continue
-		}
-		if p != nil {
-			member, err := effectiveMember(s, *p)
-			if err != nil || !member.Labels.Equal(m.Labels) {
-				held = actionHeld
-				continue
-			}
 		}
 		c := ordinaryContact{pass: pass, contact: plannedContact{DispatchTarget: v2.DispatchTarget{ReceiverID: receiver}, integration: i}}
+		if p != nil {
+			c.p = *p
+			view, err := effectiveMember(source, *p)
+			if err != nil || !view.Labels.Equal(m.Labels) || p.State == "resolved" && !m.TerminalWireValid() {
+				result.Held = actionHeld
+				continue
+			}
+		}
 		if p == nil || p.State == "resolved" {
-			if p != nil {
-				c.p = *p
-			}
 			ordinary = append(ordinary, m)
-			contacts[s] = c
-			continue
 		}
-		possible, err := g.contacts(ctx, s, *p, nil)
-		if err != nil {
-			held = err
-			continue
-		}
-		for _, t := range possible {
-			if t.IntegrationDigest != i.digest || !currentGroup(ctx, m, t.route) {
-				continue
-			}
-			contact, err := a.reserve(ctx, *p, t)
-			if err != nil {
-				if err.Error() != "NATIVE_SUPPRESSED" {
-					held = err
-				}
-				continue
-			}
-			tracked = append(tracked, m)
-			contacts[s] = contact
-			break
-		}
+		contacts[source] = c
 	}
-	if len(ordinary) > 0 {
-		subsetDue, groupDue := due(ordinary), due(members)
-		for _, m := range ordinary {
-			s := m.ProviderSource()
-			c := contacts[s]
-			terminal := c.p.State == "resolved" || s.Resolved() || s.ManagedReceiver && s.ManagedOperationKind == "clear"
+	groupDue, subsetDue := due(members), due(ordinary)
+	for _, m := range members {
+		source := m.ProviderSource()
+		c, ok := contacts[source]
+		if !ok {
+			continue
+		}
+		if c.p.State != "firing" {
+			terminal := c.p.State == "resolved" || source.Resolved() || source.ManagedReceiver && source.ManagedOperationKind == "clear"
 			if terminal && !groupDue || !terminal && !subsetDue {
 				continue
 			}
-			if i.canonical && c.pass != nil {
-				p, err := a.journal.Project(ctx, s)
-				if err != nil {
-					held = err
-					continue
-				}
-				c.p = p
-				c.pass = nil
-				if p.State == "firing" {
-					possible, err := g.contacts(ctx, s, p, nil)
-					if err != nil {
-						held = err
-						continue
-					}
-					idx := slices.IndexFunc(possible, func(t plannedContact) bool { return t.IntegrationDigest == i.digest && currentGroup(ctx, m, t.route) })
-					if idx < 0 {
-						continue
-					}
-					c, err = a.reserve(ctx, p, possible[idx])
-					if err != nil {
-						held = err
-						continue
-					}
-				}
-				contacts[s] = c
-			}
-			result.Members = append(result.Members, m)
 		}
+		result.Members = append(result.Members, m)
 	}
-	result.WriteGroup = held == nil && (len(result.Members) > 0 || len(tracked) == len(members))
-	result.Held = held
-	result.Members = append(result.Members, tracked...)
 	if len(result.Members) == 0 {
-		return result, held
+		return result, result.Held
 	}
+	result.WriteGroup = result.Held == nil && (groupDue || len(result.Members) == len(members))
+	allowLog := true
+	result.AllowLog = func() bool { return allowLog }
 	result.Invoke = func(ctx context.Context, integration *notify.Integration, sent []*alert.Alert) notify.NotifyVerdict {
-		cc := make([]ordinaryContact, 0, len(sent))
-		for _, m := range sent {
-			c, ok := contacts[m.ProviderSource()]
-			if !ok {
-				return notify.Unrecoverable(actionHeld, notify.DefaultReason)
-			}
-			cc = append(cc, c)
+		var truncated uint64
+		if limit := i.maxAlerts; limit != 0 && uint64(len(sent)) > limit {
+			truncated = uint64(len(sent)) - limit
+			sent = sent[:limit]
 		}
-		return a.invoke(ctx, g, integration, sent, cc)
+		var pending []*alert.Alert
+		var entries []ordinaryContact
+		var held error
+		confirmed := 0
+		for _, m := range sent {
+			c := contacts[m.ProviderSource()]
+			c, err := a.ordinaryContact(ctx, g, m, c)
+			if err != nil {
+				if err.Error() != "NATIVE_SUPPRESSED" {
+					held = errors.Join(held, err)
+				}
+				continue
+			}
+			if c.target.State == "confirmed" {
+				confirmed++
+				continue
+			}
+			pending = append(pending, m)
+			entries = append(entries, c)
+		}
+		allowLog = len(sent) > 0 && confirmed+len(pending) == len(sent)
+		if len(pending) > 0 {
+			v := a.invoke(ctx, g, integration, pending, entries, truncated)
+			if v.Err() != nil {
+				return v
+			}
+		}
+		if held != nil {
+			return notify.Unrecoverable(held, notify.DefaultReason)
+		}
+		return notify.Success()
 	}
 	return result, nil
 }
@@ -492,8 +473,26 @@ func (a *nativeActions) reserve(ctx context.Context, p v2.EpisodeProjection, t p
 	return ordinaryContact{operation: id, target: r.Targets[0], contact: t, p: p}, nil
 }
 
-// terminalContact resolves an ordinary closure only after RetryStage has applied send_resolved.
-func (a *nativeActions) terminalContact(ctx context.Context, g *actionGraph, m *alert.Alert, c ordinaryContact) (ordinaryContact, error) {
+// ordinaryContact reserves only members selected by native send_resolved filtering and truncation.
+func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *alert.Alert, c ordinaryContact) (ordinaryContact, error) {
+	s := m.ProviderSource()
+	if c.pass != nil {
+		if !c.contact.integration.canonical {
+			return c, nil
+		}
+		p, err := a.journal.Project(ctx, s)
+		if err != nil {
+			return c, err
+		}
+		view, err := effectiveMember(s, p)
+		if err != nil || !m.Labels.Equal(view.Labels) {
+			return c, actionHeld
+		}
+		c.pass, c.p = nil, p
+	}
+	if c.p.State == "resolved" && !m.TerminalWireValid() {
+		return c, actionHeld
+	}
 	possible, err := g.contacts(ctx, m.ProviderSource(), c.p, nil)
 	if err != nil {
 		return c, err
@@ -505,7 +504,13 @@ func (a *nativeActions) terminalContact(ctx context.Context, g *actionGraph, m *
 		return c, actionHeld
 	}
 	c.contact = possible[idx]
-	r, err := a.journal.ReserveTerminal(ctx, m.ProviderSource(), c.p, c.contact.DispatchTarget)
+	if c.p.State == "firing" {
+		return a.reserve(ctx, c.p, c.contact)
+	}
+	if c.p.State != "resolved" {
+		return c, actionHeld
+	}
+	r, err := a.journal.ReserveTerminal(ctx, m, c.p, c.contact.DispatchTarget)
 	if err != nil {
 		return c, err
 	}
@@ -521,40 +526,7 @@ func (a *nativeActions) terminalContact(ctx context.Context, g *actionGraph, m *
 	}
 }
 
-func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.Integration, members []*alert.Alert, contacts []ordinaryContact) notify.NotifyVerdict {
-	var held error
-	var truncated uint64
-	if slices.ContainsFunc(contacts, func(c ordinaryContact) bool { return c.p.State == "resolved" && c.operation == "" }) {
-		// Freeze the native webhook's actual prefix before eliding an already-confirmed terminal member.
-		// A response for the prefix supplies no acceptance evidence for a truncated source.
-		if limit := contacts[0].contact.integration.maxAlerts; i.Name() == "webhook" && limit != 0 && uint64(len(members)) > limit {
-			truncated = uint64(len(members)) - limit
-			members, contacts = members[:limit], contacts[:limit]
-		}
-		send := make([]*alert.Alert, 0, len(members))
-		pending := make([]ordinaryContact, 0, len(contacts))
-		for x, c := range contacts {
-			if c.p.State == "resolved" && c.operation == "" {
-				var err error
-				c, err = a.terminalContact(ctx, g, members[x], c)
-				if err != nil {
-					held = errors.Join(held, err)
-					continue
-				}
-				if c.target.State == "confirmed" {
-					continue
-				}
-			}
-			send, pending = append(send, members[x]), append(pending, c)
-		}
-		members, contacts = send, pending
-		if len(members) == 0 {
-			if held != nil {
-				return notify.Unrecoverable(held, notify.DefaultReason)
-			}
-			return notify.Success()
-		}
-	}
+func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.Integration, members []*alert.Alert, contacts []ordinaryContact, truncated uint64) notify.NotifyVerdict {
 	var claimed []v2.Entry
 	var passes []*v2.OrdinaryPass
 	entered := false
@@ -582,17 +554,17 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 	bound := &notify.ProviderEntry{Truncated: truncated}
 	for x, c := range contacts {
 		s := members[x].ProviderSource()
-		var entry *v2.Entry
+		var entry v2.Entry
 		if c.operation != "" {
 			e, err := a.journal.Claim(ctx, c.operation, c.target.TargetKey)
 			if err != nil {
 				return fail(err)
 			}
 			claimed = append(claimed, e)
-			if !e.ForSource(s) {
+			if e == nil || !e.ForMember(members[x]) {
 				return fail(actionHeld)
 			}
-			entry = &e
+			entry = e
 		}
 		if c.contact.integration.canonical {
 			operation, err := uuid.Parse(c.operation)
@@ -654,11 +626,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 	if !entered && v.Err() == nil {
 		return fail(actionHeld)
 	}
-	v = finish(v)
-	if held != nil && v.Err() == nil {
-		return notify.Unrecoverable(held, notify.DefaultReason)
-	}
-	return v
+	return finish(v)
 }
 
 func actionDestinations(conf *config.Config, receivers map[string][]notify.Integration) (map[string][]actionIntegration, bool, error) {

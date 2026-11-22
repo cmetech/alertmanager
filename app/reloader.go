@@ -26,6 +26,7 @@ import (
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/api"
+	v2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/config/receiver"
@@ -164,6 +165,7 @@ func (r *reloader) reload(conf *config.Config) error {
 		if err != nil {
 			return err
 		}
+		supported = supported && v2.ActionCallbackConfigReady(conf, r.actions.key, r.actions.scheme, r.actions.caFile)
 		if !supported && r.actions.snapshot() != nil {
 			return errors.New("active native action graph cannot switch to unsupported receivers")
 		}

@@ -17,11 +17,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/route"
 	"github.com/stretchr/testify/require"
@@ -29,11 +35,15 @@ import (
 	"github.com/prometheus/alertmanager/alert"
 	v2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/config"
+	"github.com/prometheus/alertmanager/config/receiver"
 	"github.com/prometheus/alertmanager/dispatch"
 	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/notify/webhook"
+	"github.com/prometheus/alertmanager/template"
+	"github.com/prometheus/alertmanager/timeinterval"
 )
 
 func TestReloaderPublishesTimingAfterDispatcherLoads(t *testing.T) {
@@ -294,46 +304,261 @@ func TestOscarActionFloorRebuildsGroupsAndInhibitorOnReload(t *testing.T) {
 	}
 }
 
+type fixturePermit struct{ source *alert.Alert }
+
+func (e fixturePermit) ForMember(m *alert.Alert) bool { return m.ProviderSource() == e.source }
+func (fixturePermit) Valid() bool                     { return true }
+func (fixturePermit) LocalValid() bool                { return true }
+
 type terminalFixtureJournal struct {
 	v2.ActionJournal
-	states  []string
-	sources []*alert.Alert
+	projections                        map[*alert.Alert]v2.EpisodeProjection
+	first                              bool
+	state                              string
+	reserved, claimed, settled, events []string
 }
 
-func (j *terminalFixtureJournal) ReserveTerminal(_ context.Context, s *alert.Alert, p v2.EpisodeProjection, t v2.DispatchTarget) (v2.ActionResultV1, error) {
-	state := j.states[len(j.sources)]
-	j.sources = append(j.sources, s)
-	return v2.ActionResultV1{EpisodeRef: p.EpisodeRef, Targets: []v2.TargetResult{{Target: t, State: state}}}, nil
+func (j *terminalFixtureJournal) InspectOrdinary(_ context.Context, s *alert.Alert) (*v2.EpisodeProjection, *v2.OrdinaryPass, error) {
+	if j.first {
+		return nil, &v2.OrdinaryPass{}, nil
+	}
+	p := j.projections[s]
+	return &p, nil, nil
+}
+func (j *terminalFixtureJournal) Project(_ context.Context, s *alert.Alert) (v2.EpisodeProjection, error) {
+	j.first = false
+	j.events = append(j.events, "enroll")
+	return j.projections[s], nil
+}
+func (j *terminalFixtureJournal) reservation(id string, ref v2.EpisodeRef, t v2.DispatchTarget) v2.ActionResultV1 {
+	j.reserved = append(j.reserved, ref.EpisodeID)
+	j.events = append(j.events, "reserve")
+	return v2.ActionResultV1{OperationID: id, EpisodeRef: ref, Targets: []v2.TargetResult{{Target: t, TargetKey: ref.EpisodeID, State: j.state}}}
+}
+func (j *terminalFixtureJournal) ReserveTerminal(_ context.Context, m *alert.Alert, p v2.EpisodeProjection, t v2.DispatchTarget) (v2.ActionResultV1, error) {
+	return j.reservation(p.EpisodeRef.EpisodeID, p.EpisodeRef, t), nil
+}
+func (j *terminalFixtureJournal) ReserveOrdinary(_ context.Context, id string, ref v2.EpisodeRef, t v2.DispatchTarget, _ bool) (v2.ActionResultV1, error) {
+	return j.reservation(id, ref, t), nil
+}
+func (j *terminalFixtureJournal) Claim(_ context.Context, _, key string) (v2.Entry, error) {
+	j.claimed = append(j.claimed, key)
+	j.events = append(j.events, "claim")
+	for s, p := range j.projections {
+		if p.EpisodeRef.EpisodeID == key {
+			return fixturePermit{s}, nil
+		}
+	}
+	return nil, actionHeld
+}
+func (j *terminalFixtureJournal) Delivery(_ context.Context, s *alert.Alert, _, id string, e v2.Entry) (alert.NativeDeliveryV1, error) {
+	if !e.ForMember(s) {
+		return alert.NativeDeliveryV1{}, actionHeld
+	}
+	p := j.projections[s]
+	j.events = append(j.events, "stamp")
+	return alert.NativeDeliveryV1{Version: 1, EpisodeRef: p.EpisodeRef, NativeVariant: p.NativeVariant, LifecycleSeq: p.LifecycleSeq, State: p.State, ActiveSince: p.ActiveSince, SourceSeverity: p.SourceSeverity, EffectiveSeverity: p.EffectiveSeverity(), DeliveryID: id, TargetScope: []alert.TargetScopeEntry{}}, nil
+}
+func (j *terminalFixtureJournal) Settle(_ context.Context, e v2.Entry, outcome, _ string) (v2.ActionResultV1, error) {
+	j.settled = append(j.settled, outcome)
+	return v2.ActionResultV1{}, nil
 }
 
-func TestOscarActionTerminalConfirmationAndUnknownStayOutOfProviderReplay(t *testing.T) {
+func TestOscarActionTerminalNativePipeline(t *testing.T) {
+	for _, tc := range []struct {
+		name, order, state                             string
+		canonical, sendResolved, stale, managed, first bool
+		limit                                          int
+		want                                           string
+		wantErr                                        bool
+	}{
+		{name: "F first", order: "FR", state: "pending", sendResolved: true, limit: 1, want: "F"},
+		{name: "R first", order: "RF", state: "pending", sendResolved: true, limit: 1, want: "R"},
+		{name: "send-resolved filter before limit", order: "RF", state: "pending", limit: 1, want: "F"},
+		{name: "direct stale firing copy", order: "R", state: "pending", sendResolved: true, stale: true, wantErr: true},
+		{name: "stale copy with send-resolved false", order: "R", state: "pending", stale: true, wantErr: true},
+		{name: "signed stale firing copy", order: "R", state: "pending", canonical: true, sendResolved: true, stale: true, wantErr: true},
+		{name: "first signed ordinary closure", order: "R", state: "pending", canonical: true, sendResolved: true, first: true, want: "R"},
+		{name: "signed promoted clear firing on wire", order: "R", state: "pending", canonical: true, sendResolved: true, managed: true, want: "R"},
+		{name: "confirmed closure", order: "R", state: "confirmed", sendResolved: true},
+		{name: "unknown closure", order: "R", state: "unknown", sendResolved: true, wantErr: true},
+		{name: "disabled send-resolved", order: "R", state: "pending"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			type capture struct {
+				msg     webhook.Message
+				raw     []byte
+				headers http.Header
+			}
+			calls := make(chan capture, 4)
+			sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				raw, _ := io.ReadAll(req.Body)
+				var msg webhook.Message
+				if err := json.Unmarshal(raw, &msg); err != nil {
+					http.Error(w, err.Error(), 400)
+					return
+				}
+				calls <- capture{msg, raw, req.Header.Clone()}
+			}))
+			t.Cleanup(sink.Close)
+			r := newTestReloader(t)
+			t.Cleanup(func() { _ = r.stop() })
+			key := []byte(strings.Repeat("k", 32))
+			file := filepath.Join(t.TempDir(), "callback")
+			require.NoError(t, os.WriteFile(file, key, 0600))
+			url, options := sink.URL, ""
+			if tc.canonical {
+				url = "http://alertmanager-middleware:9400" + alert.NativeCallbackPath
+				options = fmt.Sprintf("    http_config:\n      follow_redirects: false\n      authorization:\n        type: Bearer\n        credentials_file: %s\n", file)
+			}
+			cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: %s\n    max_alerts: %d\n    send_resolved: %t\n%s", url, tc.limit, tc.sendResolved, options))
+			require.NoError(t, err)
+			j := &terminalFixtureJournal{projections: map[*alert.Alert]v2.EpisodeProjection{}, first: tc.first, state: tc.state}
+			a := newNativeActions(nil, key, r.logger)
+			a.scheme = "http"
+			a.version = 1
+			r.actions = a
+			require.NoError(t, a.Bind(j))
+			require.NoError(t, r.reload(cfg))
+			g := a.snapshot()
+			require.NotNil(t, g)
+			tmpl, err := template.FromGlobs(nil)
+			require.NoError(t, err)
+			tmpl.ExternalURL = r.externalURL
+			integrations, err := receiver.BuildReceiverIntegrations(cfg.Receivers[0], tmpl, r.logger, commoncfg.WithDialContextFunc(func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, sink.Listener.Addr().String())
+			}))
+			require.NoError(t, err)
+			pipeline := r.pipelineBuilder.New(map[string][]notify.Integration{"team": integrations}, r.waitFunc, g.inhibitor, r.silencer, g.timeMuter.(*timeinterval.Intervener), r.notificationLog, nil)
+			now := time.Now().UTC()
+			var members []*alert.Alert
+			ids := map[string]string{}
+			for n, letter := range tc.order {
+				host := string(letter)
+				end := now.Add(time.Hour)
+				state := "firing"
+				sev := "major"
+				if host == "R" {
+					state = "resolved"
+					end = now.Add(-time.Second)
+					if tc.managed {
+						sev = "cleared"
+						end = now.Add(time.Hour)
+					}
+				}
+				source := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "severity": model.LabelValue(sev), "host": model.LabelValue(host)}, StartsAt: now.Add(-time.Hour), EndsAt: end}, now, false)
+				if tc.managed {
+					source.ManagedReceiver = true
+					source.ManagedOperationKind = "clear"
+					source.ManagedMember = alert.ManagedMembership{Episode: strings.Repeat("a", 64), Generation: 2, Event: "11111111-1111-4111-8111-111111111111", Digest: strings.Repeat("b", 64)}
+					source.ManagedEligible = func(context.Context, *alert.Alert, string, string) (bool, error) { return true, nil }
+				}
+				id := fmt.Sprintf("22222222-2222-4222-8222-%012d", n+1)
+				ids[host] = id
+				var p v2.EpisodeProjection
+				start := source.StartsAt.Format(time.RFC3339Nano)
+				require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":%q,"generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"active_since":%q,"state":%q,"source_severity":%q,"lifecycle_seq":2}`, id, source.Fingerprint().String(), start, start, state, sev)), &p))
+				j.projections[source] = p
+				flush := now
+				if tc.stale {
+					flush = end.Add(-time.Nanosecond)
+				}
+				members = append(members, source.NotificationCopy(flush))
+			}
+			ctx := g.dispatcher.SelectedContext(t.Context(), g.routes.Match(members[0].Labels)[0], members[0])
+			gkey, _ := notify.GroupKey(ctx)
+			recv := &nflogpb.Receiver{GroupName: "team", Integration: "webhook"}
+			require.NoError(t, r.notificationLog.Log(recv, gkey, []uint64{42}, nil, nil, nil, time.Hour))
+			ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, receiver, name string, index int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
+				return a.prepare(c, g, receiver, name, index, ms, due)
+			})
+			_, _, err = pipeline.Exec(ctx, r.logger, members...)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			if tc.stale || (!tc.sendResolved && tc.order == "R") {
+				require.Empty(t, j.reserved)
+			}
+			if tc.want == "" {
+				require.Empty(t, calls)
+				require.Empty(t, j.claimed)
+				return
+			}
+			require.Len(t, calls, 1)
+			c := <-calls
+			require.Len(t, c.msg.Alerts, 1)
+			require.Equal(t, tc.want, c.msg.Alerts[0].Labels["host"])
+			require.Equal(t, []string{ids[tc.want]}, j.reserved)
+			require.Equal(t, j.reserved, j.claimed)
+			require.Equal(t, []string{"confirmed"}, j.settled)
+			if len(tc.order) == 2 {
+				wantTruncated := uint64(1)
+				if !tc.sendResolved {
+					wantTruncated = 0
+				}
+				require.Equal(t, wantTruncated, c.msg.TruncatedAlerts)
+				entries, err := r.notificationLog.Query(nflog.QGroupKey(gkey), nflog.QReceiver(recv))
+				require.NoError(t, err)
+				require.Len(t, entries, 1)
+				for _, m := range members {
+					if m.Resolved() {
+						require.Contains(t, entries[0].ResolvedAlerts, notify.HashAlert(m))
+					} else {
+						require.Contains(t, entries[0].FiringAlerts, notify.HashAlert(m))
+					}
+				}
+			}
+			if tc.canonical {
+				require.Len(t, c.msg.NativeDeliveries, 1)
+				require.Equal(t, "resolved", c.msg.NativeDeliveries[0].Delivery.State)
+				headers, err := alert.NativeDeliveryHeaders(c.raw, "team", alert.NativeCallbackPath, key)
+				require.NoError(t, err)
+				for k, v := range headers {
+					require.Equal(t, v, c.headers.Get(k))
+				}
+				if tc.first {
+					require.Equal(t, []string{"enroll", "reserve", "claim", "stamp"}, j.events)
+				}
+				if tc.managed {
+					require.Equal(t, "firing", c.msg.Alerts[0].Status)
+					require.Len(t, c.msg.Managed.Members, 1)
+				}
+			}
+		})
+	}
+}
+
+func TestOscarActionReloadChecksProposedCanonicalConfig(t *testing.T) {
 	r := newTestReloader(t)
 	t.Cleanup(func() { _ = r.stop() })
-	cfg, err := config.Load("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: http://example.invalid/notify\n")
-	require.NoError(t, err)
-	j := &terminalFixtureJournal{states: []string{"confirmed", "unknown", "confirmed"}}
-	r.actions = newNativeActions(nil, nil, r.logger)
-	r.actions.version = 1
-	require.NoError(t, r.actions.Bind(j))
-	require.NoError(t, r.reload(cfg))
-	g := r.actions.snapshot()
-	now := time.Now().UTC()
-	var members []*alert.Alert
-	var contacts []ordinaryContact
-	for _, host := range []string{"a", "b"} {
-		s := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "severity": "major", "host": model.LabelValue(host)}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
-		var p v2.EpisodeProjection
-		require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"lifecycle_seq":2,"state":"resolved","source_severity":"major"}`, s.Fingerprint().String(), s.StartsAt.Format(time.RFC3339Nano))), &p))
-		members = append(members, s)
-		contacts = append(contacts, ordinaryContact{p: p, contact: plannedContact{DispatchTarget: v2.DispatchTarget{ReceiverID: "team"}, integration: g.targets["team"][0]}})
+	dir := t.TempDir()
+	key := []byte(strings.Repeat("k", 32))
+	file := filepath.Join(dir, "callback")
+	bad := filepath.Join(dir, "wrong")
+	require.NoError(t, os.WriteFile(file, key, 0600))
+	require.NoError(t, os.WriteFile(bad, []byte(strings.Repeat("x", 32)), 0600))
+	a := newNativeActions(nil, key, r.logger)
+	a.version = 1
+	a.scheme = "http"
+	r.actions = a
+	require.NoError(t, a.Bind(&terminalFixtureJournal{}))
+	cfg := func(send bool, credential string) *config.Config {
+		c, err := config.Load(fmt.Sprintf("route:\n  receiver: team\nreceivers:\n- name: team\n  webhook_configs:\n  - url: http://alertmanager-middleware:9400%s\n    send_resolved: %t\n    http_config:\n      follow_redirects: false\n      authorization:\n        type: Bearer\n        credentials_file: %s\n", alert.NativeCallbackPath, send, credential))
+		require.NoError(t, err)
+		return c
 	}
-	route := g.routes.Match(members[0].Labels)[0]
-	ctx := notify.WithGroupKey(t.Context(), dispatch.GroupKeyForAlert(members[0], route))
-	// A nil provider traps an accidental call. Both receipts have already crossed the entry boundary.
-	i := notify.NewIntegration(nil, nil, "webhook", 0, "team")
-	v := r.actions.invoke(ctx, g, &i, members, contacts)
-	require.ErrorIs(t, v.Err(), actionHeld)
-	require.Equal(t, members, j.sources)
-	v = r.actions.invoke(ctx, g, &i, members[:1], contacts[:1])
-	require.NoError(t, v.Err())
+	require.NoError(t, r.reload(cfg(false, file)))
+	require.Nil(t, a.snapshot())
+	require.Nil(t, r.dispatcher.Load().Project)
+	require.NoError(t, r.reload(cfg(true, file)))
+	old := a.snapshot()
+	dispatcher := r.dispatcher.Load()
+	require.NotNil(t, old)
+	for _, invalid := range []*config.Config{cfg(false, file), cfg(true, bad)} {
+		require.Error(t, r.reload(invalid))
+		require.Same(t, old, a.snapshot())
+		require.Same(t, dispatcher, r.dispatcher.Load())
+	}
 }

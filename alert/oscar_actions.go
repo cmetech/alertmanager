@@ -206,3 +206,13 @@ func (a *Alert) NotificationCopy(now time.Time) *Alert {
 	}
 	return &copy
 }
+
+// TerminalWireValid checks that the outgoing copy carries the original terminal observation.
+// A promoted managed clear can legitimately be firing on the wire until its native timeout.
+func (a *Alert) TerminalWireValid() bool {
+	source := a.ProviderSource()
+	if source.ManagedReceiver && source.ManagedOperationKind == "clear" && a.EndsAt.IsZero() {
+		return true
+	}
+	return !a.EndsAt.IsZero() && a.EndsAt.Equal(source.EndsAt) && source.Resolved()
+}

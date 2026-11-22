@@ -60,6 +60,7 @@ func CurrentProviderEntry(ctx context.Context) *ProviderEntry {
 type OrdinaryBatch struct {
 	Members    []*alert.Alert
 	WriteGroup bool
+	AllowLog   func() bool // A completely covered firing batch leaves the previous group clock in place.
 	Held       error
 	Invoke     func(context.Context, *Integration, []*alert.Alert) NotifyVerdict
 }

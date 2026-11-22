@@ -66,7 +66,7 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*a
 		return ctx, alerts, nil
 	}
 	batch, ordinary := ctx.Value(ordinaryBatchKey{}).(OrdinaryBatch)
-	if ordinary && !batch.WriteGroup {
+	if ordinary && (!batch.WriteGroup || batch.AllowLog != nil && !batch.AllowLog()) {
 		return ctx, alerts, batch.Held
 	}
 	gkey, ok := GroupKey(ctx)

@@ -213,51 +213,88 @@ func (o *nativeActionOwner) reconcileLocked(ctx context.Context, s *episodeSlot,
 	return "", false, localErr
 }
 func (o *nativeActionOwner) recoverEpisodes(ctx context.Context) error {
-	after := ""
-	for {
-		p := map[string]any{"projection": "membership", "limit": 100}
-		if after != "" {
-			p["after_id"] = after
+	o.mu.Lock()
+	epoch := o.lease.Epoch
+	o.mu.Unlock()
+	c := &o.bootCursor
+	if c.epoch != epoch {
+		c.epoch, c.activeAfter, c.keyAfter, c.activeDone, c.keysDone = epoch, "", "", false, false
+	}
+	if !c.activeDone {
+		const limit = 100
+		args := map[string]any{"projection": "episodes", "limit": limit}
+		if c.activeAfter != "" {
+			args["after_id"] = c.activeAfter
 		}
 		var rows []EpisodeProjection
-		if err := o.read(ctx, "recover", p, &rows); err != nil {
+		if err := o.read(ctx, "recover", args, &rows); err != nil {
 			return err
 		}
-		if rows == nil || len(rows) > 100 {
+		if rows == nil || len(rows) > limit {
 			return unavailable
 		}
-		if len(rows) == 0 {
-			o.mu.Lock()
-			var verify []*episodeSlot
-			if o.deferredRecovery {
-				for _, s := range o.byKey {
-					verify = append(verify, s)
-				}
-			}
-			o.mu.Unlock()
-			for _, s := range verify {
-				s.turn.Lock()
-				s.needsRestore = true
-				s.turn.Unlock()
-			}
-			return nil
-		}
-		for _, row := range rows {
-			if !managedUUID.MatchString(row.ID) || row.ID <= after {
+		for _, p := range rows {
+			if p.State != "firing" || !managedUUID.MatchString(p.ID) || p.ID <= c.activeAfter {
 				return reconcile
 			}
-			var err error
-			if row.State == "resolved" {
-				err = o.rememberTerminal(row)
-			} else {
-				err = o.restoreEpisode(row)
-			}
-			if err != nil {
+			if err := o.restoreEpisode(p); err != nil {
 				return err
 			}
-			after = row.ID
+			c.activeAfter = p.ID
+		}
+		c.activeDone = len(rows) < limit
+	}
+	if !c.keysDone {
+		const limit = 64
+		args := map[string]any{"projection": "membership", "limit": limit}
+		if c.keyAfter != "" {
+			args["after_key"] = c.keyAfter
+		}
+		var keys []string
+		if err := o.read(ctx, "recover", args, &keys); err != nil {
+			return err
+		}
+		if keys == nil || len(keys) > limit {
+			return unavailable
+		}
+		for _, key := range keys {
+			if key <= c.keyAfter {
+				return reconcile
+			}
+			var binding string
+			switch {
+			case nativeFingerprint.MatchString(key):
+				binding = sourceKey("", key)
+			case managedHash.MatchString(key):
+				binding = sourceKey(key, "")
+			default:
+				return reconcile
+			}
+			bucket, bit := membershipBit(binding)
+			o.mu.Lock()
+			o.terminalMembership[bucket] |= bit
+			o.mu.Unlock()
+			c.keyAfter = key
+		}
+		c.keysDone = len(keys) < limit
+	}
+	if !c.activeDone || !c.keysDone {
+		return unavailable
+	}
+	o.mu.Lock()
+	var verify []*episodeSlot
+	if o.deferredRecovery {
+		for _, slot := range o.byKey {
+			verify = append(verify, slot)
 		}
 	}
+	o.mu.Unlock()
+	for _, slot := range verify {
+		slot.turn.Lock()
+		slot.needsRestore = true
+		slot.turn.Unlock()
+	}
+	return nil
 }
 func (o *nativeActionOwner) operationPage(ctx context.Context, after string) ([]ActionResultV1, error) {
 	p := map[string]any{"projection": "operations", "limit": 32}
@@ -307,6 +344,7 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	if o.lease.Epoch != l.Epoch {
 		o.recovered = false
 		clear(o.membership[:])
+		clear(o.terminalMembership[:])
 		for key := range o.byKey {
 			bucket, bit := membershipBit(key)
 			o.membership[bucket] |= bit
@@ -320,7 +358,7 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	return nil
 }
 func (o *nativeActionOwner) validLease(l actionLease) bool {
-	return l.Protocol == "native-action-store-v1" && l.RecoverySelectors == 1 && l.AuthorityID == o.authority && l.OwnerID == o.owner && l.Epoch > 0 && l.RenewSeconds == 10 && !l.ExpiresAt.IsZero()
+	return l.Protocol == "native-action-store-v1" && l.RecoverySelectors == 1 && l.TerminalObservations == 2 && l.AuthorityID == o.authority && l.OwnerID == o.owner && l.Epoch > 0 && l.RenewSeconds == 10 && !l.ExpiresAt.IsZero()
 }
 
 // Drain observed changes even when an episode has no explicit operation or delivery pending.
@@ -448,16 +486,18 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 		}
 		if boot {
 			// A previous process may have resolved an episode absent from the firing scan.
-			o.mu.Lock()
-			oldSlots := make([]*episodeSlot, 0, len(o.byKey))
-			for _, slot := range o.byKey {
-				oldSlots = append(oldSlots, slot)
-			}
-			o.mu.Unlock()
-			for _, slot := range oldSlots {
-				slot.turn.Lock()
-				slot.uncertain = slot.projection.LifecycleSeq > 0
-				slot.turn.Unlock()
+			if o.bootCursor.epoch != lease.Epoch {
+				o.mu.Lock()
+				oldSlots := make([]*episodeSlot, 0, len(o.byKey))
+				for _, slot := range o.byKey {
+					oldSlots = append(oldSlots, slot)
+				}
+				o.mu.Unlock()
+				for _, slot := range oldSlots {
+					slot.turn.Lock()
+					slot.uncertain = slot.projection.LifecycleSeq > 0
+					slot.turn.Unlock()
+				}
 			}
 			if err := o.recoverEpisodes(ctx); err != nil {
 				continue

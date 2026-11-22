@@ -104,3 +104,16 @@ func TestOscarActionNotificationMemberPreservesProviderExpiry(t *testing.T) {
 	require.NotEqual(t, source.Fingerprint(), member.Fingerprint())
 	require.Equal(t, source.EndsAt, effective.NotificationCopy(source.EndsAt).EndsAt)
 }
+
+func TestTerminalWireMemberDistinguishesFlushFromExpiry(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	s := New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Second)}, now, false)
+	require.False(t, s.NotificationCopy(s.EndsAt.Add(-time.Nanosecond)).TerminalWireValid())
+	wire := s.NotificationCopy(now)
+	require.True(t, wire.TerminalWireValid())
+	wire.EndsAt = wire.EndsAt.Add(time.Nanosecond)
+	require.False(t, wire.TerminalWireValid())
+	s.ManagedReceiver, s.ManagedOperationKind = true, "clear"
+	require.True(t, s.NotificationCopy(s.EndsAt.Add(-time.Second)).TerminalWireValid())
+}

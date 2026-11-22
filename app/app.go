@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -384,6 +385,12 @@ func (a *App) setup() error {
 	actions, candidate := actionOwner.Dispatch.(*nativeActions)
 	if candidate && (!actionOwner.Enabled || actions == nil || actions.version != 1) {
 		actions, actionOwner.Dispatch = nil, nil
+	} else if actions != nil {
+		actions.key = slices.Clone(opts.ConversionCallbackKey)
+		actions.scheme, actions.caFile = actionOwner.Scheme, actionOwner.CAFile
+		if actions.scheme == "" {
+			actions.scheme = "https"
+		}
 	}
 	apih, err := api.New(api.Options{
 		Alerts:                     alerts,

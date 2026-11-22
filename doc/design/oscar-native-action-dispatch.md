@@ -59,9 +59,23 @@ carries a stable delivery UUID and ordinary lifecycle semantics. An independent
 firing action cannot use a terminal claim. The claim does not advance a repeat
 or reserve firing coverage.
 
-The backend pages firing and retained terminal identities at takeover. A
-bounded native membership summary selects an exact indexed read for a possible
-terminal interval. Uncommissioned adapters leave ordinary routing, inhibition
+At takeover the native owner pages firing projections and distinct retained
+source keys. Per-epoch cursors resume after transient failures. Each turn
+reads at most 100 firing projections and 64 distinct source keys, irrespective
+of each key's historical interval count. Ordinary entry requires complete
+recovery. A conservative membership hit selects the new indexed exact-interval
+lookup. The matching A2 schema upgrade and private lease marker
+`terminal_observations: 2` are required.
+
+Selection preserves ordinary input order. The native retry stage first applies
+send-resolved, then the action reader fixes the webhook prefix before any
+identity enrollment or reservation. The group log retains ordinary membership
+after a successful truncated send. Only members actually selected for
+provider entry receive a claim. Prior confirmed terminal contacts may be
+elided without admitting members beyond the original prefix. An ordinary
+firing copy cannot consume an expired source's clear. A pending reservation
+checks frozen source labels, annotations, generator URL, exact times, managed
+identity, and wire resolution state across retries and owner replacement. Uncommissioned adapters leave ordinary routing, inhibition
 and notification readers on the existing native pipeline. An active reader
 rejects a reload to unsupported destinations. The full transport set and the
 inhibition publication barrier remain prerequisites for commissioning.
