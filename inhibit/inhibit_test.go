@@ -803,3 +803,17 @@ func TestOscarActionUnresolvedOverflowIsPerRuleAndReleases(t *testing.T) {
 	require.False(t, ih.MayDependOnUnresolved(target, target.Fingerprint()))
 	require.Equal(t, maxUnresolvedPairs, ih.rules[0].unknown.count)
 }
+
+func TestOscarActionPredictedStatusUsesOriginalProviderIdentity(t *testing.T) {
+	rule := amcommoncfg.InhibitRule{SourceMatch: map[string]string{"severity": "critical"}, TargetMatch: map[string]string{"severity": "major"}, Equal: []string{"host"}}
+	i := NewInhibitor(nil, []amcommoncfg.InhibitRule{rule}, nopLogger, eventrecorder.NopRecorder())
+	now := time.Now()
+	makeMember := func(severity string) *alert.Alert {
+		return alert.New(model.Alert{Labels: model.LabelSet{"host": "h", "severity": model.LabelValue(severity)}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	}
+	major, minor, critical := makeMember("major"), makeMember("minor"), makeMember("critical")
+	i.UpdateProjection(major.Fingerprint(), critical)
+	i.UpdateProjection(minor.Fingerprint(), major)
+	require.True(t, i.MutesSource(t.Context(), major.LabelSet(), minor.Fingerprint()))
+	require.True(t, i.Mutes(WithProviderFingerprint(t.Context(), minor.Fingerprint()), major.LabelSet()))
+}

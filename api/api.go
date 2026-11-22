@@ -189,7 +189,10 @@ func (o Options) validate() error {
 
 // New creates a new API object combining all API versions. Note that an Update
 // call is also needed to get the APIs into an operational state.
-func New(opts Options) (*API, error) {
+func New(opts Options) (*API, error) { return NewWithActionDialer(opts, nil) }
+
+// NewWithActionDialer constructs the same API with an explicit private authority dialer.
+func NewWithActionDialer(opts Options, dial apiv2.ActionDialer) (*API, error) {
 	if err := opts.validate(); err != nil {
 		return nil, fmt.Errorf("invalid API options: %w", err)
 	}
@@ -216,7 +219,7 @@ func New(opts Options) (*API, error) {
 	if err := v2.InstallManagedOwner(opts.ManagedOwnerScheme, opts.ManagedOwnerCA, opts.ManagedOwnerKeyFile, opts.ConversionAdmissionKeys, opts.ConversionCallbackKey); err != nil {
 		return nil, err
 	}
-	if err := v2.InstallActionOwner(opts.ActionOwner); err != nil {
+	if err := v2.InstallActionOwner(opts.ActionOwner, dial); err != nil {
 		return nil, err
 	}
 	connect := apiconnect.NewAPI(effective.connect)
@@ -378,6 +381,7 @@ func (api *API) Update(cfg *config.Config, setAlertStatus func(ctx context.Conte
 // native paged alert view.
 type (
 	ActionOwnerConfig = apiv2.ActionOwnerConfig
+	ActionDialer      = apiv2.ActionDialer
 	TimingIntegration = apiv2.TimingIntegration
 	TimingLookupFunc  = apiv2.TimingLookupFunc
 )

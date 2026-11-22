@@ -52,13 +52,15 @@ import (
 // New wires every Alertmanager subsystem according to opts but does not
 // start serving HTTP yet. On error, partial setup is rolled back via the
 // same cleanup stack that Stop would drain on success.
-func New(opts Options) (*App, error) {
+func New(opts Options) (*App, error) { return newWithActionDialer(opts, nil) }
+
+func newWithActionDialer(opts Options, dial api.ActionDialer) (*App, error) {
 	a := &App{
 		opts:      opts,
 		serveErrc: make(chan error, 1),
 		webReload: make(chan chan error),
 	}
-	if err := a.setup(); err != nil {
+	if err := a.setup(dial); err != nil {
 		// Roll back partial setup (Stop is idempotent and nil-safe).
 		_ = a.Stop(context.Background())
 		return nil, err
@@ -196,7 +198,7 @@ type App struct {
 // stack drained in Stop.
 //
 //nolint:gocyclo // intentional, see comment above.
-func (a *App) setup() error {
+func (a *App) setup(dial api.ActionDialer) error {
 	opts := a.opts
 	if err := opts.validate(); err != nil {
 		return err
@@ -401,7 +403,7 @@ func (a *App) setup() error {
 	}
 
 	actionOwner, actions := configureNativeActions(opts, alerts.ReadActionSource, logger)
-	apih, err := api.New(api.Options{
+	apih, err := api.NewWithActionDialer(api.Options{
 		Alerts:                     alerts,
 		Silences:                   silences,
 		Peer:                       clusterPeer,
@@ -426,7 +428,7 @@ func (a *App) setup() error {
 		Registry:                reg,
 		RequestDuration:         m.requestDuration,
 		GroupFunc:               groupFn,
-	})
+	}, dial)
 	if err != nil {
 		return fmt.Errorf("failed to create API: %w", err)
 	}
@@ -491,6 +493,7 @@ func (a *App) setup() error {
 	// at shutdown. The long-lived singletons above are updated in place
 	// (apih.Update, eventRec/tracing ApplyConfig) rather than rebuilt.
 	r = &reloader{
+		actionDial:                  dial,
 		actions:                     actions,
 		alerts:                      alerts,
 		apih:                        apih,

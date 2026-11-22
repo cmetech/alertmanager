@@ -61,6 +61,12 @@ func TestOscarActionPrivateWebhook(t *testing.T) {
 	conf.HTTPConfig.TLSConfig.CAFile = ""
 	_, err = makeRequest()
 	require.NoError(t, err)
+	// A compacted cohort must index the exact body after covered/held
+	// siblings were removed. A member cannot borrow a neighboring receipt.
+	members[0], members[1] = members[1], members[0]
+	_, err = makeRequest()
+	require.Error(t, err)
+	members[0], members[1] = members[1], members[0]
 	conf.URL = "https://alertmanager-middleware:9400" + alert.NativeCallbackPath
 	conf.HTTPConfig.TLSConfig.CAFile = "/home/ssl/ca.pem"
 	conf.HTTPConfig.TLSConfig.InsecureSkipVerify = false

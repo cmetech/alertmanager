@@ -4,10 +4,20 @@ The existing disabled-by-default OSCAR action option installs the native reader
 through the normal app factory. A compatible private authority lease, recovered
 membership and a published configuration generation are prerequisites for
 version 1. A graph containing any canonical callback additionally requires
-`native_delivery_receipts: 1` in the authenticated acquire/renew response.
-B2 owns that assertion and must implement durable signed receipt recovery before
+`ordinary_cohort: 1` and `native_delivery_receipts: 1` in the authenticated acquire/renew response.
+B2 owns the receipt assertion and must implement durable signed receipt recovery before
 advertising it. The current backend omits it. Direct-only graphs use their own
 route and store proof. B1/B2 commissioning and operator qualification are pending.
+
+The owner finishes enrollment and physical receiver planning before claiming a
+tracked firing group. The store admits up to 64 full-scope ordinary contacts per
+private command using the existing coverage, operation and target rows. Each
+operation has its own original token and 30-second permit. The native pipeline
+sends the retained group in its original order and settles the original tokens
+in bounded chunks. A lost admission reply permits only an indexed lookup of the
+original IDs. Entered or unknown coverage holds that member. Direct groups of
+tracked members use the cohort marker independently of B2. Untracked direct
+members use local entry passes.
 
 ## Resident recovery and capacity
 

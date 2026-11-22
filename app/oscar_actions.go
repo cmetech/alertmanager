@@ -525,6 +525,7 @@ func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id 
 }
 
 type ordinaryContact struct {
+	admission *v2.OrdinaryAdmission
 	legacy    bool
 	operation string
 	target    v2.TargetResult
@@ -560,7 +561,15 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			hold(m, actionHeld)
 			continue
 		}
-		p, pass, err := a.journal.InspectOrdinary(ctx, source)
+		var p *v2.EpisodeProjection
+		var pass *v2.OrdinaryPass
+		var err error
+		if a.recovery != nil && (!i.canonical || g.callbackCommissioned()) {
+			p = a.publishedFiring(g, source)
+		}
+		if p == nil {
+			p, pass, err = a.journal.InspectOrdinary(ctx, source)
+		}
 		if err != nil {
 			hold(m, err)
 			continue
@@ -672,9 +681,58 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			candidates = retained
 		}
 		ctx = context.WithValue(notify.ForMembers(ctx, candidates), batchDestinationKey{}, &batchDestination{config: i.digest, members: candidates})
+		cohort, canBatch := a.journal.(v2.OrdinaryCohortJournal)
+		var requests []v2.OrdinaryCandidate
+		if canBatch && (i.canonical && g.callbackCommissioned() || !i.canonical && len(candidates) > 1) {
+			// Finish enrollment/routing for the complete physical group before
+			// asking the authority for any finite firing permit.
+			for _, m := range candidates {
+				if !i.canonical && contacts[m].p.State != "firing" {
+					continue
+				}
+				c, err := a.planOrdinary(ctx, g, m, contacts[m])
+				if err != nil {
+					hold(m, err)
+					delete(contacts, m)
+					continue
+				}
+				if c.p.State == "firing" && c.pass == nil {
+					contacts[m] = c
+					requests = append(requests, v2.OrdinaryCandidate{Canonical: i.canonical, Member: m, Projection: c.p, Target: c.contact.DispatchTarget})
+				} else {
+					contacts[m] = c
+				}
+			}
+			var admissions []v2.OrdinaryAdmission
+			if len(requests) > 0 {
+				admissions = cohort.AdmitCohort(ctx, requests)
+			}
+			for n, request := range requests {
+				m := request.Member
+				if n >= len(admissions) || admissions[n].Err != nil || !admissions[n].Covered && admissions[n].Entry == nil {
+					hold(m, actionHeld)
+					delete(contacts, m)
+					continue
+				}
+				if admissions[n].Covered {
+					delete(contacts, m)
+					continue
+				}
+				c := contacts[m]
+				c.admission = &admissions[n]
+				c.target = v2.TargetResult{Target: request.Target, TargetKey: admissions[n].TargetKey, State: "pending"}
+				contacts[m] = c
+			}
+		}
 		for _, m := range candidates {
-			c := contacts[m]
-			c, err := a.ordinaryContact(ctx, g, m, c)
+			c, exists := contacts[m]
+			if !exists {
+				continue
+			}
+			var err error
+			if c.admission == nil {
+				c, err = a.ordinaryContact(ctx, g, m, c)
+			}
 			if err != nil {
 				if err.Error() != "NATIVE_SUPPRESSED" {
 					hold(m, err)
@@ -699,6 +757,15 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			if i.prepared != nil && len(pending) != len(candidates) {
 				// A reserve CAS raced with inspection. Keep the original pending
 				// targets and rerender eligibility on the next native flush.
+				var receipts []v2.OrdinaryReceipt
+				for _, c := range entries {
+					if c.admission != nil {
+						receipts = append(receipts, v2.OrdinaryReceipt{Entry: c.admission.Entry, Outcome: "no_effect", Evidence: "FENCED_BEFORE_PROVIDER_ENTRY"})
+					}
+				}
+				if len(receipts) > 0 {
+					_ = cohort.SettleCohort(ctx, receipts)
+				}
 				return notify.Unrecoverable(actionHeld, notify.DefaultReason)
 			}
 			v, delivered, noSend := a.invoke(ctx, g, integration, pending, entries, truncated)
@@ -757,13 +824,34 @@ func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i act
 	for range 16 {
 		probe := context.WithValue(notify.ForMembers(ctx, members), batchDestinationKey{}, &batchDestination{config: i.digest, members: members})
 		due := make([]*alert.Alert, 0, len(members))
+		planned := make([]*alert.Alert, 0, len(members))
+		var requests []v2.OrdinaryCandidate
+		cohort, batched := a.journal.(v2.OrdinaryCohortJournal)
 		for _, m := range members {
-			c := contacts[m]
-			c, err := a.planOrdinary(probe, g, m, c)
+			c, err := a.planOrdinary(probe, g, m, contacts[m])
 			if err != nil {
 				hold(m, err)
 				continue
 			}
+			planned = append(planned, m)
+			contacts[m] = c
+			if _, cached := cache[observation{m, c.contact.IntegrationDigest}]; batched && !cached && c.p.State == "firing" && c.pass == nil {
+				requests = append(requests, v2.OrdinaryCandidate{Canonical: i.canonical, Member: m, Projection: c.p, Target: c.contact.DispatchTarget})
+			}
+		}
+		if len(requests) > 0 {
+			states := cohort.InspectCohort(probe, requests)
+			for n, request := range requests {
+				state := "held"
+				if n < len(states) {
+					state = states[n]
+				}
+				cache[observation{request.Member, request.Target.IntegrationDigest}] = state
+			}
+		}
+		for _, m := range planned {
+			c := contacts[m]
+			var err error
 			if c.pass != nil {
 				due = append(due, m)
 				contacts[m] = c
@@ -918,6 +1006,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		defer cancel()
 		var accepted []*alert.Alert
 		var settlement error
+		var cohortReceipts []v2.OrdinaryReceipt
 		for x, c := range contacts {
 			outcome, evidence := "no_effect", "FENCED_BEFORE_PROVIDER_ENTRY"
 			if entered[x] {
@@ -935,10 +1024,15 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 			if acquired[x] {
 				c.pass.Finish(!entered[x] || v.Err() == nil)
 			}
-			if e := claimed[x]; e != nil {
+			if c.admission != nil {
+				cohortReceipts = append(cohortReceipts, v2.OrdinaryReceipt{Entry: c.admission.Entry, Outcome: outcome, Evidence: evidence})
+			} else if e := claimed[x]; e != nil {
 				_, err := a.journal.Settle(late, e, outcome, evidence)
 				settlement = errors.Join(settlement, err)
 			}
+		}
+		if len(cohortReceipts) > 0 {
+			settlement = errors.Join(settlement, a.journal.(v2.OrdinaryCohortJournal).SettleCohort(ctx, cohortReceipts))
 		}
 		if settlement != nil {
 			v = notify.Unrecoverable(settlement, notify.DefaultReason)
@@ -948,6 +1042,15 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 	for x, c := range contacts {
 		s := members[x].ProviderSource()
 		var entry v2.Entry
+		if c.admission != nil {
+			claimed[x] = c.admission.Entry
+			bound.RequireContent = true
+			if c.contact.integration.canonical {
+				bound.Members = append(bound.Members, alert.NativeDeliveryMember{Index: x, Delivery: c.admission.Delivery})
+				bound.Key = a.key
+			}
+			continue
+		}
 		if c.operation != "" {
 			e, err := a.journal.Claim(ctx, c.operation, c.target.TargetKey)
 			if err != nil {
@@ -1002,8 +1105,12 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		prepared = true
 		return true
 	}
+	cohortIssued := slices.ContainsFunc(contacts, func(c ordinaryContact) bool { return c.admission != nil })
 	check := func(commit bool) bool {
 		if !prepared || len(active) == 0 || ctx.Err() != nil || g != a.snapshot() {
+			return false
+		}
+		if cohortIssued && !a.journal.(v2.OrdinaryCohortJournal).CohortReady() {
 			return false
 		}
 		for x, e := range claimed {
@@ -1077,23 +1184,41 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 				return false
 			}
 		}
+		fence := entryTransition{ctx: ctx}
 		now := time.Now()
 		for x, c := range contacts {
 			m := members[x]
-			if active[m] && c.pass != nil && (m.ResolvedAt(now) != m.ProviderSource().ResolvedAt(now) || m.ResolvedAt(now) && !m.TerminalWireValid()) {
-				return false
+			if !active[m] {
+				continue
 			}
-		}
-		if ctx.Err() != nil || g != a.snapshot() {
-			return false
-		}
-		return a.finalPublication(g, members, contacts, active, func() {
-			if commit {
-				for x, m := range members {
-					entered[x] = entered[x] || active[m]
+			s := m.ProviderSource()
+			if c.pass != nil {
+				if m.ResolvedAt(now) != s.ResolvedAt(now) || m.ResolvedAt(now) && !m.TerminalWireValid() {
+					return false
 				}
+			} else {
+				until, current := claimed[x].EntryFence()
+				if until.IsZero() || current == nil || c.p.State == "firing" && s.ResolvedAt(now) {
+					return false
+				}
+				fence.limit(until)
+				fence.witnesses = append(fence.witnesses, current)
 			}
-		})
+			if !s.ResolvedAt(now) {
+				fence.limit(s.EndsAt)
+			}
+			if !m.ResolvedAt(now) {
+				fence.limit(m.EndsAt)
+			}
+		}
+		nextEntered := entered
+		if commit {
+			nextEntered = slices.Clone(entered)
+			for x, m := range members {
+				nextEntered[x] = nextEntered[x] || active[m]
+			}
+		}
+		return a.finalPublication(g, members, contacts, active, fence, func() { entered = nextEntered })
 	}
 	bound.Check = func() bool { return check(false) }
 	bound.Begin = func() bool { return check(true) }

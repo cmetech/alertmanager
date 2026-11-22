@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -151,6 +152,7 @@ type actionIntent struct {
 	Result                 ActionResultV1  `json:"result"`
 }
 type actionLease struct {
+	OrdinaryCohort         json.RawMessage `json:"ordinary_cohort"`
 	NativeDeliveryReceipts json.RawMessage `json:"native_delivery_receipts"`
 	RecipientBinding       int             `json:"recipient_binding"`
 	RecipientKey           string          `json:"recipient_key"`
@@ -499,25 +501,31 @@ func sourceSeverity(a *alert.Alert, state string) string {
 	return sev
 }
 
-func (o *nativeActionOwner) nextUpdate(prev EpisodeProjection, e actionEvent) (episodeUpdate, error) {
-	a := e.source
-	u := prev.episodeUpdate
-	v := variantOf(a)
-	state := "firing"
-	if e.closed {
+func observationIdentity(a *alert.Alert, closed bool) (state, severity string, m *sourceOwner, err error) {
+	state = "firing"
+	if closed {
 		state = "resolved"
 	}
-	severity := sourceSeverity(a, state)
-	if firingRanks[severity] == 0 && !(severity == "cleared" && state == "resolved") {
-		return u, unverified
+	severity = sourceSeverity(a, state)
+	if firingRanks[severity] == 0 && !(severity == "cleared" && closed) {
+		return "", "", nil, unverified
 	}
-	var m *sourceOwner
 	if a.ManagedReceiver {
 		member := a.ManagedMember
 		if !managedHash.MatchString(member.Episode) || member.Generation <= 0 || !managedUUID.MatchString(member.Event) || !managedHash.MatchString(member.Digest) || a.ManagedOperationKind != "raise" && a.ManagedOperationKind != "update" && a.ManagedOperationKind != "clear" {
-			return u, unverified
+			return "", "", nil, unverified
 		}
 		m = &sourceOwner{member.Episode, member.Generation}
+	}
+	return state, severity, m, nil
+}
+
+func (o *nativeActionOwner) nextUpdate(prev EpisodeProjection, e actionEvent) (episodeUpdate, error) {
+	u := prev.episodeUpdate
+	v := variantOf(e.source)
+	state, severity, m, err := observationIdentity(e.source, e.closed)
+	if err != nil {
+		return u, err
 	}
 	if u.LifecycleSeq == 0 {
 		u = episodeUpdate{EpisodeRef: EpisodeRef{AuthorityID: o.authority, EpisodeID: uuid.NewString(), Generation: 1, VariantRevision: 1}, NativeVariant: v, ActiveSince: v.StartsAt}
@@ -1424,7 +1432,9 @@ func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) 
 }
 
 // InstallActionOwner installs the private command guard outside the existing mutation guards.
-func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
+type ActionDialer = func(context.Context, string, string) (net.Conn, error)
+
+func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) error {
 	if !c.Enabled {
 		api.Handler = actionRoutes(api.Handler, nil, nil, func() bool { return false })
 		return nil
@@ -1432,6 +1442,9 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
 	if err != nil {
 		return err
+	}
+	if len(dial) > 0 && dial[0] != nil {
+		client.http.Transport.(*http.Transport).DialContext = dial[0]
 	}
 	keys := map[string][]byte{}
 	used := map[string]bool{client.token: true}

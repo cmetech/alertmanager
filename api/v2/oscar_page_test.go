@@ -22,6 +22,7 @@ import (
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/config"
+	"github.com/prometheus/alertmanager/dispatch"
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/inhibit"
 	"github.com/prometheus/alertmanager/labelset"
@@ -414,6 +415,100 @@ func TestLegacyAlertsReloadKeepsRouteAndStatusTogether(t *testing.T) {
 			require.Equal(t, "new", row.Receivers[0].Name)
 			require.Equal(t, "active", row.Status.State, row.Labels)
 			require.Empty(t, row.Status.InhibitedBy)
+		}
+	}
+}
+
+type readFloorFixture struct {
+	testActionDispatch
+	views map[model.Fingerprint]*alert.Alert
+}
+
+func (f readFloorFixture) ReadView(s *alert.Alert) *alert.Alert {
+	return f.views[s.ProviderSource().Fingerprint()]
+}
+
+func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T) {
+	store, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	t.Cleanup(store.Close)
+	cfg, err := config.Load("route:\n  receiver: team\nreceivers:\n- name: team\ninhibit_rules:\n- source_matchers: ['severity=critical']\n  target_matchers: ['severity=major']\n  equal: [host]\n")
+	require.NoError(t, err)
+	i := inhibit.NewInhibitor(store, cfg.InhibitRules, promslog.NewNopLogger(), eventrecorder.NopRecorder())
+	now := time.Now()
+	f := readFloorFixture{views: map[model.Fingerprint]*alert.Alert{}}
+	var target *alert.Alert
+	for n, severity := range []string{"major", "minor"} {
+		s := alert.New(model.Alert{Labels: model.LabelSet{"host": "h", "severity": model.LabelValue(severity)}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+		require.NoError(t, store.Put(t.Context(), s))
+		ref := EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: fmt.Sprintf("00000000-0000-4000-8000-%012d", n+1), Generation: 1, VariantRevision: 1}
+		view, err := alert.BuildDispatchView(s, ref, []string{"critical", "major"}[n], 1)
+		require.NoError(t, err)
+		effective := view.NotificationMember()
+		i.UpdateProjection(s.Fingerprint(), effective)
+		f.views[s.Fingerprint()] = effective
+		if n == 1 {
+			target = effective
+		}
+	}
+	groups := func(ctx context.Context, _ func(*dispatch.Route) bool, filter dispatch.AlertFilter) (dispatch.AlertGroups, map[model.Fingerprint][]string, error) {
+		group := &dispatch.AlertGroup{Receiver: "team", AlertStatuses: map[model.Fingerprint]alert.AlertStatus{}}
+		receivers := map[model.Fingerprint][]string{}
+		for fp, m := range f.views {
+			if status, keep := filter(m, now); keep {
+				group.Alerts = append(group.Alerts, m)
+				group.AlertStatuses[fp] = status
+				receivers[fp] = []string{"team"}
+			}
+		}
+		return dispatch.AlertGroups{group}, receivers, nil
+	}
+	api, err := NewAPI(store, groups, nil, nil, promslog.NewNopLogger(), prometheus.NewRegistry())
+	require.NoError(t, err)
+	api.actionOwner = &nativeActionOwner{dispatch: f}
+	api.Update(cfg, func(ctx context.Context, l labelset.LabelSet) { i.Mutes(ctx, l) })
+	api.PublishTiming(cfg, map[string][]TimingIntegration{"team": {{Name: "webhook"}}}, timingMuter{}, nil)
+	require.True(t, i.HasInhibitor(target.Labels, target.ProviderSource().Fingerprint()))
+	for _, path := range []string{"/api/v2/alerts", "/api/v2/alerts/groups", "/api/v2/oscar/alerts/page"} {
+		w := httptest.NewRecorder()
+		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		require.Equal(t, 200, w.Code)
+		var body any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		var walk func(any)
+		found := false
+		walk = func(x any) {
+			switch v := x.(type) {
+			case []any:
+				for _, item := range v {
+					walk(item)
+				}
+			case map[string]any:
+				if labels, ok := v["labels"].(map[string]any); ok && labels["severity"] == "major" {
+					status, ok := v["status"].(map[string]any)
+					if ok {
+						require.Equal(t, "suppressed", status["state"])
+						require.NotEmpty(t, status["inhibitedBy"])
+						found = true
+					}
+				}
+				for _, child := range v {
+					walk(child)
+				}
+			}
+		}
+		walk(body)
+		require.True(t, found, path)
+		if strings.HasSuffix(path, "/page") {
+			var page struct {
+				Timing map[string]struct {
+					Schedules []struct{ State string } `json:"repeat_schedules"`
+				} `json:"timing_by_fingerprint"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+			steps := page.Timing[target.ProviderSource().Fingerprint().String()].Schedules
+			require.Len(t, steps, 1)
+			require.Equal(t, "suppressed", steps[0].State)
 		}
 	}
 }

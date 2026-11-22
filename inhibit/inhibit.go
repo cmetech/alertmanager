@@ -192,10 +192,21 @@ func (ih *Inhibitor) Stop() {
 	}
 }
 
+type providerFingerprintKey struct{}
+
+// WithProviderFingerprint preserves the original identity when predicting status for an effective view.
+func WithProviderFingerprint(ctx context.Context, fp model.Fingerprint) context.Context {
+	return context.WithValue(ctx, providerFingerprintKey{}, fp)
+}
+
 // Mutes returns true iff the given label set is muted.  It implements the
 // Muter interface.
 func (ih *Inhibitor) Mutes(ctx context.Context, lset labelset.LabelSet) bool {
-	return ih.MutesSource(ctx, lset, lset.Fingerprint())
+	fp, ok := ctx.Value(providerFingerprintKey{}).(model.Fingerprint)
+	if !ok {
+		fp = lset.Fingerprint()
+	}
+	return ih.MutesSource(ctx, lset, fp)
 }
 
 // MutesSource excludes the same provider member even when its routing labels changed.

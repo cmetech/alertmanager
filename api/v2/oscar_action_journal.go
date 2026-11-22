@@ -44,6 +44,7 @@ type Entry interface {
 	ForMember(*alert.Alert) bool
 	Valid() bool
 	LocalValid() bool
+	EntryFence() (time.Time, func() bool)
 	LogicalActionID() string
 }
 
@@ -57,6 +58,7 @@ type claimedEntry struct {
 	logicalID                     *string
 	target                        DispatchTarget
 	expires                       time.Time
+	stamp                         *atomic.Bool
 	valid                         func() bool
 	ready                         func() bool
 }
@@ -80,6 +82,14 @@ func (e claimedEntry) ForMember(m *alert.Alert) bool {
 		return m.TerminalWireValid() && m.Resolved() == e.terminal.WireResolved
 	}
 	return !m.Resolved() && string(m.Labels["severity"]) == e.severity
+}
+
+// EntryFence can be evaluated under the publication lock without taking an owner lock.
+func (e claimedEntry) EntryFence() (time.Time, func() bool) {
+	if e.stamp == nil {
+		return time.Time{}, nil
+	}
+	return e.expires, e.stamp.Load
 }
 
 func (e claimedEntry) Valid() bool { return (e.ready == nil || e.ready()) && e.LocalValid() }
@@ -427,7 +437,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 		}
 		logical = &i.LogicalActionID
 	}
-	e := claimedEntry{OperationID: id, TargetKey: key, token: entry.Token, source: source, severity: p.EffectiveSeverity(), terminal: ordinary.Terminal, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, ready: o.ready, valid: func() bool {
+	e := claimedEntry{OperationID: id, TargetKey: key, token: entry.Token, source: source, severity: p.EffectiveSeverity(), terminal: ordinary.Terminal, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, stamp: stamp, ready: o.ready, valid: func() bool {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		return atIssue && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && stamp.Load() && (ordinary.Terminal != nil || !source.Resolved())

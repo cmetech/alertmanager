@@ -298,11 +298,9 @@ func (o *nativeActionOwner) drainHandoff(ctx context.Context) bool {
 		return true
 	}
 	if s.projection.ID == "" {
-		s.projection = *p
-		s.needsRestore = false
-		o.mu.Lock()
-		o.byID[p.EpisodeRef.EpisodeID] = s
-		o.mu.Unlock()
+		if err := o.restoreIndexed(ctx, s, *p, first); err != nil {
+			return true
+		}
 	}
 	o.sweepSlot(ctx, key, s)
 	return true

@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	commoncfg "github.com/prometheus/common/config"
 	"log/slog"
 	"net/url"
 	"sync/atomic"
@@ -55,7 +56,8 @@ import (
 // (stop old, build new, start + wait-for-loading, then publish) — in one
 // cohesive, independently testable place.
 type reloader struct {
-	actions *nativeActions
+	actionDial api.ActionDialer
+	actions    *nativeActions
 	// Long-lived components: created once during startup.
 	alerts            provider.Alerts
 	apih              *api.API
@@ -140,7 +142,11 @@ func (r *reloader) reload(conf *config.Config) error {
 			configLogger.Info("skipping creation of receiver not referenced by any route", "receiver", rcv.Name)
 			continue
 		}
-		integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, r.logger)
+		var opts []commoncfg.HTTPClientOption
+		if r.actionDial != nil {
+			opts = append(opts, commoncfg.WithDialContextFunc(r.actionDial))
+		}
+		integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, r.logger, opts...)
 		if err != nil {
 			return err
 		}

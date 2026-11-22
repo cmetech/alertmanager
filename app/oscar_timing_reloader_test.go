@@ -312,7 +312,10 @@ type fixturePermit struct{ source *alert.Alert }
 func (e fixturePermit) ForMember(m *alert.Alert) bool { return m.ProviderSource() == e.source }
 func (fixturePermit) Valid() bool                     { return true }
 func (fixturePermit) LogicalActionID() string         { return "" }
-func (fixturePermit) LocalValid() bool                { return true }
+func (fixturePermit) EntryFence() (time.Time, func() bool) {
+	return time.Now().Add(time.Hour), func() bool { return true }
+}
+func (fixturePermit) LocalValid() bool { return true }
 
 type terminalFixtureJournal struct {
 	v2.ActionJournal
@@ -1368,4 +1371,65 @@ func TestPersistentResolutionHoldPreservesProgressAndFiringRepeat(t *testing.T) 
 	}
 	require.True(t, stamps[len(stamps)-1].After(stamps[1]))
 	require.Equal(t, []string{"confirmed", "confirmed", "confirmed"}, j.settled)
+}
+
+type lastTransitionPermit struct {
+	fixturePermit
+	gate *nativeActions
+}
+
+func (e *lastTransitionPermit) EntryFence() (time.Time, func() bool) {
+	// A graph writer already owns the publication lock. The original permit
+	// expires while the provider is waiting to perform its last local transition.
+	e.gate.mu.Lock()
+	end := time.Now().Add(15 * time.Millisecond)
+	go func() { <-time.After(time.Until(end)); e.gate.mu.Unlock() }()
+	return end, func() bool { return true }
+}
+
+type lastTransitionJournal struct {
+	terminalFixtureJournal
+	permit   *lastTransitionPermit
+	original v2.Entry
+}
+
+func (j *lastTransitionJournal) Claim(context.Context, string, string) (v2.Entry, error) {
+	return j.permit, nil
+}
+func (j *lastTransitionJournal) Settle(_ context.Context, e v2.Entry, outcome, _ string) (v2.ActionResultV1, error) {
+	j.original = e
+	j.settled = append(j.settled, outcome)
+	return v2.ActionResultV1{}, nil
+}
+
+func TestOscarActionOriginalClaimExpiresWaitingForFinalPublication(t *testing.T) {
+	var writes atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { writes.Add(1) }))
+	defer sink.Close()
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	file := filepath.Join(t.TempDir(), "url")
+	require.NoError(t, os.WriteFile(file, []byte(sink.URL), 0600))
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\nreceivers:\n- name: team\n  webhook_configs:\n  - url_file: %s\n", file))
+	require.NoError(t, err)
+	a := newNativeActions(nil, nil, r.logger)
+	r.actions = a
+	now := time.Now()
+	s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	p := restoredFixture(t, s)
+	p.Floor = ""
+	j := &lastTransitionJournal{permit: &lastTransitionPermit{fixturePermit{s}, a}}
+	require.NoError(t, a.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	g := a.snapshot()
+	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, s)
+	cs, err := g.contacts(ctx, s, p, nil)
+	require.NoError(t, err)
+	require.Len(t, cs, 1)
+	c := cs[0]
+	v, _, _ := a.invoke(ctx, g, c.integration.prepared, []*alert.Alert{s.NotificationCopy(now)}, []ordinaryContact{{p: p, contact: c, operation: "selected", target: v2.TargetResult{Target: c.DispatchTarget, TargetKey: "original"}}}, 0)
+	require.Error(t, v.Err())
+	require.Zero(t, writes.Load())
+	require.Same(t, j.permit, j.original)
+	require.Equal(t, []string{"no_effect"}, j.settled)
 }

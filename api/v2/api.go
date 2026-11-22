@@ -53,6 +53,7 @@ import (
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
 	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/inhibit"
 	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/marker"
 	"github.com/prometheus/alertmanager/matcher/compat"
@@ -680,6 +681,7 @@ func (api *API) getAlertGroupsHandler(params alertgroup_ops.GetAlertGroupsParams
 // from the read path.
 func predictAlertStatus(ctx context.Context, setAlertStatus setAlertStatusFn, a *alert.Alert) alert.AlertStatus {
 	var c statusCollector
+	ctx = inhibit.WithProviderFingerprint(ctx, a.ProviderSource().Fingerprint())
 	setAlertStatus(marker.WithContext(ctx, &c), a.LabelSet())
 	return c.status()
 }

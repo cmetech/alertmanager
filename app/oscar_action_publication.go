@@ -6,6 +6,7 @@ package app
 import (
 	"container/list"
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/alertmanager/alert"
@@ -15,14 +16,15 @@ import (
 // A resident follows one provider-owned pointer. The list is also the fair
 // recovery cursor. No historical rows or unbounded dirty-event queue are kept.
 type actionResident struct {
-	direct                 *v2.DirectContact
-	key                    string
-	source, routed         *alert.Alert
-	routedGeneration       uint64
-	order, revision, epoch uint64
-	unknown                bool
-	retry                  time.Time
-	place                  *list.Element
+	claim                               *atomic.Bool
+	direct                              *v2.DirectContact
+	key                                 string
+	source, routed                      *alert.Alert
+	routedGeneration                    uint64
+	order, revision, epoch, recordEpoch uint64
+	unknown                             bool
+	retry                               time.Time
+	place                               *list.Element
 }
 
 func residentKey(owner string, s *alert.Alert) string {
@@ -84,6 +86,48 @@ func (a *nativeActions) PublishedEpisode(s *alert.Alert, p v2.EpisodeProjection)
 	return ok && prior.p.EpisodeRef == p.EpisodeRef && prior.p.SeverityRevision == p.SeverityRevision && prior.p.LifecycleSeq == p.LifecycleSeq
 }
 
+func (a *nativeActions) publishedFiring(g *actionGraph, s *alert.Alert) *v2.EpisodeProjection {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.currentLocked(g, s) {
+		return nil
+	}
+	old, ok := a.sources[s.Fingerprint()]
+	if !ok || old.member.ProviderSource() != s || old.p.State != "firing" {
+		return nil
+	}
+	p := old.p
+	return &p
+}
+
+// FreezeEpisode issues a witness to this exact resident publication, including
+// projections restored directly from the index without a mutable episode slot.
+func (a *nativeActions) FreezeEpisode(s *alert.Alert, p v2.EpisodeProjection) *atomic.Bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.graph
+	if g == nil || !a.currentLocked(g, s) {
+		return nil
+	}
+	old, ok := a.sources[s.Fingerprint()]
+	if !ok || old.member.ProviderSource() != s || old.p.EpisodeRef != p.EpisodeRef || old.p.SeverityRevision != p.SeverityRevision || old.p.LifecycleSeq != p.LifecycleSeq {
+		return nil
+	}
+	r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+	if r.claim == nil {
+		r.claim = new(atomic.Bool)
+		r.claim.Store(true)
+	}
+	return r.claim
+}
+
+func (r *actionResident) invalidateClaim() {
+	if r.claim != nil {
+		r.claim.Store(false)
+		r.claim = nil
+	}
+}
+
 func (a *nativeActions) forgetLocked(source *alert.Alert) {
 	fp := source.Fingerprint()
 	if old, ok := a.sources[fp]; ok && old.member.ProviderSource() == source {
@@ -93,6 +137,7 @@ func (a *nativeActions) forgetLocked(source *alert.Alert) {
 }
 
 func (a *nativeActions) uncertainLocked(r *actionResident) {
+	r.invalidateClaim()
 	r.unknown = true
 	r.revision++
 	if g := a.graph; g != nil {
@@ -141,6 +186,7 @@ func (a *nativeActions) ObserveSource(owner string, source *alert.Alert, closed,
 		if closed && source != nil && source != previous {
 			return previous, nil
 		}
+		r.invalidateClaim()
 		a.forgetLocked(previous)
 		if g := a.graph; g != nil {
 			g.inhibitor.UpdateUnresolved(previous.Fingerprint(), nil)
@@ -401,7 +447,20 @@ func (a *nativeActions) recoverOne(g *actionGraph) bool {
 	return true
 }
 
-func (a *nativeActions) installMemberLocked(g *actionGraph, r *actionResident, p *v2.EpisodeProjection, member *alert.Alert) {
+func (a *nativeActions) installMemberLocked(g *actionGraph, r *actionResident, p *v2.EpisodeProjection, member *alert.Alert) bool {
+	if old, ok := a.sources[r.source.Fingerprint()]; ok && old.member.ProviderSource() == r.source && r.recordEpoch == g.epoch {
+		if p == nil || old.p.EpisodeRef.EpisodeID != p.EpisodeRef.EpisodeID || old.p.EpisodeRef.Generation > p.EpisodeRef.Generation ||
+			old.p.EpisodeRef.Generation == p.EpisodeRef.Generation && (old.p.EpisodeRef.VariantRevision > p.EpisodeRef.VariantRevision ||
+				old.p.LifecycleSeq > p.LifecycleSeq || old.p.SeverityRevision > p.SeverityRevision ||
+				old.p.SeverityRevision == p.SeverityRevision && old.p.Floor != p.Floor || old.p.LifecycleSeq == p.LifecycleSeq && old.p.State != p.State ||
+				old.p.State == "resolved" && p.State != "resolved") {
+			a.uncertainLocked(r)
+			r.retry = time.Now().Add(time.Second)
+			g.enqueue(r)
+			return false
+		}
+	}
+	r.invalidateClaim()
 	a.forgetLocked(r.source)
 	if e := g.queued[r]; e != nil {
 		g.dirty.Remove(e)
@@ -411,6 +470,7 @@ func (a *nativeActions) installMemberLocked(g *actionGraph, r *actionResident, p
 		pub := publishedMember{*p, member}
 		a.sources[r.source.Fingerprint()] = pub
 		a.episodes[p.EpisodeRef.EpisodeID] = pub
+		r.recordEpoch = g.epoch
 	}
 	g.inhibitor.UpdateUnresolved(r.source.Fingerprint(), nil)
 	if p != nil && p.State == "resolved" {
@@ -425,6 +485,7 @@ func (a *nativeActions) installMemberLocked(g *actionGraph, r *actionResident, p
 	g.dispatcher.ReplaceProjection(g.ctx, old, member)
 	r.routed, r.routedGeneration, r.unknown, r.epoch = member, g.generation, false, g.epoch
 	r.revision++
+	return true
 }
 
 // A journal turn pins the graph and epoch before any blocking work. The
@@ -449,7 +510,7 @@ func (a *nativeActions) publishResident(ctx context.Context, p v2.EpisodeProject
 		return actionHeld
 	}
 	if old, ok := a.sources[source.Fingerprint()]; ok && old.member.ProviderSource() == source {
-		if old.p.EpisodeRef == p.EpisodeRef && old.p.SeverityRevision == p.SeverityRevision && old.p.LifecycleSeq == p.LifecycleSeq && !r.unknown && r.routedGeneration == g.generation && r.epoch == epoch {
+		if old.p.EpisodeRef == p.EpisodeRef && old.p.SeverityRevision == p.SeverityRevision && old.p.Floor == p.Floor && old.p.State == p.State && old.p.LifecycleSeq == p.LifecycleSeq && !r.unknown && r.routedGeneration == g.generation && r.epoch == epoch {
 			return nil
 		}
 		if old.p.EpisodeRef.Generation > p.EpisodeRef.Generation || old.p.EpisodeRef == p.EpisodeRef && (old.p.LifecycleSeq > p.LifecycleSeq || old.p.SeverityRevision > p.SeverityRevision) {
@@ -460,7 +521,9 @@ func (a *nativeActions) publishResident(ctx context.Context, p v2.EpisodeProject
 	if err != nil {
 		return err
 	}
-	a.installMemberLocked(g, r, &p, member)
+	if !a.installMemberLocked(g, r, &p, member) {
+		return actionHeld
+	}
 	return nil
 }
 
@@ -472,16 +535,30 @@ func (g *actionGraph) callbackCommissioned() bool {
 	return receipts && g.supported
 }
 
+type entryTransition struct {
+	ctx       context.Context
+	deadline  time.Time
+	witnesses []func() bool
+}
+
+func (f *entryTransition) limit(t time.Time) {
+	if !t.IsZero() && (f.deadline.IsZero() || t.Before(f.deadline)) {
+		f.deadline = t
+	}
+}
+
 // finalPublication runs after blocking destination/claim checks. The successful
 // local entry and dependency check share the provider observer's publication lock.
-func (a *nativeActions) finalPublication(g *actionGraph, members []*alert.Alert, contacts []ordinaryContact, active map[*alert.Alert]bool, enter func()) bool {
+func (a *nativeActions) finalPublication(g *actionGraph, members []*alert.Alert, contacts []ordinaryContact, active map[*alert.Alert]bool, fence entryTransition, enter func()) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	var signed, legacy, cohortIssued bool
 	for i, m := range members {
 		if !active[m] {
 			continue
 		}
 		s, c := m.ProviderSource(), contacts[i]
+		cohortIssued = cohortIssued || c.admission != nil
 		if !a.currentLocked(g, s) {
 			return false
 		}
@@ -490,8 +567,9 @@ func (a *nativeActions) finalPublication(g *actionGraph, members []*alert.Alert,
 				return false
 			}
 		}
-		if c.contact.integration.canonical && g.callbackCommissioned() == c.legacy {
-			return false
+		if c.contact.integration.canonical {
+			signed = signed || !c.legacy
+			legacy = legacy || c.legacy
 		}
 		if a.recovery != nil && c.pass == nil {
 			pub, ok := a.sources[s.Fingerprint()]
@@ -512,6 +590,25 @@ func (a *nativeActions) finalPublication(g *actionGraph, members []*alert.Alert,
 				return false
 			}
 		}
+	}
+	for _, valid := range fence.witnesses {
+		if !valid() {
+			return false
+		}
+	}
+	if a.recovery != nil {
+		epoch, receipts := a.recovery.RecoveryState()
+		if epoch == 0 || epoch != g.epoch || signed && !(receipts && g.supported) || legacy && receipts && g.supported {
+			return false
+		}
+	} else if legacy {
+		return false
+	}
+	if cohortIssued && !a.journal.(v2.OrdinaryCohortJournal).CohortSupported() {
+		return false
+	}
+	if fence.ctx.Err() != nil || !fence.deadline.IsZero() && !time.Now().Before(fence.deadline) {
+		return false
 	}
 	enter()
 	return true

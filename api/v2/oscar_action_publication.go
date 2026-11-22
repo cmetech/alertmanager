@@ -44,6 +44,7 @@ type recoveredLease struct {
 	epoch    uint64
 	deadline time.Time
 	receipts bool
+	cohort   bool
 }
 
 func (o *nativeActionOwner) publishLeaseLocked() {
@@ -51,7 +52,7 @@ func (o *nativeActionOwner) publishLeaseLocked() {
 		o.publicLease.Store(nil)
 		return
 	}
-	o.publicLease.Store(&recoveredLease{o.lease.Epoch, o.lease.ExpiresAt, bytes.Equal(bytes.TrimSpace(o.lease.NativeDeliveryReceipts), []byte("1"))})
+	o.publicLease.Store(&recoveredLease{o.lease.Epoch, o.lease.ExpiresAt, bytes.Equal(bytes.TrimSpace(o.lease.NativeDeliveryReceipts), []byte("1")), bytes.Equal(bytes.TrimSpace(o.lease.OrdinaryCohort), []byte("1"))})
 }
 
 // RecoveryState is a local lock-free read, including when called under the
@@ -61,7 +62,13 @@ func (o *nativeActionOwner) RecoveryState() (uint64, bool) {
 	if l == nil || !l.deadline.After(time.Now()) {
 		return 0, false
 	}
-	return l.epoch, l.receipts
+	return l.epoch, l.receipts && l.cohort
+}
+
+// CohortSupported is independent of OSCAR callback receipt support.
+func (o *nativeActionOwner) CohortSupported() bool {
+	l := o.publicLease.Load()
+	return l != nil && l.cohort && l.deadline.After(time.Now())
 }
 
 // MayHaveEpisode supplies local negative evidence only after both indexed
@@ -193,8 +200,9 @@ func (o *nativeActionOwner) ClassifyResident(ctx context.Context, epoch uint64, 
 				return nil, reconcile
 			}
 			if s.projection.ID == "" {
-				s.projection = *p
-				s.needsRestore = false
+				if err := o.restoreIndexed(ctx, s, *p, a); err != nil {
+					return nil, err
+				}
 				s.local.Lock()
 				if len(s.pending) == 0 {
 					s.observeLocked(owner, a, false)
@@ -246,6 +254,12 @@ func (o *nativeActionOwner) sourceSlot(ctx context.Context, a *alert.Alert, enro
 				result = reconcile
 				return
 			}
+			if enroll && o.byKey[key] == nil {
+				if _, _, _, err := observationIdentity(a, a.Resolved() || a.ManagedOperationKind == "clear"); err != nil {
+					result = err
+					return
+				}
+			}
 			result = nil
 			s = o.slotLocked(key, true)
 			if s == nil {
@@ -287,16 +301,51 @@ func (o *nativeActionOwner) restoreCurrent(ctx context.Context, p EpisodeProject
 		return nil, reconcile
 	}
 	if s.projection.ID == "" {
-		if !sameResident(p, a) {
+		if err := o.restoreIndexed(ctx, s, p, a); err != nil {
+			return nil, err
+		}
+		if !sameResident(s.projection, a) {
 			return nil, reconcile
 		}
-		s.projection = p
-		s.needsRestore = false
-		o.mu.Lock()
-		o.byID[p.EpisodeRef.EpisodeID] = s
-		o.mu.Unlock()
 	}
 	return s, nil
+}
+
+// The selector is an identity hint only. A slot lifetime begins with its own
+// indexed read under the same turn that serializes durable projection changes.
+func (o *nativeActionOwner) restoreIndexed(ctx context.Context, s *episodeSlot, hint EpisodeProjection, source *alert.Alert) error {
+	before := s.latest()
+	var current *EpisodeProjection
+	if hint.State == "resolved" {
+		p, err := o.terminalCandidate(ctx, source)
+		if err != nil {
+			return err
+		}
+		current = p
+	} else {
+		rows, err := o.sourceRows(ctx, source.ManagedMember.Episode, source.Fingerprint().String())
+		if err != nil {
+			return err
+		}
+		if len(rows) == 1 {
+			current = &rows[0]
+		}
+	}
+	if current == nil || current.ID != hint.ID || !o.live(ctx) {
+		return reconcile
+	}
+	s.local.Lock()
+	usable := s.source == before && !s.detached && !s.overflow && !s.ambiguous
+	s.local.Unlock()
+	if !usable {
+		return reconcile
+	}
+	s.projection = *current
+	s.needsRestore = false
+	o.mu.Lock()
+	o.byID[current.EpisodeRef.EpisodeID] = s
+	o.mu.Unlock()
+	return nil
 }
 
 func (o *nativeActionOwner) residentEpisode(ctx context.Context, ref EpisodeRef) (*episodeSlot, error) {
