@@ -1,3 +1,7 @@
+## Unreleased — Managed timeout recovery
+
+- An expired managed raise or update can reach its signed terminal callback after its mutable episode slot is reclaimed. Alertmanager verifies the native variant and generation, then checks the promoted managed record before closing the interval and claiming the existing terminal receipt. Source `8da616f6` uses the current configuration and store schema. The feature defaults off and awaits runtime qualification.
+
 ## Unreleased — Native ordinary entry and terminal delivery
 
 - Alertmanager verifies each untracked direct or legacy callback's original resident token and issuing epoch at provider entry. When a tracked alert expires, the next due flush recovers its terminal receipt through the current slot or the indexed source.
