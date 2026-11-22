@@ -1,3 +1,9 @@
+## Unreleased — Native action recovery and commissioning
+
+- Alertmanager installs the dispatch adapter when the existing native action flag is enabled. Recovered severity drives routing, inhibition, templates and native reads. Possible inhibitors hold their matching dependents while the owner verifies current resident identity.
+- Up to 4,096 mutable episode slots serve a larger live alert population through indexed rehydration. Original-token settlement survives eviction and lease loss. Canonical commissioning requires the authenticated `native_delivery_receipts: 1` lease response from B2. Direct-only graphs retain their existing store and recipient-binding requirements. The stock private HTTP callback and verified HTTPS callback use scheme-specific TLS checks.
+- Source `889d7387` affects the native Alertmanager reader. The default stays disabled. There is no new schema migration or configuration value. B2 consumer commissioning and operator qualification are pending.
+
 ## Unreleased — Native action delivery transports
 
 - Dormant native dispatch now delivers outstanding incident.io group members when tracked or direct repeats fill a size-limited payload. The wire count includes members omitted for payload size and for `max_alerts`. The group log records the members actually delivered during recovery. Native implementation `f551a091` uses the existing store schema and configuration.
