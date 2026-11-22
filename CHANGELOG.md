@@ -1,5 +1,7 @@
 ## Unreleased — Native action delivery transports
 
+- The dormant native action reader now requires recipient-binding version 2. Incompatible renewals fence local delivery, and valid pending recipients can renew independently when a sibling's file is unavailable. Ordinary firing reservations bind the inspected lifecycle and severity. Partially acknowledged resolved groups retain their remaining work. Pair native implementation `997c7bc0` with OSCAR `3456c500f` and its authority migration before qualification.
+
 - Native transport review fixes preserve ordinary Telegram token redaction, validate direct expiry before later writes, and independently revalidate previously admitted recipients. Reduced groups use their actual rendered route labels and address. Incident.io freezes retained content before reservation and preserves resolved tails through dispatcher cleanup. Jira records a resolved no-send in the ordinary group lifecycle. SNS pins file-based addressing headers on its native HTTP path. Implementation `b4b813a5`.
 - Pair with OSCAR store `04aeee7ee` and its updated `add_native_alert_actions.sql` migration. The private lease now provides a stable per-authority recipient key, preserving contact ownership and repeat deadlines across authentication rotation. Pre-upgrade NULL authorities with retained work require verified continuity. Native action version remains zero. Operator qualification is pending.
 
