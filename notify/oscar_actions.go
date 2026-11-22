@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/prometheus/common/model"
 
@@ -168,13 +169,50 @@ func (entry *ProviderEntry) beginStep(ctx context.Context) bool {
 
 const incompleteContent = "oscarIncompleteContent"
 
-type incompleteContentKey struct{}
+type (
+	incompleteContentKey struct{}
+	ordinaryBaseline     struct {
+		entry     *nflogpb.Entry
+		hash      func(*alert.Alert) uint64
+		repeatDue bool
+		once      sync.Once
+		states    map[uint64]bool
+	}
+)
+
+// Build the previous membership index only when a held or incomplete flush needs it.
+func (b *ordinaryBaseline) acknowledged(m *alert.Alert) bool {
+	b.once.Do(func() {
+		b.states = make(map[uint64]bool, len(b.entry.FiringAlerts)+len(b.entry.ResolvedAlerts))
+		for _, h := range b.entry.FiringAlerts {
+			b.states[h] = false
+		}
+		for _, h := range b.entry.ResolvedAlerts {
+			b.states[h] = true
+		}
+	})
+	resolved, ok := b.states[b.hash(m)]
+	return ok && resolved == m.Resolved()
+}
+
+// OrdinaryLogBaseline returns the state acknowledged by the prior native group
+// entry, whether that entry has unfinished content, and whether its repeat is due.
+func OrdinaryLogBaseline(ctx context.Context) (func(*alert.Alert) bool, bool, bool) {
+	b, _ := ctx.Value(incompleteContentKey{}).(*ordinaryBaseline)
+	if b == nil {
+		return nil, false, false
+	}
+	return b.acknowledged, b.entry.GetReceiverData()[incompleteContent].GetIntVal() == 1, b.repeatDue
+}
 
 // ContentBaseline identifies acknowledged members while an ordinary group's
 // content or a held resolution still needs a later flush.
 func ContentBaseline(ctx context.Context) func(*alert.Alert) bool {
-	ack, _ := ctx.Value(incompleteContentKey{}).(func(*alert.Alert) bool)
-	return ack
+	ack, incomplete, _ := OrdinaryLogBaseline(ctx)
+	if incomplete {
+		return ack
+	}
+	return nil
 }
 
 // MarkContentIncomplete retains tail progress in the existing group log.

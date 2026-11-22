@@ -524,8 +524,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		contacts[m] = c
 	}
 	groupDue, subsetDue := due(members), due(ordinary)
-	ack := notify.ContentBaseline(ctx)
-	resume := ack != nil && slices.ContainsFunc(members, func(m *alert.Alert) bool { return !ack(m) })
+	ack, incomplete, repeatDue := notify.OrdinaryLogBaseline(ctx)
+	unacknowledged := func(m *alert.Alert) bool { return ack == nil || !ack(m) }
+	resume := incomplete && slices.ContainsFunc(members, unacknowledged)
 	for _, m := range members {
 		c, ok := contacts[m]
 		if !ok {
@@ -568,12 +569,12 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		var pending, accepted, candidates []*alert.Alert
 		var entries []ordinaryContact
 		var ordinaryAcceptance bool
-		resumePrefix := resume && slices.ContainsFunc(sent, func(m *alert.Alert) bool { return !ack(m) })
+		var providerProgress bool
 		for _, m := range sent {
 			if _, ok := contacts[m]; !ok {
 				continue
 			}
-			if resumePrefix && ack(m) && contacts[m].pass != nil {
+			if incomplete && contacts[m].pass != nil && ack(m) && (m.Resolved() || !repeatDue) {
 				accepted = append(accepted, m)
 				continue
 			}
@@ -592,6 +593,18 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			ctx, retained, err = integration.PrepareContent(ctx, candidates, truncated)
 			if err != nil {
 				return notify.Unrecoverable(err, notify.EncodingErrorReason)
+			}
+			if incomplete && repeatDue && len(retained) < len(candidates) {
+				repeat := func(m *alert.Alert) bool { return contacts[m].pass != nil && !m.Resolved() && ack(m) }
+				if slices.ContainsFunc(retained, repeat) && slices.ContainsFunc(candidates[len(retained):], unacknowledged) {
+					// A due repeat could occupy the only encoded position on
+					// every flush. Finish the previously omitted members first.
+					candidates = slices.DeleteFunc(candidates, repeat)
+					ctx, retained, err = integration.PrepareContent(ctx, candidates, truncated)
+					if err != nil {
+						return notify.Unrecoverable(err, notify.EncodingErrorReason)
+					}
+				}
 			}
 			contentIncomplete = len(retained) != len(candidates)
 			if contentIncomplete && slices.ContainsFunc(candidates[len(retained):], func(m *alert.Alert) bool { return m.Resolved() }) {
@@ -632,10 +645,10 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				return notify.Unrecoverable(actionHeld, notify.DefaultReason)
 			}
 			v, delivered, noSend := a.invoke(ctx, g, integration, pending, entries, truncated)
+			providerProgress = len(delivered) > 0 || noSend
 			if i.name == "incidentio" && v.Err() == nil && len(delivered) > 0 {
-				incomplete := contentIncomplete || len(delivered) != len(pending)
-				contentIncomplete = incomplete
-				ordinaryAcceptance = ordinaryAcceptance || incomplete
+				contentIncomplete = contentIncomplete || len(delivered) != len(pending)
+				ordinaryAcceptance = ordinaryAcceptance || contentIncomplete
 			}
 			if !noSend && len(delivered) != len(pending) {
 				omitted := make(map[*alert.Alert]bool, len(pending))
@@ -652,6 +665,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			}
 		}
 		switch {
+		case (held != nil || incomplete) && !providerProgress && !slices.ContainsFunc(accepted, unacknowledged):
+			// Reobserving a previous completion leaves the native repeat clock intact.
+			logMembers = nil
 		case full && len(sent) > 0 && len(accepted) == len(sent):
 			logMembers = members // Native truncation still acknowledges the original ordinary group.
 		case ordinaryAcceptance:
@@ -659,7 +675,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		default:
 			logMembers = nil
 		}
-		if len(logMembers) > 0 && (ack != nil || heldResolved || contentIncomplete) {
+		if len(logMembers) > 0 && (incomplete || heldResolved || contentIncomplete) {
 			notify.MarkContentIncomplete(ctx, heldResolved || contentIncomplete)
 		}
 		if len(logMembers) == 0 && held != nil {

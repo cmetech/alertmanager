@@ -319,6 +319,7 @@ type terminalFixtureJournal struct {
 	covered                            string
 	coverageChecks                     int
 	confirmed                          map[string]bool
+	inspectSource                      func(*alert.Alert) error
 	failInspectHost                    string
 	failReserveAfterFirst              bool
 	firstPermit                        time.Time
@@ -345,6 +346,11 @@ func (j *terminalFixtureJournal) InspectContact(_ context.Context, m *alert.Aler
 }
 
 func (j *terminalFixtureJournal) InspectOrdinary(_ context.Context, s *alert.Alert) (*v2.EpisodeProjection, *v2.OrdinaryPass, error) {
+	if j.inspectSource != nil {
+		if err := j.inspectSource(s); err != nil {
+			return nil, nil, err
+		}
+	}
 	if j.first {
 		return nil, &v2.OrdinaryPass{}, nil
 	}
@@ -709,8 +715,15 @@ func TestOscarActionIncidentContentTail(t *testing.T) {
 	ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, recv, kind string, idx int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
 		return a.prepare(c, g, recv, kind, idx, ms, due)
 	})
-	for range 3 {
-		_, _, err := g.pipeline.Exec(ctx, r.logger, members...)
+	for flush := range 3 {
+		at := ctx
+		if flush == 1 {
+			// Even when A can repeat, the size-limited body must progress to B.
+			repeat, ok := notify.RepeatInterval(ctx)
+			require.True(t, ok)
+			at = notify.WithNow(ctx, now.Add(repeat+time.Minute))
+		}
+		_, _, err := g.pipeline.Exec(at, r.logger, members...)
 		require.NoError(t, err)
 	}
 	require.Len(t, seen, 2)
@@ -1148,4 +1161,93 @@ func TestOscarActionDirectExpiryBetweenMutations(t *testing.T) {
 	require.EqualValues(t, 1, writes.Load())
 	require.Equal(t, 1, finished)
 	require.False(t, conclusive)
+}
+
+func TestPersistentResolutionHoldPreservesProgressAndFiringRepeat(t *testing.T) {
+	var repeats atomic.Int32
+	messages := make(chan []string, 32)
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data struct {
+			Alerts []struct{ Labels map[string]string }
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&data))
+		var hosts []string
+		for _, m := range data.Alerts {
+			host := m.Labels["host"]
+			if host == "C" {
+				repeats.Add(1)
+			}
+			hosts = append(hosts, host)
+		}
+		messages <- hosts
+	}))
+	defer sink.Close()
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1s\n  group_interval: 200ms\n  repeat_interval: 2s\nreceivers:\n- name: team\n  incidentio_configs:\n  - url: %s\n    send_resolved: true\n    alert_source_token: test\n", sink.URL))
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	a := newNativeActions(nil, nil, r.logger)
+	a.version = 1
+	r.actions = a
+	j := &terminalFixtureJournal{state: "pending", projections: map[*alert.Alert]v2.EpisodeProjection{}}
+	require.NoError(t, a.Bind(j))
+	recv := &nflogpb.Receiver{GroupName: "team", Integration: "incidentio"}
+	now := time.Now()
+	var hashes []uint64
+	var key string
+	for i, host := range []string{"A", "B", "C", "D", "E"} {
+		end := now.Add(-time.Millisecond)
+		if host == "C" {
+			end = now.Add(time.Hour)
+		}
+		s := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(host), "severity": "major", "alertname": "Alarm"}, StartsAt: now.Add(-time.Minute), EndsAt: end}, now, false)
+		require.NoError(t, r.alerts.Put(t.Context(), s))
+		s, err = r.alerts.Get(s.Fingerprint())
+		require.NoError(t, err)
+		key = dispatch.GroupKeyForAlert(s, dispatch.NewRoute(cfg.Route, nil))
+		hashes = append(hashes, notify.HashAlert(s))
+		if host == "A" || host == "D" || host == "E" {
+			j.projections[s] = transportProjection(t, s, fmt.Sprintf("22222222-2222-4222-8222-%012d", i+1), "resolved")
+		}
+	}
+	require.NoError(t, r.notificationLog.Log(recv, key, hashes, nil, nil, nil, time.Hour))
+	var stamps []time.Time
+	j.inspectSource = func(s *alert.Alert) error {
+		if s.Labels["host"] != "A" {
+			return nil
+		}
+		rows, err := r.notificationLog.Query(nflog.QGroupKey(key), nflog.QReceiver(recv))
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		stamps = append(stamps, rows[0].Timestamp.AsTime())
+		if repeats.Load() < 2 {
+			return errors.New("A still unavailable")
+		}
+		return nil
+	}
+	require.NoError(t, r.reload(cfg))
+	read := func() []string {
+		select {
+		case hosts := <-messages:
+			return hosts
+		case <-time.After(8 * time.Second):
+			t.Fatal("expected next dispatcher delivery")
+			return nil
+		}
+	}
+	require.ElementsMatch(t, []string{"B", "C", "D", "E"}, read())
+	require.Equal(t, []string{"C"}, read())
+	require.Equal(t, []string{"A"}, read())
+	require.Eventually(t, func() bool {
+		groups, _, err := r.groups(t.Context(), func(*dispatch.Route) bool { return true }, func(*alert.Alert, time.Time) (alert.AlertStatus, bool) { return alert.AlertStatus{}, true })
+		return err == nil && len(groups) == 1 && len(groups[0].Alerts) == 1
+	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, r.stop())
+	require.Empty(t, messages)
+	require.GreaterOrEqual(t, len(stamps), 5)
+	for _, unchanged := range stamps[2 : len(stamps)-1] {
+		require.Equal(t, stamps[1], unchanged)
+	}
+	require.True(t, stamps[len(stamps)-1].After(stamps[1]))
+	require.Equal(t, []string{"confirmed", "confirmed", "confirmed"}, j.settled)
 }

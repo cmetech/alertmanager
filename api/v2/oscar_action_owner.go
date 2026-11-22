@@ -74,7 +74,8 @@ func (c actionClient) call(ctx context.Context, cmd string, args map[string]any,
 	lease := cmd == "acquire-authority" || cmd == "renew-authority"
 	if lease {
 		code := resp.StatusCode
-		if code > http.StatusOK && code < 300 || code >= 400 && code < 500 &&
+		permanentRedirect := code == http.StatusMovedPermanently || code == http.StatusPermanentRedirect
+		if permanentRedirect || code > http.StatusOK && code < 300 || code >= 400 && code < 500 &&
 			code != http.StatusRequestTimeout && code != http.StatusTooEarly && code != http.StatusTooManyRequests {
 			return incompatibleLease
 		}
@@ -1065,6 +1066,12 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 		if e != nil || found {
 			return child, e
 		}
+	}
+	// Conclusive no-effect targets remain readable while their successor is
+	// pending reconciliation. Replaying this receipt cannot issue a permit.
+	if req.Actor.Kind == "operator" && i != nil && i.Intent != nil && i.Intent.State == "accepted" && i.Result.State == "held" && len(i.Result.Targets) > 0 &&
+		!slices.ContainsFunc(i.Result.Targets, func(t TargetResult) bool { return t.State != "no_effect" }) {
+		return i.Result, nil
 	}
 	// Terminal and unknown receipts remain lookupable independently of current provider identity.
 	if (directive == nil || directive.Mode != "transfer") && i != nil && (i.Result.State == "confirmed" || i.Result.State == "rejected" || i.Result.State == "superseded_no_effect" || (i.Result.State == "unknown" || i.Result.State == "partial") && !slices.ContainsFunc(i.Result.Targets, func(t TargetResult) bool { return t.State == "pending" && t.SuccessorID == nil })) {

@@ -88,11 +88,14 @@ func (n *DedupStage) needsUpdate(entry *nflogpb.Entry, firing, resolved map[uint
 	}
 
 	// Nothing changed, only notify if the repeat interval has passed.
-	isRepeatIntervalElapsed := entry.Timestamp.AsTime().Before(now.Add(-repeat))
-	if isRepeatIntervalElapsed {
+	if repeatElapsed(entry, now, repeat) {
 		return ReasonRepeatIntervalElapsed
 	}
 	return ReasonDoNotNotify
+}
+
+func repeatElapsed(entry *nflogpb.Entry, now time.Time, repeat time.Duration) bool {
+	return entry.Timestamp.AsTime().Before(now.Add(-repeat))
 }
 
 // partitionAlertsByState separates alerts into firing and resolved, returning both slices and sets.
@@ -179,16 +182,8 @@ func (n *DedupStage) Exec(ctx context.Context, _ *slog.Logger, alerts ...*alert.
 	}
 	updateReason := n.needsUpdate(entry, firingSet, resolvedSet, repeatInterval, now)
 	if reader, ok := ctx.Value(ordinaryReaderKey{}).(OrdinaryReader); ok && len(alerts) > 0 {
-		if entry.GetReceiverData()[incompleteContent].GetIntVal() == 1 {
-			previous := make(map[uint64]bool, len(entry.FiringAlerts)+len(entry.ResolvedAlerts))
-			for _, h := range entry.FiringAlerts {
-				previous[h] = false
-			}
-			for _, h := range entry.ResolvedAlerts {
-				previous[h] = true
-			}
-			ack := func(m *alert.Alert) bool { resolved, ok := previous[n.hash(m)]; return ok && resolved == m.Resolved() }
-			ctx = context.WithValue(ctx, incompleteContentKey{}, ack)
+		if entry != nil {
+			ctx = context.WithValue(ctx, incompleteContentKey{}, &ordinaryBaseline{entry: entry, hash: n.hash, repeatDue: repeatElapsed(entry, now, repeatInterval)})
 		}
 		due := func(members []*alert.Alert) bool {
 			if len(members) == 0 {

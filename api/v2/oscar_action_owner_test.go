@@ -1188,13 +1188,26 @@ func TestWireRenewalReadiness(t *testing.T) {
 		{200, `{"recipient_key":42}`, false},
 		{422, `{"detail":[{"type":"literal_error"}]}`, false},
 		{204, "", false},
+		{301, "", false},
+		{308, "", false},
 		{429, "", true},
 		{503, `{"detail":"temporary outage"}`, true},
 	} {
-		rpc := actionClient{&managedClient{scheme: "http", http: &http.Client{Transport: renewalResponse(func(r *http.Request) (*http.Response, error) {
+		token := filepath.Join(t.TempDir(), "credential")
+		require.NoError(t, os.WriteFile(token, []byte(strings.Repeat("k", 32)), 0o600))
+		client, err := newManagedClient("http", "", token)
+		require.NoError(t, err)
+		calls := 0
+		client.http.Transport = renewalResponse(func(r *http.Request) (*http.Response, error) {
+			calls++
 			require.True(t, strings.HasSuffix(r.URL.Path, "/renew-authority"))
-			return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
-		})}}}
+			header := make(http.Header)
+			if tc.status == 301 || tc.status == 308 {
+				header.Set("Location", "http://other.invalid/moved")
+			}
+			return &http.Response{StatusCode: tc.status, Header: header, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+		})
+		rpc := actionClient{client}
 		o := newNativeActionOwner(defaultActionAuthority, rpc, testActionDispatch{})
 		o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
 		o.recovered = true
@@ -1204,6 +1217,7 @@ func TestWireRenewalReadiness(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, pass.Enter())
 		require.Error(t, o.leaseTick(t.Context()))
+		require.Equal(t, 1, calls)
 		require.Equal(t, tc.live, o.ready())
 		require.Equal(t, tc.live, pass.Valid())
 	}
@@ -1261,4 +1275,31 @@ func TestFiringReserveRejectsFloorUpdateAfterInspection(t *testing.T) {
 	_, err = o.ReserveOrdinary(t.Context(), "11111111-1111-4111-8111-111111111111", m, p, target)
 	require.ErrorIs(t, err, mismatch)
 	require.NotContains(t, commands, "reserve-coverage")
+}
+
+func TestOperatorReplayReturnsAcceptedIntentNoEffectReceipts(t *testing.T) {
+	var req ActionRequestV1
+	require.True(t, decodeAction([]byte(actionBody), &req))
+	req.Kind = "resend"
+	digest, err := actionDigest(req)
+	require.NoError(t, err)
+	expiry := time.Now().UTC().Add(time.Minute)
+	receipt := ActionResultV1{OperationID: req.OperationID, EpisodeRef: req.EpisodeRef, State: "held", PermitExpiresAt: &expiry}
+	intent := actionCommit{EpisodeRef: req.EpisodeRef, State: "accepted"}
+	for i, evidence := range []string{"FENCED_BEFORE_PROVIDER_ENTRY", "NATIVE_ALERT_CONTENT_UNDELIVERABLE"} {
+		dst := DispatchTarget{ReceiverID: "team", IntegrationDigest: strings.Repeat(fmt.Sprint(i+1), 64)}
+		intent.Targets = append(intent.Targets, dst)
+		receipt.Targets = append(receipt.Targets, TargetResult{Target: dst, TargetKey: strings.Repeat(fmt.Sprint(i+3), 64), State: "no_effect", Evidence: &evidence})
+	}
+	record := actionIntent{Digest: digest, Request: mustRaw(t, req), Intent: &intent, Result: receipt}
+	rpc := actionRPCFunc(func(_ context.Context, cmd string, _ map[string]any, out any) error {
+		require.Equal(t, "lookup", cmd)
+		return json.Unmarshal(mustRaw(t, record), out)
+	})
+	o := newNativeActionOwner(req.EpisodeRef.AuthorityID, rpc, testActionDispatch{})
+	o.recovered = true
+	o.lease = actionLease{Epoch: 1, ExpiresAt: expiry}
+	got, err := o.Execute(t.Context(), req)
+	require.NoError(t, err)
+	require.Equal(t, receipt, got)
 }

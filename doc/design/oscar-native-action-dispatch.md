@@ -71,7 +71,7 @@ SNS identities include file headers absent from legacy digests. Resuming a
 retained namespace requires independently verified ownership mapping or
 reconciliation of its pending, unknown and confirmed coverage. The migration
 leaves existing namespaces unmarked. Original entry tokens can settle during
-the hold. An incompatible renewal immediately fences local entry. A transient
+the hold. An incompatible renewal, including a permanent redirect from the private endpoint, immediately fences local entry. A transient
 outage leaves only the balance of the existing lease.
 
 For group-dependent recipients the ordinary reader inspects already-tracked
@@ -86,6 +86,13 @@ The frozen accepted target set survives renewal. Entry still requires current
 eligibility for the individual target. Firing reservations bind the inspected
 source, severity revision, lifecycle and outgoing labels. After partial
 confirmation, a held resolved sibling stays due across native group cleanup.
+While that hold persists, the prior notification log suppresses already
+acknowledged direct clears. Reobserving a completed sibling preserves the
+group timestamp. A firing sibling can repeat at its recorded native deadline.
+If a repeat would fill the provider's size-limited payload and exclude the
+outstanding tail, the sender completes that tail first. A replay of an accepted
+operator intent whose targets all settled with conclusive no-effect evidence
+returns the stored operation and its individual receipts during reconciliation.
 
 On guarded HTTP mutations the native client retains configured authentication,
 CA, proxy and pooled connections. A separate HTTP/1 pool gives each active
