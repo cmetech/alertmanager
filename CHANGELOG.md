@@ -1,3 +1,8 @@
+## Unreleased — Tracked terminal contact checkpoint
+
+- Native dispatch reserves a due tracked clear through OSCAR's private terminal journal, validates the original provider alert at entry, and retains its stable delivery identity across reservation replay. Ordinary group eligibility and send-resolved filtering still apply.
+- A dormant embedded adapter leaves the ordinary notification pipeline in place. Native action version remains zero pending full transport and restart qualification. Pair implementation `a2dc58b6` with the matching OSCAR journal. This change requires the existing A2 schema and adds no migration.
+
 ## Unreleased — Native firing-member dispatch checkpoint
 
 - Stage effective route/group and inhibition updates, exact provider identity on notification copies, and per-member firing coverage for selected and ordinary webhook dispatch.
