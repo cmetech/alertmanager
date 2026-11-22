@@ -1,3 +1,8 @@
+## Unreleased — Canonical callback provenance
+
+- Native Alertmanager includes the sending graph, request target, group identity and original severity on its private canonical entry command. The retained structural routes include matching canonical siblings. Oversized descriptions leave policy scope unavailable while the physical callback proceeds.
+- Pair native source `0939a5eb` with OSCAR's callback receipt migration and matching private writer before commissioning. The signed v1 callback body and destination identity remain compatible. Operator qualification is pending.
+
 ## Unreleased — Direct notification receipts during terminal reconciliation
 
 - Native Alertmanager records the accepted members of a direct notification even when settlement and lookup both fail for an excluded terminal token. A subsequent flush can hold that terminal and honor the direct sibling's earlier delivery. A rejected provider request retains its original failure reason.
