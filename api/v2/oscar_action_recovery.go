@@ -286,6 +286,14 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context, epoch uint64) (
 			if p.State != "firing" || !managedUUID.MatchString(p.ID) || p.ID <= c.activeAfter {
 				return reconcile
 			}
+			if p.ManualOwner != nil {
+				if o.manual == nil {
+					return unavailable
+				}
+				if err := o.restoreManual(ctx, p); err != nil {
+					return err
+				}
+			}
 			if _, production := o.dispatch.(ActionPublication); production {
 				owner, err := o.projectionKey(p)
 				if err != nil {
@@ -321,6 +329,8 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context, epoch uint64) (
 			}
 			var binding string
 			switch {
+			case len(key) == 66 && key[:2] == "u/" && managedHash.MatchString(key[2:]):
+				binding = key
 			case nativeFingerprint.MatchString(key):
 				binding = sourceKey("", key)
 			case managedHash.MatchString(key):
@@ -398,7 +408,11 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	}
 	start := time.Now()
 	var l actionLease
-	err := o.read(ctx, "renew-authority", map[string]any{"owner_id": o.owner, "epoch": old.Epoch, "recipient_binding": recipientBinding}, &l)
+	args := map[string]any{"owner_id": o.owner, "epoch": old.Epoch, "recipient_binding": recipientBinding}
+	if old.ManualSourceBridge == 1 {
+		args["manual_source_ready"] = o.manual != nil && bytes.Equal(bytes.TrimSpace(old.NativeDeliveryReceipts), []byte("1")) && o.callbackReady != nil && o.callbackReady()
+	}
+	err := o.read(ctx, "renew-authority", args, &l)
 	if errors.Is(err, incompatibleLease) {
 		return o.rejectLease()
 	}
@@ -496,7 +510,7 @@ func (o *nativeActionOwner) sweep(ctx context.Context) {
 func (o *nativeActionOwner) sweepSlot(ctx context.Context, key string, s *episodeSlot) {
 	s.local.Lock()
 	removed, observed := s.removed, s.observed
-	changed := s.needsPublish || s.uncertain || s.overflow || s.ambiguous || len(s.pending) > 0 || s.source != nil && s.source.Resolved() && s.projection.State == "firing"
+	changed := s.source != nil && s.source.ManualEpisode != "" && (removed || s.projection.ManualOwner == nil || s.projection.ManualOwner.Stamp != s.source.ManualStamp) || s.needsPublish || s.uncertain || s.overflow || s.ambiguous || len(s.pending) > 0 || s.source != nil && s.source.Resolved() && s.projection.State == "firing"
 	// A full queue can lose intermediate identities. A terminal exact pair (including
 	// the managed generation) still proves closure of its own durable variant.
 	if s.overflow && removed && s.next == nil && !s.needsRestore && !s.ambiguous && s.projection.State == "firing" && s.source != nil && sameVariant(s.projection.NativeVariant, variantOf(s.source)) {
@@ -603,6 +617,9 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 		}
 		if !o.live(turn) || !o.ready() {
 			continue
+		}
+		if lease.ManualSourceBridge == 1 && lease.ManualSourceDue && o.manual != nil {
+			_ = o.pullManual(turn)
 		}
 		rows, err := o.operationPage(turn, after)
 		if err != nil {

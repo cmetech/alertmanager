@@ -28,6 +28,9 @@ type actionResident struct {
 }
 
 func residentKey(owner string, s *alert.Alert) string {
+	if len(owner) == 66 && owner[:2] == "u/" {
+		return owner
+	}
 	if owner != "" {
 		return "m/" + owner
 	}
@@ -115,7 +118,7 @@ func (a *nativeActions) FreezeEpisode(s *alert.Alert, p v2.EpisodeProjection) *a
 	if !ok || old.member.ProviderSource() != s || old.p.EpisodeRef != p.EpisodeRef || old.p.SeverityRevision != p.SeverityRevision || old.p.LifecycleSeq != p.LifecycleSeq {
 		return nil
 	}
-	r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+	r := a.residents[residentKey(s.ActionOwner(), s)]
 	if r.claim == nil {
 		r.claim = new(atomic.Bool)
 		r.claim.Store(true)
@@ -168,7 +171,7 @@ func (g *actionGraph) enqueue(r *actionResident) {
 func (a *nativeActions) InvalidateSource(source *alert.Alert) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if r := a.residents[residentKey(source.ManagedMember.Episode, source)]; r != nil && r.source == source {
+	if r := a.residents[residentKey(source.ActionOwner(), source)]; r != nil && r.source == source {
 		a.uncertainLocked(r)
 		if a.graph != nil {
 			a.graph.enqueue(r)
@@ -245,7 +248,7 @@ func (a *nativeActions) retired(g *actionGraph, member *alert.Alert) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	s := member.ProviderSource()
-	r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+	r := a.residents[residentKey(s.ActionOwner(), s)]
 	return a.graph == g && (r == nil || r.source != s)
 }
 
@@ -261,7 +264,7 @@ func (a *nativeActions) graphView(g *actionGraph, s *alert.Alert, routing bool, 
 	if a.graph != g {
 		return
 	}
-	r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+	r := a.residents[residentKey(s.ActionOwner(), s)]
 	if r == nil || r.source != s || r.unknown || r.epoch != g.epoch {
 		return
 	}
@@ -293,7 +296,7 @@ func (a *nativeActions) currentLocked(g *actionGraph, s *alert.Alert) bool {
 		return true
 	}
 	epoch, _ := a.recovery.RecoveryState()
-	r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+	r := a.residents[residentKey(s.ActionOwner(), s)]
 	return g.published && epoch != 0 && g.epoch == epoch && r != nil && r.source == s && !r.unknown && r.epoch == epoch
 }
 
@@ -310,7 +313,7 @@ func (g *actionGraph) checkViews(ctx context.Context, source *alert.Alert, views
 			return false
 		}
 		epoch, _ := a.recovery.RecoveryState()
-		r := a.residents[residentKey(source.ManagedMember.Episode, source)]
+		r := a.residents[residentKey(source.ActionOwner(), source)]
 		base, ok := a.sources[source.Fingerprint()]
 		if !g.published || epoch == 0 || g.epoch != epoch || r == nil || r.source != source || r.epoch != epoch || !ok ||
 			base.p.EpisodeRef != p.EpisodeRef || base.p.SeverityRevision != p.SeverityRevision || base.p.LifecycleSeq != p.LifecycleSeq {
@@ -345,7 +348,7 @@ func (a *nativeActions) recoverGraph(g *actionGraph) {
 		case old := <-g.retired:
 			a.mu.RLock()
 			s := old.ProviderSource()
-			r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+			r := a.residents[residentKey(s.ActionOwner(), s)]
 			if a.graph == g && (r == nil || r.source != s) {
 				g.dispatcher.RetireProjection(old)
 			}
@@ -507,7 +510,7 @@ func (a *nativeActions) publishResident(ctx context.Context, p v2.EpisodeProject
 		// an older variant cannot remove a replacement.
 		return nil
 	}
-	r := a.residents[residentKey(source.ManagedMember.Episode, source)]
+	r := a.residents[residentKey(source.ActionOwner(), source)]
 	if r == nil || r.source != source {
 		return actionHeld
 	}
@@ -569,7 +572,7 @@ func (a *nativeActions) finalPublication(g *actionGraph, members []*alert.Alert,
 		}
 		if a.recovery != nil && c.pass != nil {
 			_, tracked := a.sources[s.Fingerprint()]
-			r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+			r := a.residents[residentKey(s.ActionOwner(), s)]
 			if tracked || c.pass.Epoch != g.epoch || c.pass.Contact == nil || r.direct != c.pass.Contact {
 				return false
 			}

@@ -250,7 +250,7 @@ func (o *nativeActionOwner) drainHandoff(ctx context.Context) bool {
 	}
 	var p *EpisodeProjection
 	if candidate {
-		rows, err := o.sourceRows(ctx, first.ManagedMember.Episode, first.Fingerprint().String())
+		rows, err := o.sourceRows(ctx, first.ActionOwner(), first.Fingerprint().String())
 		if err != nil {
 			return true
 		}

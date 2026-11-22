@@ -125,6 +125,7 @@ type episodeUpdate struct {
 	ActiveSince    string              `json:"active_since"`
 	State          string              `json:"state"`
 	SourceSeverity string              `json:"source_severity"`
+	ManualOwner    *manualOwner        `json:"manual_owner,omitempty"`
 	ManagedOwner   *sourceOwner        `json:"managed_owner"`
 }
 type EpisodeProjection struct {
@@ -160,6 +161,8 @@ type actionIntent struct {
 	Result                 ActionResultV1  `json:"result"`
 }
 type actionLease struct {
+	ManualSourceBridge     int             `json:"manual_source_bridge"`
+	ManualSourceDue        bool            `json:"manual_source_due"`
 	OrdinaryCohort         json.RawMessage `json:"ordinary_cohort"`
 	NativeDeliveryReceipts json.RawMessage `json:"native_delivery_receipts"`
 	RecipientBinding       int             `json:"recipient_binding"`
@@ -205,6 +208,8 @@ type episodeSlot struct {
 	floorWrite   *pendingFloor
 }
 type nativeActionOwner struct {
+	manual                manualProvider
+	manualInflight        map[string]bool
 	directOverflow        [1 << 16]uint32
 	publicLease           atomic.Pointer[recoveredLease]
 	clock, work           list.List
@@ -252,6 +257,9 @@ func variantOf(a *alert.Alert) alert.NativeVariant {
 }
 
 func sourceKey(owner, fp string) string {
+	if strings.HasPrefix(owner, "u/") {
+		return owner
+	}
 	if owner != "" {
 		return "m/" + owner
 	}
@@ -283,6 +291,9 @@ func laterOrdinaryVariant(current, previous alert.NativeVariant) bool {
 }
 
 func (o *nativeActionOwner) observe(owner string, source *alert.Alert, closed bool) {
+	if source != nil && source.ManualEpisode != "" && source.ActionOwner() != owner {
+		return
+	}
 	if source == nil && owner == "" {
 		return
 	}
@@ -298,7 +309,7 @@ func (o *nativeActionOwner) observe(owner string, source *alert.Alert, closed bo
 	var previous *alert.Alert
 	if pub, ok := o.dispatch.(ActionPublication); ok {
 		var contact *DirectContact
-		previous, contact = pub.ObserveSource(owner, source, closed, possible)
+		previous, contact = pub.ObserveSource(owner, source, closed, possible || source != nil && source.ManualEpisode != "")
 		if contact != nil {
 			o.detachDirectLocked(key, contact)
 		}
@@ -327,6 +338,13 @@ func (s *episodeSlot) observeLocked(owner string, source *alert.Alert, closed bo
 	}
 	// A retired member's GC cannot close its replacement.
 	if closed && s.source != nil && (s.source.Fingerprint() != source.Fingerprint() || !s.source.StartsAt.Equal(source.StartsAt) || s.source.ManagedMember != source.ManagedMember) {
+		return
+	}
+	if source.ManualEpisode != "" {
+		s.invalidateLocked()
+		s.observed++
+		s.source, s.removed = source, closed
+		s.pending, s.overflow, s.ambiguous = nil, false, false
 		return
 	}
 	if s.source != nil && owner == "" && !source.StartsAt.Equal(s.source.StartsAt) && s.source.Resolved() && !s.source.EndsAt.After(source.StartsAt) && len(s.pending) < maxTransitions {
@@ -424,6 +442,12 @@ func (o *nativeActionOwner) projectionKey(p EpisodeProjection) (string, error) {
 		return "", unavailable
 	}
 	key := ""
+	if m := p.ManualOwner; m != nil {
+		if p.ManagedOwner != nil || !managedHash.MatchString(m.SourceEpisodeID) || !managedHash.MatchString(m.Stamp) || !managedHash.MatchString(m.SourceWorkID) || m.Position < 1 {
+			return "", unverified
+		}
+		return "u/" + m.SourceEpisodeID, nil
+	}
 	if p.ManagedOwner != nil {
 		if !managedHash.MatchString(p.ManagedOwner.EpisodeKey) || p.ManagedOwner.Generation <= 0 {
 			return "", unavailable
@@ -581,7 +605,7 @@ func (o *nativeActionOwner) rememberTerminal(p EpisodeProjection) error {
 // terminalCandidate uses membership only to select an indexed read. Exact lifecycle and managed
 // identity decide whether the result can be restored. A firing lookalike cannot reopen it.
 func (o *nativeActionOwner) terminalCandidate(ctx context.Context, a *alert.Alert) (*EpisodeProjection, error) {
-	v, owner := variantOf(a), a.ManagedMember.Episode
+	v, owner := variantOf(a), a.ActionOwner()
 	bucket, bit := membershipBit(sourceKey(owner, v.Fingerprint))
 	o.mu.Lock()
 	possible := o.terminalMembership[bucket]&bit != 0
@@ -590,11 +614,15 @@ func (o *nativeActionOwner) terminalCandidate(ctx context.Context, a *alert.Aler
 		return nil, nil
 	}
 	var key, generation any
-	if owner != "" {
+	args := map[string]any{"projection": "terminal", "native_variant": v}
+	if a.ManualEpisode != "" {
+		args["manual_key"] = a.ManualEpisode
+	} else if owner != "" {
 		key, generation = owner, a.ManagedMember.Generation
 	}
 	var rows []EpisodeProjection
-	if err := o.read(ctx, "recover", map[string]any{"projection": "terminal", "native_variant": v, "managed_key": key, "managed_generation": generation}, &rows); err != nil {
+	args["managed_key"], args["managed_generation"] = key, generation
+	if err := o.read(ctx, "recover", args, &rows); err != nil {
 		return nil, err
 	}
 	if rows == nil || len(rows) > 1 {
@@ -605,7 +633,7 @@ func (o *nativeActionOwner) terminalCandidate(ctx context.Context, a *alert.Aler
 	}
 	p := rows[0]
 	k, err := o.projectionKey(p)
-	if err != nil || k != owner || !managedUUID.MatchString(p.ID) || p.State != "resolved" || !sameVariant(v, p.NativeVariant) ||
+	if err != nil || k != owner || a.ManualEpisode != "" && !sameResident(p, a) || !managedUUID.MatchString(p.ID) || p.State != "resolved" || !sameVariant(v, p.NativeVariant) ||
 		p.ManagedOwner != nil && p.ManagedOwner.Generation != a.ManagedMember.Generation ||
 		!a.Resolved() && !(a.ManagedReceiver && a.ManagedOperationKind == "clear") {
 		return nil, reconcile
@@ -635,7 +663,7 @@ func (o *nativeActionOwner) hydrate(ctx context.Context, s *episodeSlot) error {
 		return unverified
 	}
 	var managed any
-	key := a.ManagedMember.Episode
+	key := a.ActionOwner()
 	if key != "" {
 		managed = key
 	}
@@ -773,8 +801,44 @@ func floorCASPossible(p EpisodeProjection, u actionCommit) bool {
 }
 
 func (o *nativeActionOwner) flush(ctx context.Context, s *episodeSlot) error {
+	if m := s.latest(); m != nil && m.ManualEpisode != "" {
+		// The SQL transition already owns the lifecycle. A provider notification
+		// can only install that exact committed stamp into the local slot.
+		if s.uncertain || s.projection.ManualOwner == nil || s.projection.ManualOwner.Stamp != m.ManualStamp {
+			p, err := o.manualProjection(ctx, m)
+			if err != nil {
+				return err
+			}
+			s.local.Lock()
+			if s.detached || s.source != m {
+				s.local.Unlock()
+				return reconcile
+			}
+			s.invalidateLocked()
+			s.pending, s.overflow, s.ambiguous = nil, false, false
+			s.local.Unlock()
+			s.projection, s.needsRestore, s.uncertain, s.needsPublish = p, false, false, true
+			if p.State == "resolved" {
+				if err := o.rememberTerminal(p); err != nil {
+					return err
+				}
+			}
+			o.mu.Lock()
+			o.byID[p.EpisodeRef.EpisodeID] = s
+			o.mu.Unlock()
+		}
+		if f := s.floorWrite; f != nil {
+			if ctx.Value(actionEpochKey{}) != f.epoch || !floorCASPossible(s.projection, f.update) {
+				s.floorWrite = nil
+			} else if ctx.Value(sameFloorRetry{}) != f.operationID {
+				s.uncertain = true
+				return reconcile
+			}
+		}
+		return nil
+	}
 	if source := s.latest(); source != nil && source.ManagedReceiver && o.lockManaged != nil {
-		release, err := o.lockManaged(source.ManagedMember.Episode)
+		release, err := o.lockManaged(source.ActionOwner())
 		if err != nil {
 			return unavailable
 		}
@@ -958,7 +1022,7 @@ func (o *nativeActionOwner) projectSource(ctx context.Context, source *alert.Ale
 	if source == nil || !o.ready() {
 		return EpisodeProjection{}, unavailable
 	}
-	key, fp := source.ManagedMember.Episode, source.Fingerprint().String()
+	key, fp := source.ActionOwner(), source.Fingerprint().String()
 	s := o.slot(sourceKey(key, fp), false)
 	if o.readSource != nil && (s != nil && s.latest() == nil || s == nil && enroll) {
 		var err error
@@ -1502,6 +1566,10 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 	})
 	if !ok {
 		return errors.New("native action provider unavailable")
+	}
+	if bridge, ok := api.alerts.(manualProvider); ok {
+		bridge.EnableManaged()
+		o.manual = bridge
 	}
 	o.readSource = store.ReadActionSource
 	if api.managedOwner != nil {

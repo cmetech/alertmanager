@@ -46,12 +46,13 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/provider/mem"
 type Alerts struct {
 	cancel context.CancelFunc
 
-	mtx      sync.Mutex
-	stamps   map[string]provider.ManagedStamp
-	handoff  atomic.Pointer[orderedHandoff]
-	shutdown <-chan struct{}
-	owners   map[model.Fingerprint]string
-	variants map[string]map[model.Fingerprint]bool
+	mtx         sync.Mutex
+	stamps      map[string]provider.ManagedStamp
+	manualFinal map[string]bool
+	handoff     atomic.Pointer[orderedHandoff]
+	shutdown    <-chan struct{}
+	owners      map[model.Fingerprint]string
+	variants    map[string]map[model.Fingerprint]bool
 
 	alerts *store.Alerts
 
@@ -343,6 +344,11 @@ func (a *Alerts) gcAlerts() []*alert.Alert {
 		owner := a.owners[fp]
 		if a.actionObserver != nil && (owner == "" || a.variants[owner][fp]) {
 			a.actionObserver(owner, old, true)
+		}
+		if a.manualFinal[owner] && a.variants[owner][fp] && old.ManualTerminal {
+			delete(a.stamps, owner)
+			delete(a.manualFinal, owner)
+			a.variants[owner][fp] = false
 		}
 		if owner != "" && !a.variants[owner][fp] {
 			delete(a.owners, fp)

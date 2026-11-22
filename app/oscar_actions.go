@@ -194,7 +194,9 @@ func (a *nativeActions) PublishSource(ctx context.Context, p v2.EpisodeProjectio
 		return a.publishResident(ctx, p, source)
 	}
 	owner := ""
-	if p.ManagedOwner != nil {
+	if p.ManualOwner != nil {
+		owner = "u/" + p.ManualOwner.SourceEpisodeID
+	} else if p.ManagedOwner != nil {
 		owner = p.ManagedOwner.EpisodeKey
 	}
 	if source != nil {

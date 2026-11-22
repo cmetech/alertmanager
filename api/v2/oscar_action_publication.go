@@ -74,7 +74,10 @@ func (o *nativeActionOwner) CohortSupported() bool {
 // MayHaveEpisode supplies local negative evidence only after both indexed
 // membership scans are complete. Positive candidates still need exact proof.
 func (o *nativeActionOwner) MayHaveEpisode(epoch uint64, s *alert.Alert) bool {
-	key := sourceKey(s.ManagedMember.Episode, s.Fingerprint().String())
+	if s.ManualEpisode != "" {
+		return true
+	}
+	key := sourceKey(s.ActionOwner(), s.Fingerprint().String())
 	bucket, bit := membershipBit(key)
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -84,11 +87,15 @@ func (o *nativeActionOwner) MayHaveEpisode(epoch uint64, s *alert.Alert) bool {
 
 func (o *nativeActionOwner) sourceRows(ctx context.Context, owner, fp string) ([]EpisodeProjection, error) {
 	var managed any
-	if owner != "" {
+	args := map[string]any{"projection": "source", "fingerprint": fp}
+	if len(owner) == 66 && owner[:2] == "u/" {
+		args["manual_key"] = owner[2:]
+	} else if owner != "" {
 		managed = owner
 	}
 	var rows []EpisodeProjection
-	if err := o.read(ctx, "recover", map[string]any{"projection": "source", "fingerprint": fp, "managed_key": managed}, &rows); err != nil {
+	args["managed_key"] = managed
+	if err := o.read(ctx, "recover", args, &rows); err != nil {
 		return nil, err
 	}
 	if rows == nil || len(rows) > 1 {
@@ -107,7 +114,10 @@ func sameResident(p EpisodeProjection, a *alert.Alert) bool {
 	if a == nil || !sameVariant(p.NativeVariant, variantOf(a)) || (p.ManagedOwner != nil) != a.ManagedReceiver {
 		return false
 	}
-	if m := p.ManagedOwner; m != nil && (m.EpisodeKey != a.ManagedMember.Episode || m.Generation != a.ManagedMember.Generation) {
+	if (p.ManualOwner != nil) != (a.ManualEpisode != "") || p.ManualOwner != nil && (p.ManualOwner.SourceEpisodeID != a.ManualEpisode || p.ManualOwner.Stamp != a.ManualStamp) {
+		return false
+	}
+	if m := p.ManagedOwner; m != nil && (m.EpisodeKey != a.ActionOwner() || m.Generation != a.ManagedMember.Generation) {
 		return false
 	}
 	if p.State == "resolved" {
@@ -123,7 +133,14 @@ func (o *nativeActionOwner) ClassifyResident(ctx context.Context, epoch uint64, 
 	if !o.live(ctx) || a == nil {
 		return nil, unavailable
 	}
-	fp, owner := a.Fingerprint().String(), a.ManagedMember.Episode
+	if a.ManualEpisode != "" {
+		p, err := o.manualProjection(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		return &p, nil
+	}
+	fp, owner := a.Fingerprint().String(), a.ActionOwner()
 	key := sourceKey(owner, fp)
 	bucket, bit := membershipBit(key)
 	o.mu.Lock()
@@ -238,7 +255,7 @@ func (o *nativeActionOwner) ClassifyResident(ctx context.Context, epoch uint64, 
 // Allocate and seed under the exact pointer gate, retrying capacity outside
 // it. A replacement during the wait cannot inherit another source's enrollment.
 func (o *nativeActionOwner) sourceSlot(ctx context.Context, a *alert.Alert, enroll bool) (*episodeSlot, error) {
-	owner, fp := a.ManagedMember.Episode, a.Fingerprint().String()
+	owner, fp := a.ActionOwner(), a.Fingerprint().String()
 	key := sourceKey(owner, fp)
 	epoch, _ := PublicationToken(ctx)
 	return o.obtainSlot(ctx, key, func() (*episodeSlot, error) {
@@ -327,7 +344,7 @@ func (o *nativeActionOwner) restoreIndexed(ctx context.Context, s *episodeSlot, 
 		}
 		current = p
 	} else {
-		rows, err := o.sourceRows(ctx, source.ManagedMember.Episode, source.Fingerprint().String())
+		rows, err := o.sourceRows(ctx, source.ActionOwner(), source.Fingerprint().String())
 		if err != nil {
 			return err
 		}

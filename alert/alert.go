@@ -50,6 +50,9 @@ type ManagedMembership struct {
 type Alert struct {
 	model.Alert
 
+	ManualEpisode        string                                                      `json:"-"`
+	ManualStamp          string                                                      `json:"-"`
+	ManualTerminal       bool                                                        `json:"-"`
 	ManagedOperationKind string                                                      `json:"-"`
 	ManagedReceiver      bool                                                        `json:"-"`
 	ManagedMember        ManagedMembership                                           `json:"-"`
@@ -79,6 +82,14 @@ func New(a model.Alert, updatedAt time.Time, timeout bool) *Alert {
 		EndTimeSource: EndTimeSourceUnknown,
 		fingerprint:   a.Labels.Fingerprint(),
 	}
+}
+
+// ActionOwner returns the private source identity used for native publication.
+func (a *Alert) ActionOwner() string {
+	if a.ManualEpisode != "" {
+		return "u/" + a.ManualEpisode
+	}
+	return a.ManagedMember.Episode
 }
 
 // Fingerprint returns the fingerprint of the alert's labels, computed at

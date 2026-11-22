@@ -113,7 +113,7 @@ func (a *Alerts) gcAlerts() (deleted []*alert.Alert) {
 	a.Lock()
 	defer a.Unlock()
 	for fp, alrt := range a.alerts {
-		if alrt.Resolved() {
+		if alrt.Resolved() && (alrt.ManualEpisode == "" || alrt.ManualTerminal) {
 			deleted = append(deleted, alrt)
 			delete(a.alerts, fp)
 		}

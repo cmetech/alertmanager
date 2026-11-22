@@ -488,7 +488,7 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 		return nil, nil, unverified
 	}
 	ctx = o.withEpoch(ctx)
-	fp, owner := source.Fingerprint().String(), source.ManagedMember.Episode
+	fp, owner := source.Fingerprint().String(), source.ActionOwner()
 	key := sourceKey(owner, fp)
 	bucket, bit := membershipBit(key)
 	o.mu.Lock()
