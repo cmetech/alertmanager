@@ -1,3 +1,8 @@
+## Unreleased — Leased OSCAR manual alert publication
+
+- Native Alertmanager pulls ordered manual source transitions from its authenticated action store. Observations replace the previous variant at the original start. Exact stamp retries preserve the resident and subscriber stream. Recovery and policy clear use the source owner's terminal position.
+- Native source `157edead` pairs with OSCAR source `b1b892990` and its manual bridge migration. Update both writers together. The public alert API retains its existing contract. Commissioning and runtime qualification are pending.
+
 ## Unreleased — Canonical callback provenance
 
 - Native Alertmanager includes the sending graph, request target, group identity and original severity on its private canonical entry command. The retained structural routes include matching canonical siblings. Oversized descriptions leave policy scope unavailable while the physical callback proceeds.
