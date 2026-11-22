@@ -501,11 +501,14 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 		require.True(t, found, path)
 		if strings.HasSuffix(path, "/page") {
 			var page struct {
-				Timing map[string]struct {
+				SourceSeverity map[string]string `json:"source_severity_by_fingerprint"`
+				Timing         map[string]struct {
 					Schedules []struct{ State string } `json:"repeat_schedules"`
 				} `json:"timing_by_fingerprint"`
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+			require.Len(t, page.SourceSeverity, 2)
+			require.Equal(t, "minor", page.SourceSeverity[target.ProviderSource().Fingerprint().String()])
 			steps := page.Timing[target.ProviderSource().Fingerprint().String()].Schedules
 			require.Len(t, steps, 1)
 			require.Equal(t, "suppressed", steps[0].State)

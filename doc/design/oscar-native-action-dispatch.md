@@ -235,3 +235,11 @@ traffic includes lifecycle, delivery and coverage costs. D1–D3 must keep this
 cohort in the same-work before/after latency comparison and meet the existing
 5% threshold. Measure a 150-minute loaded interval plus drain. Timings from
 static inspection or source compilation cannot establish these properties.
+
+## Active Alerts severity
+
+The existing version 2 page sorts and filters the effective routing view. Its
+optional `source_severity_by_fingerprint` map contains source severity only when
+it differs from the effective severity on the same selected page member. The
+map uses the immutable provider fingerprint already carried by each record.
+This read adds no journal or History queries.

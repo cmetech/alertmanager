@@ -26,6 +26,7 @@ type alias OscarAlertPage =
     , totalRecords : Int
     , totalPages : Int
     , timingByFingerprint : Dict String OscarAlertTiming
+    , sourceSeverityByFingerprint : Maybe (Dict String String)
     }
 
 
@@ -37,6 +38,7 @@ decoder =
         |> required "total_records" Decode.int
         |> required "total_pages" Decode.int
         |> required "timing_by_fingerprint" (Decode.dict OscarAlertTiming.decoder)
+        |> optional "source_severity_by_fingerprint" (Decode.nullable (Decode.dict Decode.string)) Nothing
 
 
 encoder : OscarAlertPage -> Encode.Value
@@ -47,4 +49,5 @@ encoder model =
         , ( "total_records", Encode.int model.totalRecords )
         , ( "total_pages", Encode.int model.totalPages )
         , ( "timing_by_fingerprint", Encode.dict identity OscarAlertTiming.encoder model.timingByFingerprint )
+        , ( "source_severity_by_fingerprint", Maybe.withDefault Encode.null (Maybe.map (Encode.dict identity Encode.string) model.sourceSeverityByFingerprint) )
         ]

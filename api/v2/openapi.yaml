@@ -773,6 +773,11 @@ definitions:
         type: object
         additionalProperties:
           $ref: '#/definitions/oscarAlertTiming'
+      source_severity_by_fingerprint:
+        type: object
+        description: Source severity from the same sampled alert, present when it differs from the effective severity.
+        additionalProperties:
+          type: string
     required:
       - contract_version
       - records

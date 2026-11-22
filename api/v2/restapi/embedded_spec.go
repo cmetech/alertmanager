@@ -1369,6 +1369,13 @@ func init() {
         "records": {
           "$ref": "#/definitions/gettableAlerts"
         },
+        "source_severity_by_fingerprint": {
+          "description": "Source severity from the same sampled alert, present when it differs from the effective severity.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "timing_by_fingerprint": {
           "type": "object",
           "additionalProperties": {
@@ -3272,6 +3279,13 @@ func init() {
         },
         "records": {
           "$ref": "#/definitions/gettableAlerts"
+        },
+        "source_severity_by_fingerprint": {
+          "description": "Source severity from the same sampled alert, present when it differs from the effective severity.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "timing_by_fingerprint": {
           "type": "object",
