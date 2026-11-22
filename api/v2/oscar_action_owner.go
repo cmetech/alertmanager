@@ -53,6 +53,8 @@ type actionRPC interface {
 }
 type actionClient struct{ *managedClient }
 
+var incompatibleLease = errors.New("incompatible native authority lease response")
+
 func (c actionClient) call(ctx context.Context, cmd string, args map[string]any, out any) error {
 	b, err := json.Marshal(args)
 	if err != nil || len(b) > actionBodyLimit {
@@ -69,7 +71,18 @@ func (c actionClient) call(ctx context.Context, cmd string, args map[string]any,
 		return unavailable
 	}
 	defer resp.Body.Close()
+	lease := cmd == "acquire-authority" || cmd == "renew-authority"
+	if lease {
+		code := resp.StatusCode
+		if code > http.StatusOK && code < 300 || code >= 400 && code < 500 &&
+			code != http.StatusRequestTimeout && code != http.StatusTooEarly && code != http.StatusTooManyRequests {
+			return incompatibleLease
+		}
+	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
+	if lease && resp.StatusCode == http.StatusOK && len(raw) > 2<<20 {
+		return incompatibleLease
+	}
 	if err != nil || len(raw) > 2<<20 {
 		return unavailable
 	}
@@ -81,6 +94,9 @@ func (c actionClient) call(ctx context.Context, cmd string, args map[string]any,
 		return unavailable
 	}
 	if err = json.Unmarshal(raw, out); err != nil {
+		if lease {
+			return incompatibleLease
+		}
 		return unavailable
 	}
 	return nil
@@ -1129,7 +1145,22 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	}
 	var targets []DispatchTarget
 	reason := ""
-	if dispatchKind(req.Kind) {
+	if dispatchKind(req.Kind) && req.PolicyBinding == nil && i != nil && i.Intent != nil && i.Intent.State == "accepted" && len(i.Result.Targets) > 0 {
+		// A renewed operation keeps every frozen target. One currently eligible
+		// pending target can make progress; every entry revalidates its own target.
+		eligible := false
+		for _, t := range i.Result.Targets {
+			targets = append(targets, t.Target)
+			if eligible || t.State != "pending" || t.SuccessorID != nil {
+				continue
+			}
+			current, held, planErr := o.dispatch.Plan(WithPersistedTarget(ctx, t.Target), source, proposed, req)
+			eligible = planErr == nil && held == "" && slices.ContainsFunc(current, func(dst DispatchTarget) bool { return reflect.DeepEqual(dst, t.Target) })
+		}
+		if !eligible {
+			return r, reconcile
+		}
+	} else if dispatchKind(req.Kind) {
 		targets, reason, err = o.dispatch.Plan(ctx, source, proposed, req)
 		if err != nil {
 			return r, err

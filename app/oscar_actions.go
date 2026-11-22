@@ -493,6 +493,11 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	i := g.targets[receiver][match]
 	var ordinary []*alert.Alert
 	var held error
+	var heldResolved bool
+	hold := func(m *alert.Alert, err error) {
+		held = errors.Join(held, err)
+		heldResolved = heldResolved || m.Resolved()
+	}
 	contacts := make(map[*alert.Alert]ordinaryContact, len(members))
 	for _, m := range members {
 		source := m.ProviderSource()
@@ -501,7 +506,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		}
 		p, pass, err := a.journal.InspectOrdinary(ctx, source)
 		if err != nil {
-			held = err
+			hold(m, err)
 			continue
 		}
 		c := ordinaryContact{pass: pass, contact: plannedContact{DispatchTarget: v2.DispatchTarget{ReceiverID: receiver}, integration: i}}
@@ -509,7 +514,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			c.p = *p
 			view, err := effectiveMember(source, *p)
 			if err != nil || !view.Labels.Equal(m.Labels) || p.State == "resolved" && !m.TerminalWireValid() {
-				held = actionHeld
+				hold(m, actionHeld)
 				continue
 			}
 		}
@@ -576,9 +581,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		}
 		if i.prepared != nil && len(candidates) > 1 && slices.ContainsFunc(candidates, func(m *alert.Alert) bool { return contacts[m].pass == nil }) {
 			var completed []*alert.Alert
-			var cohortErr error
-			candidates, completed, cohortErr = a.inspectCohort(ctx, g, i, contacts, candidates)
-			held = errors.Join(held, cohortErr)
+			candidates, completed = a.inspectCohort(ctx, g, i, contacts, candidates, hold)
 			accepted = append(accepted, completed...)
 			ordinaryAcceptance = len(completed) > 0
 		}
@@ -604,7 +607,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			c, err := a.ordinaryContact(ctx, g, m, c)
 			if err != nil {
 				if err.Error() != "NATIVE_SUPPRESSED" {
-					held = errors.Join(held, err)
+					hold(m, err)
 				}
 				continue
 			}
@@ -631,7 +634,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			v, delivered, noSend := a.invoke(ctx, g, integration, pending, entries, truncated)
 			if i.name == "incidentio" && v.Err() == nil && len(delivered) > 0 {
 				incomplete := contentIncomplete || len(delivered) != len(pending)
-				notify.MarkContentIncomplete(ctx, incomplete)
+				contentIncomplete = incomplete
 				ordinaryAcceptance = ordinaryAcceptance || incomplete
 			}
 			if !noSend && len(delivered) != len(pending) {
@@ -656,6 +659,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		default:
 			logMembers = nil
 		}
+		if len(logMembers) > 0 && (ack != nil || heldResolved || contentIncomplete) {
+			notify.MarkContentIncomplete(ctx, heldResolved || contentIncomplete)
+		}
 		if len(logMembers) == 0 && held != nil {
 			return notify.Unrecoverable(held, notify.DefaultReason)
 		}
@@ -666,14 +672,13 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 
 // inspectCohort removes ineligible members monotonically. Re-evaluate the
 // remaining group's rendered destination before creating any reservation.
-func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i actionIntegration, contacts map[*alert.Alert]ordinaryContact, members []*alert.Alert) ([]*alert.Alert, []*alert.Alert, error) {
+func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i actionIntegration, contacts map[*alert.Alert]ordinaryContact, members []*alert.Alert, hold func(*alert.Alert, error)) ([]*alert.Alert, []*alert.Alert) {
 	type observation struct {
 		member *alert.Alert
 		digest string
 	}
 	cache := make(map[observation]string)
 	var completed []*alert.Alert
-	var held error
 	for range 16 {
 		probe := context.WithValue(notify.ForMembers(ctx, members), batchDestinationKey{}, &batchDestination{config: i.digest, members: members})
 		due := make([]*alert.Alert, 0, len(members))
@@ -681,7 +686,7 @@ func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i act
 			c := contacts[m]
 			c, err := a.planOrdinary(probe, g, m, c)
 			if err != nil {
-				held = errors.Join(held, err)
+				hold(m, err)
 				continue
 			}
 			if c.pass != nil {
@@ -694,7 +699,7 @@ func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i act
 			if !ok {
 				state, err = a.journal.InspectContact(probe, m, c.p, c.contact.DispatchTarget)
 				if err != nil {
-					held = errors.Join(held, err)
+					hold(m, err)
 					continue
 				}
 				cache[key] = state
@@ -707,15 +712,18 @@ func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i act
 				completed = append(completed, m)
 			case "covered":
 			default:
-				held = errors.Join(held, actionHeld)
+				hold(m, actionHeld)
 			}
 		}
 		if len(due) == len(members) || len(due) == 0 {
-			return due, completed, held
+			return due, completed
 		}
 		members = due
 	}
-	return nil, completed, errors.Join(held, actionHeld)
+	for _, m := range members {
+		hold(m, actionHeld)
+	}
+	return nil, completed
 }
 
 func currentGroup(ctx context.Context, m *alert.Alert, r *dispatch.Route) bool {
@@ -723,9 +731,9 @@ func currentGroup(ctx context.Context, m *alert.Alert, r *dispatch.Route) bool {
 	return dispatch.GroupKeyForAlert(m, r) == key
 }
 
-func (a *nativeActions) reserve(ctx context.Context, p v2.EpisodeProjection, t plannedContact) (ordinaryContact, error) {
+func (a *nativeActions) reserve(ctx context.Context, member *alert.Alert, p v2.EpisodeProjection, t plannedContact) (ordinaryContact, error) {
 	id := uuid.NewString()
-	r, err := a.journal.ReserveOrdinary(ctx, id, p.EpisodeRef, t.DispatchTarget, false)
+	r, err := a.journal.ReserveOrdinary(ctx, id, member, p, t.DispatchTarget)
 	if err != nil {
 		return ordinaryContact{}, err
 	}
@@ -790,7 +798,7 @@ func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *
 		return c, err
 	}
 	if c.p.State == "firing" {
-		return a.reserve(ctx, c.p, c.contact)
+		return a.reserve(ctx, m, c.p, c.contact)
 	}
 	if c.p.State != "resolved" {
 		return c, actionHeld

@@ -170,8 +170,8 @@ const incompleteContent = "oscarIncompleteContent"
 
 type incompleteContentKey struct{}
 
-// ContentBaseline returns previously acknowledged members while the provider's
-// size-limited payload still has an outstanding tail.
+// ContentBaseline identifies acknowledged members while an ordinary group's
+// content or a held resolution still needs a later flush.
 func ContentBaseline(ctx context.Context) func(*alert.Alert) bool {
 	ack, _ := ctx.Value(incompleteContentKey{}).(func(*alert.Alert) bool)
 	return ack

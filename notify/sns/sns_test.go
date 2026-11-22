@@ -351,6 +351,16 @@ func TestOscarActionSNSHeaderChangedDuringValidation(t *testing.T) {
 	key := []byte(strings.Repeat("a", 32))
 	digest, err := i.PreparedDigest(ctx, key, "config", nil)
 	require.NoError(t, err)
+	// The legacy SNS recipient used only the eight SDK fields. Reusing its key
+	// cannot map an outstanding unknown onto the current file-bound recipient.
+	probe := &notify.ProviderEntry{Destination: func(fields ...string) bool {
+		require.Len(t, fields, 10)
+		require.Equal(t, []string{file, "first"}, fields[8:])
+		require.NotEqual(t, notify.DestinationDigest(key, "config", fields[:8]...), digest)
+		require.Equal(t, notify.DestinationDigest(key, "config", fields...), digest)
+		return false
+	}}
+	require.Error(t, n.Notify(notify.WithProviderEntry(ctx, probe)).Err())
 	entry := &notify.ProviderEntry{Destination: func(fields ...string) bool { return digest == notify.DestinationDigest(key, "config", fields...) }, Begin: func() bool {
 		require.NoError(t, os.WriteFile(file, []byte("second"), 0o600))
 		got, err := i.PreparedDigest(ctx, key, "config", nil)

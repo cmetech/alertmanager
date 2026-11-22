@@ -64,11 +64,15 @@ target keys, pending and unknown ownership, and repeat deadlines. The original
 entry token can settle its original row. Canonical signing retains its separate
 callback credential. A direct-only graph requires no callback credential.
 
-The paired native reader and store require recipient-binding protocol version 1
-and the updated authority-column migration. A legacy NULL authority key with
-retained work holds delivery. Initialize a previously used namespace only with
-its exact prior derived key or after independently verified reconciliation.
-The normal migration adds a nullable column and preserves all existing rows.
+The paired native reader and store require recipient-binding protocol version 2
+and the updated authority migration. A missing stored namespace version holds
+retained work even after import of the exact prior key. For example, current
+SNS identities include file headers absent from legacy digests. Resuming a
+retained namespace requires independently verified ownership mapping or
+reconciliation of its pending, unknown and confirmed coverage. The migration
+leaves existing namespaces unmarked. Original entry tokens can settle during
+the hold. An incompatible renewal immediately fences local entry. A transient
+outage leaves only the balance of the existing lease.
 
 For group-dependent recipients the ordinary reader inspects already-tracked
 candidates under their current route, variant and lifecycle. It removes
@@ -77,7 +81,11 @@ and checks the final cohort before its reservation CAS. Each inspection is
 indexed and the reader reuses results for an unchanged member and digest
 within the same flush. After 16 reductions it holds for another evaluation.
 Previously admitted selected targets revalidate independently if a sibling's
-recipient file becomes unavailable.
+recipient file becomes unavailable, including during non-policy permit renewal.
+The frozen accepted target set survives renewal. Entry still requires current
+eligibility for the individual target. Firing reservations bind the inspected
+source, severity revision, lifecycle and outgoing labels. After partial
+confirmation, a held resolved sibling stays due across native group cleanup.
 
 On guarded HTTP mutations the native client retains configured authentication,
 CA, proxy and pooled connections. A separate HTTP/1 pool gives each active
@@ -110,7 +118,10 @@ normal group eligibility, send-resolved filtering and webhook truncation.
 The journal derives the operation ID from the retained episode row, variant,
 terminal sequence and destination. Claim rechecks current terminal identity,
 the exact original source pointer and expiry, routing, suppression and the
-lease. An entered target keeps its receipt after re-fire. A canonical callback
+lease. A later due flush with identical frozen evidence can renew a terminal
+permit after expiry if its durable target has never received an entry token.
+This includes a pending target that recovery closed solely for permit expiry.
+An entered target keeps its receipt after re-fire. A canonical callback
 carries a stable delivery UUID and ordinary lifecycle semantics. An independent
 firing action cannot use a terminal claim. The claim does not advance a repeat
 or reserve firing coverage.

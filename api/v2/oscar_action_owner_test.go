@@ -8,6 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,7 +39,7 @@ func (testActionDispatch) Wake(context.Context, string) error               { re
 
 func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 	t.Parallel()
-	for _, failure := range []string{"reserve", "commit", "resolve-during-commit", "expired-permit", "operation-conflict"} {
+	for _, failure := range []string{"reserve", "commit", "resolve-during-commit", "expired-permit", "expired-sibling-permit", "operation-conflict"} {
 		t.Run(failure, func(t *testing.T) {
 			var req ActionRequestV1
 			require.NoError(t, json.Unmarshal([]byte(actionBody), &req))
@@ -95,6 +99,15 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 				return json.Unmarshal(b, out)
 			})
 			o = newNativeActionOwner(req.EpisodeRef.AuthorityID, rpc, testActionDispatch{})
+			var dynamicFile string
+			if failure == "expired-sibling-permit" {
+				req.Kind = "resend"
+				dynamicFile = filepath.Join(t.TempDir(), "url")
+				require.NoError(t, os.WriteFile(dynamicFile, []byte("https://fixture.invalid"), 0o600))
+				o.dispatch = retainedTargetPlan{testActionDispatch{}, dynamicFile, []DispatchTarget{
+					{ReceiverID: "team", IntegrationDigest: strings.Repeat("b", 64)}, {ReceiverID: "team", IntegrationDigest: strings.Repeat("c", 64)},
+				}}
+			}
 			o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
 			o.recovered = true
 			o.observe("", source, false)
@@ -115,6 +128,20 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 				expired := time.Now().Add(-time.Second)
 				record.Result.PermitExpiresAt = &expired
 				_, err = o.Execute(t.Context(), req)
+				require.NoError(t, err)
+				require.True(t, renewed)
+			}
+			if failure == "expired-sibling-permit" {
+				expired := time.Now().Add(-time.Second)
+				record.Result.PermitExpiresAt = &expired
+				require.Len(t, record.Intent.Targets, 2)
+				frozen := append([]DispatchTarget(nil), record.Intent.Targets...)
+				for _, dst := range frozen {
+					record.Result.Targets = append(record.Result.Targets, TargetResult{Target: dst, State: "pending"})
+				}
+				require.NoError(t, os.Remove(dynamicFile))
+				err = o.recoverWork(t.Context(), req.OperationID, map[string]bool{})
+				require.Equal(t, frozen, record.Intent.Targets)
 				require.NoError(t, err)
 				require.True(t, renewed)
 			}
@@ -221,7 +248,7 @@ func TestOscarActionReadinessNeedsVersionAndRejectsConflictingLease(t *testing.T
 		if foreign {
 			return unavailable
 		}
-		return json.Unmarshal(mustRaw(t, actionLease{Protocol: protocol, RecoverySelectors: selectors, TerminalObservations: 2, RecipientBinding: 1, RecipientKey: strings.Repeat("ab", 32), OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
+		return json.Unmarshal(mustRaw(t, actionLease{Protocol: protocol, RecoverySelectors: selectors, TerminalObservations: 2, RecipientBinding: 2, RecipientKey: strings.Repeat("ab", 32), OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
 	})
 	o = newNativeActionOwner(defaultActionAuthority, rpc, nil)
 	require.ErrorIs(t, o.leaseTick(t.Context()), unavailable)
@@ -516,7 +543,7 @@ func TestFloorCommitFencesOutstandingEntryBeforeLostReply(t *testing.T) {
 		switch cmd {
 		case "lookup":
 			if p["operation_id"] == oldID {
-				record := actionIntent{Request: mustRaw(t, ordinaryRequest{Kind: "ordinary", OperationID: oldID, EpisodeRef: req.EpisodeRef, Target: target}), Digest: strings.Repeat("b", 64), Result: ActionResultV1{EpisodeRef: req.EpisodeRef, OperationID: oldID, PermitExpiresAt: &expiry, Targets: []TargetResult{{State: "pending", TargetKey: key, Target: target}}}}
+				record := actionIntent{Request: mustRaw(t, ordinaryRequest{Kind: "ordinary", LifecycleSeq: 1, OperationID: oldID, EpisodeRef: req.EpisodeRef, Target: target}), Digest: strings.Repeat("b", 64), Result: ActionResultV1{EpisodeRef: req.EpisodeRef, OperationID: oldID, PermitExpiresAt: &expiry, Targets: []TargetResult{{State: "pending", TargetKey: key, Target: target}}}}
 				return json.Unmarshal(mustRaw(t, record), out)
 			}
 			if lost {
@@ -1121,12 +1148,12 @@ func TestOscarActionBootEpochSwapAfterRestoringFiringSlot(t *testing.T) {
 func TestOscarActionRecipientKeySurvivesOwnerReplacement(t *testing.T) {
 	t.Parallel()
 	key := strings.Repeat("a1", 32)
-	binding := 1
+	binding := 2
 	var prior []byte
 	for _, credential := range []string{"original", "rotated"} {
 		var o *nativeActionOwner
 		rpc := actionRPCFunc(func(_ context.Context, _ string, args map[string]any, out any) error {
-			require.Equal(t, 1, args["recipient_binding"])
+			require.Equal(t, 2, args["recipient_binding"])
 			return json.Unmarshal(mustRaw(t, actionLease{Protocol: "native-action-store-v1", RecoverySelectors: 1, TerminalObservations: 2, RecipientBinding: binding, RecipientKey: key, OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
 		})
 		o = newNativeActionOwner(defaultActionAuthority, rpc, nil)
@@ -1139,10 +1166,99 @@ func TestOscarActionRecipientKeySurvivesOwnerReplacement(t *testing.T) {
 		for _, tc := range []struct {
 			marker int
 			key    string
-		}{{0, key}, {1, ""}, {1, strings.Repeat("bd", 32)}} {
+		}{{0, key}, {1, key}, {2, ""}, {2, strings.Repeat("bd", 32)}} {
 			binding, key = tc.marker, tc.key
 			require.Error(t, o.leaseTick(t.Context()))
 			require.False(t, o.lease.ExpiresAt.After(time.Now()))
 		}
 	}
+}
+
+type renewalResponse func(*http.Request) (*http.Response, error)
+
+func (f renewalResponse) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestWireRenewalReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		body   string
+		live   bool
+	}{
+		{200, `{"recipient_binding":"2"}`, false},
+		{200, `{"recipient_key":42}`, false},
+		{422, `{"detail":[{"type":"literal_error"}]}`, false},
+		{204, "", false},
+		{429, "", true},
+		{503, `{"detail":"temporary outage"}`, true},
+	} {
+		rpc := actionClient{&managedClient{scheme: "http", http: &http.Client{Transport: renewalResponse(func(r *http.Request) (*http.Response, error) {
+			require.True(t, strings.HasSuffix(r.URL.Path, "/renew-authority"))
+			return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+		})}}}
+		o := newNativeActionOwner(defaultActionAuthority, rpc, testActionDispatch{})
+		o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
+		o.recovered = true
+		s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: time.Now(), EndsAt: time.Now().Add(time.Hour)}, time.Now(), false)
+		o.readSource = func(_, _ string, use func(*alert.Alert)) { use(s) }
+		_, pass, err := o.InspectOrdinary(t.Context(), s)
+		require.NoError(t, err)
+		require.True(t, pass.Enter())
+		require.Error(t, o.leaseTick(t.Context()))
+		require.Equal(t, tc.live, o.ready())
+		require.Equal(t, tc.live, pass.Valid())
+	}
+}
+
+type retainedTargetPlan struct {
+	testActionDispatch
+	file    string
+	targets []DispatchTarget
+}
+
+func (d retainedTargetPlan) Plan(ctx context.Context, _ *alert.Alert, _ EpisodeProjection, _ ActionRequestV1) ([]DispatchTarget, string, error) {
+	if wanted, ok := PersistedTarget(ctx); ok && wanted.IntegrationDigest == d.targets[1].IntegrationDigest {
+		return d.targets[1:], "", nil
+	}
+	if _, err := os.ReadFile(d.file); err != nil {
+		return nil, "", err
+	}
+	return d.targets, "", nil
+}
+
+func TestFiringReserveRejectsFloorUpdateAfterInspection(t *testing.T) {
+	now := time.Now()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	var commands []string
+	rpc := actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+		commands = append(commands, cmd)
+		switch cmd {
+		case "project-episode":
+			return json.Unmarshal(mustRaw(t, EpisodeProjection{episodeUpdate: args["update"].(episodeUpdate)}), out)
+		case "inspect-contact":
+			return json.Unmarshal([]byte(`"due"`), out)
+		default:
+			t.Fatalf("stale major payload reached %s", cmd)
+			return nil
+		}
+	})
+	o := newNativeActionOwner(defaultActionAuthority, rpc, testActionDispatch{})
+	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Minute)}
+	o.recovered = true
+	o.observe("", source, false)
+	p, err := o.Project(t.Context(), source)
+	require.NoError(t, err)
+	m := source.NotificationCopy(now)
+	target := DispatchTarget{ReceiverID: "team", IntegrationDigest: strings.Repeat("d", 64)}
+	state, err := o.InspectContact(t.Context(), m, p, target)
+	require.NoError(t, err)
+	require.Equal(t, "due", state)
+	slot, err := o.episode(p.EpisodeRef)
+	require.NoError(t, err)
+	slot.turn.Lock()
+	slot.projection.Floor = "critical"
+	slot.projection.SeverityRevision++
+	slot.turn.Unlock()
+	_, err = o.ReserveOrdinary(t.Context(), "11111111-1111-4111-8111-111111111111", m, p, target)
+	require.ErrorIs(t, err, mismatch)
+	require.NotContains(t, commands, "reserve-coverage")
 }

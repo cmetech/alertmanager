@@ -49,6 +49,7 @@ type Entry interface {
 type claimedEntry struct {
 	OperationID, TargetKey, token string
 	source                        *alert.Alert
+	severity                      string
 	terminal                      *terminalObservation
 	ref                           EpisodeRef
 	revision                      uint64
@@ -71,8 +72,13 @@ func (e claimedEntry) ForSource(source *alert.Alert) bool { return source != nil
 
 // ForMember checks the frozen outgoing transport state as well as the original provider pointer.
 func (e claimedEntry) ForMember(m *alert.Alert) bool {
-	return m != nil && e.ForSource(m.ProviderSource()) && (e.terminal == nil ||
-		m.TerminalWireValid() && m.Resolved() == e.terminal.WireResolved)
+	if m == nil || !e.ForSource(m.ProviderSource()) {
+		return false
+	}
+	if e.terminal != nil {
+		return m.TerminalWireValid() && m.Resolved() == e.terminal.WireResolved
+	}
+	return !m.Resolved() && string(m.Labels["severity"]) == e.severity
 }
 
 func (e claimedEntry) Valid() bool { return (e.ready == nil || e.ready()) && e.LocalValid() }
@@ -91,7 +97,7 @@ type ActionJournal interface {
 	Lookup(context.Context, string) (ActionResultV1, error)
 	Delivery(context.Context, *alert.Alert, string, string, Entry) (alert.NativeDeliveryV1, error)
 	Project(context.Context, *alert.Alert) (EpisodeProjection, error)
-	ReserveOrdinary(context.Context, string, EpisodeRef, DispatchTarget, bool) (ActionResultV1, error)
+	ReserveOrdinary(context.Context, string, *alert.Alert, EpisodeProjection, DispatchTarget) (ActionResultV1, error)
 	Claim(context.Context, string, string) (Entry, error)
 	Settle(context.Context, Entry, string, string) (ActionResultV1, error)
 }
@@ -126,12 +132,20 @@ func (o *nativeActionOwner) Delivery(ctx context.Context, source *alert.Alert, r
 	return d, d.Validate(receiver)
 }
 
-func (o *nativeActionOwner) ReserveOrdinary(ctx context.Context, id string, ref EpisodeRef, target DispatchTarget, renew bool) (ActionResultV1, error) {
+func (o *nativeActionOwner) ReserveOrdinary(ctx context.Context, id string, member *alert.Alert, expected EpisodeProjection, target DispatchTarget) (ActionResultV1, error) {
+	if member == nil || member.Resolved() || expected.State != "firing" {
+		return ActionResultV1{}, mismatch
+	}
+	return o.reserveOrdinary(ctx, id, member, expected, target)
+}
+
+func (o *nativeActionOwner) reserveOrdinary(ctx context.Context, id string, member *alert.Alert, expected EpisodeProjection, target DispatchTarget) (ActionResultV1, error) {
 	ctx = o.withEpoch(ctx)
 	var r ActionResultV1
 	if !o.ready() || !managedUUID.MatchString(id) {
 		return r, unavailable
 	}
+	ref, revision := expected.EpisodeRef, expected.SeverityRevision
 	s, err := o.episode(ref)
 	if err != nil {
 		return r, err
@@ -143,8 +157,18 @@ func (o *nativeActionOwner) ReserveOrdinary(ctx context.Context, id string, ref 
 	}
 	p := s.projection
 	source := s.latest()
-	if ref != p.EpisodeRef {
+	if ref != p.EpisodeRef || revision != p.SeverityRevision || expected.LifecycleSeq != p.LifecycleSeq {
 		return r, mismatch
+	}
+	renew := member == nil
+	if !renew {
+		if member.ProviderSource() != source || !sameVariant(expected.NativeVariant, p.NativeVariant) || expected.EffectiveSeverity() != p.EffectiveSeverity() {
+			return r, mismatch
+		}
+		view, err := alert.BuildDispatchView(source, ref, p.EffectiveSeverity(), revision)
+		if err != nil || !view.EffectiveLabels.Equal(member.Labels) {
+			return r, mismatch
+		}
 	}
 	if err = s.current(p, source, true); err != nil {
 		return r, err
@@ -153,6 +177,9 @@ func (o *nativeActionOwner) ReserveOrdinary(ctx context.Context, id string, ref 
 		return r, err
 	}
 	req := ActionRequestV1{EpisodeRef: ref, Kind: "ordinary", TargetScope: target.Scope}
+	if renew {
+		ctx = WithPersistedTarget(ctx, target)
+	}
 	targets, reason, err := o.dispatch.Plan(ctx, source, p, req)
 	if err != nil {
 		return r, err
@@ -163,14 +190,14 @@ func (o *nativeActionOwner) ReserveOrdinary(ctx context.Context, id string, ref 
 	if err = s.current(p, source, true); err != nil {
 		return r, err
 	}
-	err = o.write(ctx, "reserve-coverage", map[string]any{"operation_id": id, "ref": ref, "target": target, "expected_revision": p.SeverityRevision, "renew_permit": renew}, &r)
+	err = o.write(ctx, "reserve-coverage", map[string]any{"operation_id": id, "ref": ref, "target": target, "expected_revision": revision, "lifecycle_seq": expected.LifecycleSeq, "renew_permit": renew}, &r)
 	if err != nil {
 		record, e := o.resolveIntent(ctx, id)
 		if e != nil || record == nil {
 			return r, err
 		}
 		var old ordinaryRequest
-		if json.Unmarshal(record.Request, &old) != nil || old.Kind != "ordinary" || old.EpisodeRef != ref || old.OperationID != id || old.SeverityRevision != p.SeverityRevision || !reflect.DeepEqual(old.Target, target) {
+		if json.Unmarshal(record.Request, &old) != nil || old.Kind != "ordinary" || old.EpisodeRef != ref || old.OperationID != id || old.SeverityRevision != revision || old.LifecycleSeq != expected.LifecycleSeq || !reflect.DeepEqual(old.Target, target) {
 			return r, conflict
 		}
 		r = record.Result
@@ -244,7 +271,7 @@ func contactObservation(m *alert.Alert, p EpisodeProjection, target DispatchTarg
 }
 
 // ReserveTerminal binds a due ordinary clear to one exact source and receiver.
-// Retrying the command recovers the same backend-derived operation and cannot renew its permit.
+// A new due flush can renew the same backend-derived operation only while durable evidence proves it never entered.
 func (o *nativeActionOwner) ReserveTerminal(ctx context.Context, member *alert.Alert, p EpisodeProjection, target DispatchTarget) (ActionResultV1, error) {
 	ctx = o.withEpoch(ctx)
 	var r ActionResultV1
@@ -282,6 +309,7 @@ func (o *nativeActionOwner) ReserveTerminal(ctx context.Context, member *alert.A
 }
 
 type ordinaryRequest struct {
+	LifecycleSeq     uint64               `json:"lifecycle_seq,omitempty"`
 	Terminal         *terminalObservation `json:"terminal,omitempty"`
 	Kind             string               `json:"kind"`
 	OperationID      string               `json:"operation_id"`
@@ -332,6 +360,9 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	p := s.projection
 	source := s.latest()
 	if p.EpisodeRef != r.EpisodeRef || p.SeverityRevision != r.SeverityRevision {
+		return nil, mismatch
+	}
+	if ordinary.Kind == "ordinary" && ordinary.Terminal == nil && ordinary.LifecycleSeq != p.LifecycleSeq {
 		return nil, mismatch
 	}
 	if ordinary.Terminal != nil && (source == nil || ordinary.Terminal.SourceDigest != terminalSourceDigest(source)) {
@@ -390,7 +421,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 		}
 		logical = &i.LogicalActionID
 	}
-	e := claimedEntry{OperationID: id, TargetKey: key, token: entry.Token, source: source, terminal: ordinary.Terminal, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, ready: o.ready, valid: func() bool {
+	e := claimedEntry{OperationID: id, TargetKey: key, token: entry.Token, source: source, severity: p.EffectiveSeverity(), terminal: ordinary.Terminal, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, ready: o.ready, valid: func() bool {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		s.local.Lock()

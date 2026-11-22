@@ -122,7 +122,8 @@ func (o *nativeActionOwner) recoverWork(ctx context.Context, id string, seen map
 				return nil
 			}
 			if !explicit {
-				_, err = o.ReserveOrdinary(ctx, id, r.EpisodeRef, ordinary.Target, true)
+				expected := EpisodeProjection{episodeUpdate: episodeUpdate{EpisodeRef: r.EpisodeRef, LifecycleSeq: ordinary.LifecycleSeq}, SeverityRevision: ordinary.SeverityRevision}
+				_, err = o.reserveOrdinary(ctx, id, nil, expected, ordinary.Target)
 			} else {
 				_, err = o.Execute(ctx, req)
 			}
@@ -365,13 +366,15 @@ func (o *nativeActionOwner) operationPage(ctx context.Context, after string) ([]
 	return rows, nil
 }
 
+const recipientBinding = 2
+
 func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	o.mu.Lock()
 	old := o.lease
 	o.mu.Unlock()
 	if old.Epoch == 0 || !old.ExpiresAt.After(time.Now()) {
 		var l actionLease
-		if err := o.read(ctx, "acquire-authority", map[string]any{"owner_id": o.owner, "recipient_binding": 1}, &l); err != nil {
+		if err := o.read(ctx, "acquire-authority", map[string]any{"owner_id": o.owner, "recipient_binding": recipientBinding}, &l); err != nil {
 			return err
 		}
 		if !o.validLease(l) {
@@ -381,7 +384,10 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	}
 	start := time.Now()
 	var l actionLease
-	err := o.read(ctx, "renew-authority", map[string]any{"owner_id": o.owner, "epoch": old.Epoch, "recipient_binding": 1}, &l)
+	err := o.read(ctx, "renew-authority", map[string]any{"owner_id": o.owner, "epoch": old.Epoch, "recipient_binding": recipientBinding}, &l)
+	if errors.Is(err, incompatibleLease) {
+		return o.rejectLease()
+	}
 	if err != nil {
 		return err
 	}
@@ -423,7 +429,7 @@ func (o *nativeActionOwner) rejectLease() error {
 }
 
 func (o *nativeActionOwner) validLease(l actionLease) bool {
-	return l.RecipientBinding == 1 && managedHash.MatchString(l.RecipientKey) && l.Protocol == "native-action-store-v1" && l.RecoverySelectors == 1 && l.TerminalObservations == 2 && l.AuthorityID == o.authority && l.OwnerID == o.owner && l.Epoch > 0 && l.RenewSeconds == 10 && !l.ExpiresAt.IsZero()
+	return l.RecipientBinding == recipientBinding && managedHash.MatchString(l.RecipientKey) && l.Protocol == "native-action-store-v1" && l.RecoverySelectors == 1 && l.TerminalObservations == 2 && l.AuthorityID == o.authority && l.OwnerID == o.owner && l.Epoch > 0 && l.RenewSeconds == 10 && !l.ExpiresAt.IsZero()
 }
 
 // Drain observed changes even when an episode has no explicit operation or delivery pending.

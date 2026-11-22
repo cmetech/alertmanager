@@ -319,13 +319,21 @@ type terminalFixtureJournal struct {
 	covered                            string
 	coverageChecks                     int
 	confirmed                          map[string]bool
+	failInspectHost                    string
+	failReserveAfterFirst              bool
+	firstPermit                        time.Time
+	resumedExpired                     bool
 	first                              bool
 	state                              string
 	reserved, claimed, settled, events []string
 }
 
 func (*terminalFixtureJournal) RecipientKey() []byte { return []byte(strings.Repeat("r", 32)) }
-func (j *terminalFixtureJournal) InspectContact(_ context.Context, _ *alert.Alert, p v2.EpisodeProjection, _ v2.DispatchTarget) (string, error) {
+func (j *terminalFixtureJournal) InspectContact(_ context.Context, m *alert.Alert, p v2.EpisodeProjection, _ v2.DispatchTarget) (string, error) {
+	if j.failInspectHost != "" && string(m.Labels["host"]) == j.failInspectHost {
+		j.failInspectHost = ""
+		return "", errors.New("temporary inspection failure")
+	}
 	if p.State == "resolved" && j.confirmed[p.EpisodeRef.EpisodeID] {
 		return "completed", nil
 	}
@@ -360,10 +368,21 @@ func (j *terminalFixtureJournal) reservation(id string, ref v2.EpisodeRef, t v2.
 }
 
 func (j *terminalFixtureJournal) ReserveTerminal(_ context.Context, m *alert.Alert, p v2.EpisodeProjection, t v2.DispatchTarget) (v2.ActionResultV1, error) {
+	if j.failReserveAfterFirst && len(j.reserved) == 0 {
+		j.firstPermit = time.Now().Add(30 * time.Second)
+	}
+	if !j.firstPermit.IsZero() && len(j.reserved) > 0 && p.EpisodeRef.EpisodeID == j.reserved[0] {
+		j.resumedExpired = time.Now().After(j.firstPermit)
+	}
+	if j.failReserveAfterFirst && len(j.reserved) == 1 {
+		j.failReserveAfterFirst = false
+		return v2.ActionResultV1{}, errors.New("sibling CAS lost")
+	}
 	return j.reservation(p.EpisodeRef.EpisodeID, p.EpisodeRef, t), nil
 }
 
-func (j *terminalFixtureJournal) ReserveOrdinary(_ context.Context, id string, ref v2.EpisodeRef, t v2.DispatchTarget, _ bool) (v2.ActionResultV1, error) {
+func (j *terminalFixtureJournal) ReserveOrdinary(_ context.Context, id string, _ *alert.Alert, p v2.EpisodeProjection, t v2.DispatchTarget) (v2.ActionResultV1, error) {
+	ref := p.EpisodeRef
 	if ref.EpisodeID == j.covered {
 		j.coverageChecks++
 		return v2.ActionResultV1{}, errors.New("NATIVE_SUPPRESSED")
@@ -683,7 +702,7 @@ func TestOscarActionIncidentContentTail(t *testing.T) {
 	now := time.Now()
 	var members []*alert.Alert
 	for _, host := range []string{"A", "B"} {
-		s := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "host": model.LabelValue(host)}, Annotations: model.LabelSet{"message": model.LabelValue(host + strings.Repeat("x", 300*1024))}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
+		s := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "host": model.LabelValue(host)}, Annotations: model.LabelSet{"message": model.LabelValue(host + strings.Repeat("x", size))}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
 		members = append(members, s.NotificationCopy(now))
 	}
 	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, members[0])
@@ -968,19 +987,28 @@ func TestOscarActionPersistedTargetRevalidatesIndependently(t *testing.T) {
 }
 
 func TestOscarActionIncidentResolvedTailThroughDispatcher(t *testing.T) {
-	for _, tracked := range []bool{false, true} {
-		t.Run(fmt.Sprint(tracked), func(t *testing.T) {
+	for _, scenario := range []string{"direct size tail", "tracked size tail", "inspection recovers", "sibling CAS recovers"} {
+		tracked := scenario != "direct size tail"
+		t.Run(scenario, func(t *testing.T) {
 			seen := make(chan string, 6)
 			sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var data struct {
 					Alerts []struct{ Labels map[string]string }
 				}
 				require.NoError(t, json.NewDecoder(r.Body).Decode(&data))
-				require.Len(t, data.Alerts, 1)
-				seen <- data.Alerts[0].Labels["host"]
+				if scenario != "sibling CAS recovers" {
+					require.Len(t, data.Alerts, 1)
+				}
+				for _, a := range data.Alerts {
+					seen <- a.Labels["host"]
+				}
 			}))
 			defer sink.Close()
-			cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 2s\n  group_interval: 500ms\n  repeat_interval: 1h\nreceivers:\n- name: team\n  incidentio_configs:\n  - url: %s\n    send_resolved: true\n    alert_source_token: test\n", sink.URL))
+			groupInterval, waitForFlush := 500*time.Millisecond, 8*time.Second
+			if scenario == "sibling CAS recovers" {
+				groupInterval, waitForFlush = 31*time.Second, 40*time.Second
+			}
+			cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 2s\n  group_interval: %s\n  repeat_interval: 1h\nreceivers:\n- name: team\n  incidentio_configs:\n  - url: %s\n    send_resolved: true\n    alert_source_token: test\n", groupInterval, sink.URL))
 			require.NoError(t, err)
 			r := newTestReloader(t)
 			t.Cleanup(func() { _ = r.stop() })
@@ -992,8 +1020,15 @@ func TestOscarActionIncidentResolvedTailThroughDispatcher(t *testing.T) {
 			now := time.Now()
 			var members []*alert.Alert
 			var hashes []uint64
+			size := 300 * 1024
+			switch scenario {
+			case "inspection recovers":
+				j.failInspectHost, size = "A", 8
+			case "sibling CAS recovers":
+				j.failReserveAfterFirst, size = true, 8
+			}
 			for x, host := range []string{"A", "B"} {
-				s := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(host), "severity": "major", "alertname": "Alarm"}, Annotations: model.LabelSet{"body": model.LabelValue(host + strings.Repeat("x", 300*1024))}, StartsAt: now.Add(-time.Second), EndsAt: now.Add(-100 * time.Millisecond)}, now, false)
+				s := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(host), "severity": "major", "alertname": "Alarm"}, Annotations: model.LabelSet{"body": model.LabelValue(host + strings.Repeat("x", size))}, StartsAt: now.Add(-time.Second), EndsAt: now.Add(-100 * time.Millisecond)}, now, false)
 				require.NoError(t, r.alerts.Put(t.Context(), s))
 				s, err = r.alerts.Get(s.Fingerprint())
 				require.NoError(t, err)
@@ -1012,17 +1047,23 @@ func TestOscarActionIncidentResolvedTailThroughDispatcher(t *testing.T) {
 				select {
 				case h := <-seen:
 					hosts = append(hosts, h)
-				case <-time.After(8 * time.Second):
+				case <-time.After(waitForFlush):
 					t.Fatal("resolved tail lost", hosts)
 				}
 			}
 			require.ElementsMatch(t, []string{"A", "B"}, hosts)
+			if scenario == "inspection recovers" {
+				require.Equal(t, []string{"B", "A"}, hosts)
+			}
 			require.Eventually(t, func() bool {
 				groups, _, err := r.groups(t.Context(), func(*dispatch.Route) bool { return true }, func(*alert.Alert, time.Time) (alert.AlertStatus, bool) { return alert.AlertStatus{}, true })
 				entries, e := r.notificationLog.Query(nflog.QGroupKey(key), nflog.QReceiver(recv))
 				return err == nil && len(groups) == 0 && e == nil && len(entries) == 1 && len(entries[0].ResolvedAlerts) == 2
 			}, 5*time.Second, 20*time.Millisecond)
 			require.NoError(t, r.stop())
+			if scenario == "sibling CAS recovers" {
+				require.True(t, j.resumedExpired)
+			}
 			if tracked {
 				require.Len(t, j.claimed, 2)
 				require.Equal(t, []string{"confirmed", "confirmed"}, j.settled)

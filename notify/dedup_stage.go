@@ -179,18 +179,16 @@ func (n *DedupStage) Exec(ctx context.Context, _ *slog.Logger, alerts ...*alert.
 	}
 	updateReason := n.needsUpdate(entry, firingSet, resolvedSet, repeatInterval, now)
 	if reader, ok := ctx.Value(ordinaryReaderKey{}).(OrdinaryReader); ok && len(alerts) > 0 {
-		if entry != nil && n.recv.Integration == "incidentio" {
-			if incomplete, _ := nflog.NewStore(entry).GetInt(incompleteContent); incomplete == 1 {
-				previous := make(map[uint64]bool, len(entry.FiringAlerts)+len(entry.ResolvedAlerts))
-				for _, h := range entry.FiringAlerts {
-					previous[h] = false
-				}
-				for _, h := range entry.ResolvedAlerts {
-					previous[h] = true
-				}
-				ack := func(m *alert.Alert) bool { resolved, ok := previous[n.hash(m)]; return ok && resolved == m.Resolved() }
-				ctx = context.WithValue(ctx, incompleteContentKey{}, ack)
+		if entry.GetReceiverData()[incompleteContent].GetIntVal() == 1 {
+			previous := make(map[uint64]bool, len(entry.FiringAlerts)+len(entry.ResolvedAlerts))
+			for _, h := range entry.FiringAlerts {
+				previous[h] = false
 			}
+			for _, h := range entry.ResolvedAlerts {
+				previous[h] = true
+			}
+			ack := func(m *alert.Alert) bool { resolved, ok := previous[n.hash(m)]; return ok && resolved == m.Resolved() }
+			ctx = context.WithValue(ctx, incompleteContentKey{}, ack)
 		}
 		due := func(members []*alert.Alert) bool {
 			if len(members) == 0 {
