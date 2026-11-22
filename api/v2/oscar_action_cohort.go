@@ -162,7 +162,7 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 	out := make([]OrdinaryAdmission, len(candidates))
 	var requests []cohortRequest
 	var positions []int
-	var stamps []*atomic.Bool
+	stamps := make([]*atomic.Bool, len(candidates))
 	pub, ok := o.dispatch.(cohortPublication)
 	epoch, _ := PublicationToken(ctx)
 	// Finish every potentially slow managed proof and plan before the first permit.
@@ -183,7 +183,7 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 		}
 		requests = append(requests, r)
 		positions = append(positions, i)
-		stamps = append(stamps, stamp)
+		stamps[i] = stamp
 	}
 	for _, part := range o.cohortChunks(epoch, requests) {
 		start := part.begin
@@ -191,15 +191,37 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 			out[positions[start]].Err = part.err
 			continue
 		}
-		chunk := requests[start:part.end]
 		if !o.CohortReady() || !o.live(ctx) {
 			break
+		}
+		// Proof and planning for later members (or an earlier RPC) can outlive
+		// this member's original wire state. Drop it before it acquires a token.
+		chunk := make([]cohortRequest, 0, part.end-start)
+		submitted := make([]int, 0, cap(chunk))
+		for n := start; n < part.end; n++ {
+			r, index := requests[n], positions[n]
+			member := candidates[index].Member
+			if !stamps[index].Load() {
+				continue
+			}
+			if r.Terminal != nil {
+				if !terminalWireMatches(member, r.Terminal.WireResolved) || !member.ProviderSource().EndsAt.Equal(r.Terminal.SourceEndsAt) {
+					continue
+				}
+			} else if member.ProviderSource().Resolved() {
+				continue
+			}
+			chunk = append(chunk, r)
+			submitted = append(submitted, index)
+		}
+		if len(chunk) == 0 {
+			continue
 		}
 		var rows []cohortResult
 		err := o.write(ctx, "admit-cohort", map[string]any{"members": chunk}, &rows)
 		if errors.Is(err, privateCommandTooLarge) {
 			for i := range chunk {
-				out[positions[start+i]].Err = err
+				out[submitted[i]].Err = err
 			}
 			continue
 		}
@@ -216,7 +238,7 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 					continue
 				}
 				if known[n].State == "missing" {
-					out[positions[start+n]].Err = unavailable
+					out[submitted[n]].Err = unavailable
 				}
 				// Even an exact entered/unknown record lacks the original random
 				// token. Keep the reconciliation hold in place in that case.
@@ -227,11 +249,11 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 			if n >= len(chunk) || row.ID != chunk[n].ID {
 				continue
 			}
-			index := positions[start+n]
+			index := submitted[n]
 			c := candidates[index]
 			terminal := chunk[n].Terminal
 			if err == nil && len(rows) == len(chunk) && (terminal == nil && row.State == "covered" || terminal != nil && row.State == "completed") {
-				if terminal == nil || stamps[start+n].Load() && o.live(ctx) && o.CohortSupported() && terminalWireMatches(c.Member, terminal.WireResolved) {
+				if terminal == nil || stamps[index].Load() && o.live(ctx) && o.CohortSupported() && terminalWireMatches(c.Member, terminal.WireResolved) {
 					out[index] = OrdinaryAdmission{Covered: row.State == "covered", Completed: row.State == "completed"}
 				}
 				continue
@@ -239,7 +261,7 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 			if row.State != "entered" || !managedHash.MatchString(row.Token) || !managedHash.MatchString(row.Key) {
 				continue
 			}
-			stamp := stamps[start+n]
+			stamp := stamps[index]
 			expires := o.localDeadline(row.Permit)
 			if lease := o.localDeadline(row.Lease); lease.Before(expires) {
 				expires = lease

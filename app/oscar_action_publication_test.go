@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -405,15 +406,30 @@ func silenceFixtureCohort(t *testing.T, a *App, registry *prometheus.Registry, l
 // Run normal setup (including provider replay, owner maintenance, graph dispatch,
 // signed webhook encoding and settlement). Only TCP dialing goes to the fixture.
 func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
-	exerciseCommissionedProvider(t, false)
+	exerciseCommissionedProvider(t, "firing")
 }
 
 func TestOscarActionLargeTerminalGroupThroughAppAndProvider(t *testing.T) {
-	exerciseCommissionedProvider(t, true)
+	exerciseCommissionedProvider(t, "terminal")
 }
 
-func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
+func TestOscarTerminalGroupShortIndividualPermitThroughAppAndProvider(t *testing.T) {
+	exerciseCommissionedProvider(t, "short individual permit")
+}
+
+func exerciseCommissionedProvider(t *testing.T, scenario string) {
 	t.Helper()
+	terminalGroup := scenario != "firing"
+	shortPermit := scenario == "short individual permit"
+	groupInterval := 3 * time.Minute
+	memberCount := 4109
+	if shortPermit {
+		groupInterval = 15 * time.Second
+		memberCount = 129 // Three count-limited requests, one configured webhook.
+	}
+	hasBulk := func(hosts []string) bool {
+		return slices.ContainsFunc(hosts, func(host string) bool { return strings.HasPrefix(host, "bulk-") })
+	}
 	callbackKey := []byte(strings.Repeat("c", 32))
 	storeKey := strings.Repeat("j", 32)
 	var enabled, large atomic.Bool
@@ -446,7 +462,10 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 	confirmed := map[string]time.Time{}
 	longCommands := map[string]int{}
 	var longSettled, terminalSettled, terminalCommands int
-	var terminalWrites atomic.Int32
+	var bulkWrites atomic.Int32
+	var shortID, shortFingerprint string
+	var shortDeadline time.Time
+	replayed := map[string]bool{}
 	var terminalEnd time.Time // protected by mu
 	terminalReceipts := map[string]string{}
 	var earlyCovered atomic.Int32
@@ -465,9 +484,18 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 				t.Error(err)
 				return
 			}
+			if msg.Data == nil {
+				t.Error("callback has no notification body")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			item := observation{entered: arrived, path: r.URL.Path, status: msg.Status, signed: r.Header.Get("X-Oscar-Native-Signature") != ""}
 			for _, a := range msg.Alerts {
 				item.hosts = append(item.hosts, a.Labels["host"])
+			}
+			bulkRequest := hasBulk(item.hosts)
+			if bulkRequest {
+				bulkWrites.Add(1) // Count every physical request, regardless of signature, group status or member position.
 			}
 			if item.signed {
 				headers, err := alert.NativeDeliveryHeaders(raw, "team", r.URL.RequestURI(), callbackKey)
@@ -477,17 +505,20 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 					return
 				}
 				mu.Lock()
-				if item.status == "resolved" && len(item.hosts) > 0 && strings.HasPrefix(item.hosts[0], "bulk-") {
-					terminalWrites.Add(1)
-				}
 				for n, claim := range msg.NativeDeliveries {
 					id := claim.Delivery.DeliveryID
 					if claim.Index != n || claims[id] != msg.Alerts[n].Fingerprint || claim.Delivery.NativeVariant.Fingerprint != msg.Alerts[n].Fingerprint {
 						t.Errorf("unclaimed webhook body member %d", n)
 					}
-					if terminalGroup && msg.Alerts[n].Status == "resolved" {
-						if claim.Delivery.State != "resolved" || claim.Delivery.LifecycleSeq != 2 || claim.Delivery.OperationID != nil || !msg.Alerts[n].EndsAt.Equal(terminalEnd) {
-							t.Error("terminal callback has different lifecycle or wire evidence")
+					if terminalGroup && bulkRequest {
+						a := msg.Alerts[n]
+						seq := uint64(1)
+						if item.status == "resolved" {
+							seq = 2
+						}
+						if a.Status != item.status || claim.Delivery.State != a.Status || claim.Delivery.LifecycleSeq != seq || claim.Delivery.OperationID != nil ||
+							(seq == 2 && !a.EndsAt.Equal(terminalEnd)) || (seq == 1 && !a.EndsAt.IsZero()) {
+							t.Error("bulk callback has different member state, lifecycle or wire expiry")
 						}
 					}
 					item.deliveries = append(item.deliveries, id)
@@ -577,8 +608,13 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 						return
 					}
 					scope = "terminal/" + id
-					if n == 0 && command == "admit-cohort" {
+					if n == 0 && command == "admit-cohort" && len(terminalReceipts) == 0 {
 						terminalCommands++
+						if shortPermit && terminalCommands == 2 {
+							// The first RPC has returned its live individual permit.
+							// Advance past that deadline before answering chunk two.
+							time.Sleep(time.Until(shortDeadline.Add(5 * time.Millisecond)))
+						}
 					}
 				}
 				reply := map[string]any{"operation_id": id}
@@ -586,6 +622,14 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 				switch {
 				case terminal && terminalReceipts[id] == "confirmed":
 					reply["state"] = "completed"
+					if shortPermit {
+						replayed[id] = true
+					}
+				case terminal && terminalReceipts[id] == "no_effect":
+					reply["state"] = "held"
+					if shortPermit {
+						replayed[id] = true
+					}
 				case pending[scope] != "":
 					reply["state"] = "held"
 				case time.Now().Before(nextEligible[scope]):
@@ -604,6 +648,13 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 					claims[delivery] = m["native_variant"].(map[string]any)["fingerprint"].(string)
 					reply["state"], reply["entry_token"], reply["target_key"], reply["target"] = "entered", token, key, target
 					reply["permit_expires_at"], reply["lease_expires_at"] = time.Now().Add(30*time.Second), leaseExpiry
+					if shortPermit && terminal && terminalCommands == 1 && n == 0 {
+						// Model the store finding a pending individual reservation
+						// made 29 seconds ago with this same deterministic identity.
+						shortID, shortFingerprint = id, claims[delivery]
+						shortDeadline = time.Now().Add(time.Second)
+						reply["permit_expires_at"] = shortDeadline
+					}
 				}
 			}
 			if issued && large.Load() {
@@ -624,6 +675,12 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 				ids = append(ids, id)
 				outcome := m["receipt"].(map[string]any)["outcome"].(string)
 				if c.terminal {
+					if id == shortID && (terminalCommands < 2 || outcome != "no_effect" || m["receipt"].(map[string]any)["evidence"] != "FENCED_BEFORE_PROVIDER_ENTRY") {
+						t.Error("short permit must survive its own RPC and settle individually after the later chunk")
+					}
+					if terminalReceipts[id] != "" {
+						t.Error("terminal token settled twice")
+					}
 					terminalReceipts[id] = outcome
 					if outcome == "confirmed" {
 						terminalSettled++
@@ -775,14 +832,14 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 	if terminalGroup {
 		// Allow the original lifecycle CAS and any slot rehydration to finish
 		// at 8ms per private request before the timed admissions begin.
-		bigConfig = strings.Replace(bigConfig, "group_interval: 90s", "group_interval: 3m", 1)
+		bigConfig = strings.Replace(bigConfig, "group_interval: 90s", fmt.Sprintf("group_interval: %ds", int(groupInterval.Seconds())), 1)
 		bigConfig = strings.Replace(bigConfig, "repeat_interval: 180s", "repeat_interval: 1h", 1)
 	}
 	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(bigConfig), 0600))
 	require.NoError(t, instance.Reload())
 	require.Eventually(t, func() bool { return capability(instance) }, 5*time.Second, 20*time.Millisecond)
 	large.Store(true)
-	bulk := make([]*alert.Alert, 4109)
+	bulk := make([]*alert.Alert, memberCount)
 	member := func(clock time.Time, host, batch string, useLongReceiver bool) *alert.Alert {
 		labels := model.LabelSet{"host": model.LabelValue(host), "batch": model.LabelValue(batch), "severity": "major"}
 		if useLongReceiver {
@@ -834,6 +891,9 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 	bulkStart := time.Now()
 	mu.Lock()
 	terminalEnd = bulkStart.Add(10 * time.Minute)
+	if shortPermit {
+		terminalEnd = bulkStart.Add(90 * time.Second)
+	}
 	expiry := terminalEnd
 	mu.Unlock()
 	for n := range bulk {
@@ -842,6 +902,8 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 			bulk[n].EndsAt = expiry
 		}
 	}
+	ordered := slices.Clone(bulk)
+	sort.Sort(alert.AlertSlice(ordered))
 	require.NoError(t, provider.Put(t.Context(), bulk...))
 	releaseBulk("team", bulk)
 	priorDeadlines := map[string]time.Time{}
@@ -859,7 +921,7 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 		for len(physical.hosts) == 0 {
 			select {
 			case m := <-observed:
-				if len(m.hosts) > 0 && strings.HasPrefix(m.hosts[0], "bulk-") {
+				if hasBulk(m.hosts) {
 					physical = m
 				}
 			case <-timeout:
@@ -876,30 +938,29 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 		for host, due := range priorDeadlines {
 			require.False(t, physical.entered.Before(due), "early repeat for %s", host)
 		}
-		require.Len(t, physical.hosts, len(bulk))
-		require.Len(t, physical.deliveries, len(bulk))
+		want := ordered
+		if shortPermit && turn == 1 {
+			mu.Lock()
+			fingerprint := shortFingerprint
+			mu.Unlock()
+			require.Equal(t, ordered[0].Fingerprint().String(), fingerprint)
+			want = ordered[1:]
+		}
+		require.Equal(t, alert.NativeCallbackPath, physical.path)
+		require.Len(t, physical.hosts, len(want))
+		require.Len(t, physical.deliveries, len(want))
 		seen := map[string]bool{}
 		for n, id := range physical.deliveries {
 			require.False(t, previous[id])
 			previous[id] = true
 			seen[physical.hosts[n]] = true
 		}
-		for _, m := range bulk {
+		for n, m := range want {
 			require.True(t, seen[string(m.Labels["host"])])
+			require.Equal(t, string(m.Labels["host"]), physical.hosts[n])
 		}
 		if terminalGroup && turn == 1 {
-			ordered := slices.Clone(bulk)
-			slices.SortFunc(ordered, func(a, b *alert.Alert) int {
-				if a.Labels.Before(b.Labels) {
-					return -1
-				}
-				if b.Labels.Before(a.Labels) {
-					return 1
-				}
-				return 0
-			})
-			for n, src := range ordered {
-				require.Equal(t, string(src.Labels["host"]), physical.hosts[n])
+			for _, src := range ordered {
 				resident, err := provider.Get(src.Fingerprint())
 				require.NoError(t, err)
 				require.Same(t, src, resident, "native expiry preceded provider GC")
@@ -907,7 +968,7 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 			require.Eventually(t, func() bool {
 				mu.Lock()
 				defer mu.Unlock()
-				return terminalSettled == len(bulk)
+				return terminalSettled == len(want) && len(terminalReceipts) == len(bulk)
 			}, 15*time.Second, 50*time.Millisecond)
 			mu.Lock()
 			receipts, commands := len(terminalReceipts), terminalCommands
@@ -915,8 +976,19 @@ func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
 			require.Equal(t, len(bulk), receipts)
 			require.Equal(t, (len(bulk)+63)/64, commands)
 			require.Greater(t, baselineGroups, 0)
-			require.Eventually(t, func() bool { return groupCount() == baselineGroups }, 30*time.Second, 100*time.Millisecond)
-			require.Never(t, func() bool { return terminalWrites.Load() != 1 }, 181*time.Second, time.Second)
+			if shortPermit {
+				require.Eventually(t, func() bool {
+					mu.Lock()
+					defer mu.Unlock()
+					return len(replayed) == len(bulk) && terminalReceipts[shortID] == "no_effect"
+				}, 2*groupInterval+5*time.Second, 100*time.Millisecond)
+				require.Equal(t, baselineGroups+1, groupCount(), "the held terminal member prevents group cleanup")
+			} else {
+				require.Eventually(t, func() bool { return groupCount() == baselineGroups }, 30*time.Second, 100*time.Millisecond)
+			}
+			require.EqualValues(t, 2, bulkWrites.Load())
+			require.Never(t, func() bool { return bulkWrites.Load() != 2 }, groupInterval+time.Second, time.Second)
+			require.EqualValues(t, 2, bulkWrites.Load())
 			require.Equal(t, before, siblingTiming())
 			return
 		}

@@ -1771,14 +1771,18 @@ func TestOscarActionDelayedSelectorCannotRestoreEarlierFloor(t *testing.T) {
 
 type cohortFixtureDispatch struct {
 	testActionDispatch
-	target DispatchTarget
-	stamp  atomic.Bool
+	target     DispatchTarget
+	stamp      atomic.Bool
+	beforePlan func(*alert.Alert)
 }
 
 func (f *cohortFixtureDispatch) FreezeEpisode(*alert.Alert, EpisodeProjection) *atomic.Bool {
 	return &f.stamp
 }
-func (f *cohortFixtureDispatch) Plan(context.Context, *alert.Alert, EpisodeProjection, ActionRequestV1) ([]DispatchTarget, string, error) {
+func (f *cohortFixtureDispatch) Plan(_ context.Context, source *alert.Alert, _ EpisodeProjection, _ ActionRequestV1) ([]DispatchTarget, string, error) {
+	if f.beforePlan != nil {
+		f.beforePlan(source)
+	}
 	return []DispatchTarget{f.target}, "", nil
 }
 
@@ -1954,8 +1958,23 @@ func TestOrdinaryCohortBoundsExactPrivateBodyBeforeSending(t *testing.T) {
 
 func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
 	t.Parallel()
+	for _, expiresDuringPlan := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expires-during-sibling-plan-%t", expiresDuringPlan), func(t *testing.T) {
+			exerciseTerminalWireProof(t, expiresDuringPlan)
+		})
+	}
+}
+
+func exerciseTerminalWireProof(t *testing.T, expiresDuringPlan bool) {
+	t.Helper()
 	now := time.Now().UTC()
 	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "cleared"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
+	if expiresDuringPlan {
+		source.EndsAt = now.Add(3 * time.Second)
+		source.ManagedEligible = func(_ context.Context, member *alert.Alert, receiver, group string) (bool, error) {
+			return member == source && receiver == "ops" && group == "managed-timeout", nil
+		}
+	}
 	source.ManagedReceiver, source.ManagedOperationKind = true, "clear"
 	source.ManagedMember = alert.ManagedMembership{Episode: strings.Repeat("a", 64), Event: uuid.NewString(), Generation: 2, Digest: strings.Repeat("b", 64)}
 	m := source.ManagedMember
@@ -1966,8 +1985,15 @@ func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
 	// Compact Python JSON includes the literal separator rune and preserves the
 	// literal backslash sequence. UUIDv5 uses the episode row, not the public episode.
 	target := DispatchTarget{ReceiverID: "ops<&\u2028\\u2029>", IntegrationDigest: strings.Repeat("a", 64), Scope: []ScopeEntry{}, RepeatIntervalUS: 1000}
-	const targetKey = "46ed006f39eb8cbdc6a48fdb8b8d6aca4d9d23956450351887500a1c07ce308d"
-	const original = "1ac992d7-5393-5645-8126-c87e03eb6b2c"
+	targetKey := "46ed006f39eb8cbdc6a48fdb8b8d6aca4d9d23956450351887500a1c07ce308d"
+	original := "1ac992d7-5393-5645-8126-c87e03eb6b2c"
+	if expiresDuringPlan {
+		target.ReceiverID = "ops"
+		var err error
+		targetKey, err = canonicalActionDigest([]any{target.ReceiverID, target.IntegrationDigest, []string{}})
+		require.NoError(t, err)
+		original = terminalOperationID(p, targetKey)
+	}
 	token := strings.Repeat("c", 64)
 	dispatch := &cohortFixtureDispatch{target: target}
 	dispatch.stamp.Store(true)
@@ -1975,12 +2001,24 @@ func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
 	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
 		switch cmd {
 		case "admit-cohort":
-			claims++
-			r := args["members"].([]cohortRequest)[0]
+			requests := args["members"].([]cohortRequest)
+			require.Len(t, requests, 1)
+			r := requests[0]
+			if r.Terminal == nil {
+				// The live sibling uses its existing firing coverage.
+				require.True(t, expiresDuringPlan)
+				*out.(*[]cohortResult) = []cohortResult{{ID: r.ID, State: "covered"}}
+				return nil
+			}
 			require.Equal(t, original, r.ID)
 			require.Equal(t, terminalSourceDigest(source), r.Terminal.SourceDigest)
 			require.Equal(t, source.EndsAt, r.Terminal.SourceEndsAt)
-			require.False(t, r.Terminal.WireResolved)
+			require.Equal(t, expiresDuringPlan, r.Terminal.WireResolved)
+			if settlements > 0 {
+				*out.(*[]cohortResult) = []cohortResult{{ID: original, State: "completed"}}
+				return nil
+			}
+			claims++
 			*out.(*[]cohortResult) = []cohortResult{{ID: original, Key: targetKey, Target: target, Token: token, State: "entered", Lease: now.Add(time.Minute), Permit: now.Add(30 * time.Second)}}
 		case "settle-cohort":
 			settlements++
@@ -1988,6 +2026,9 @@ func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
 			require.Equal(t, original, r["operation_id"])
 			require.Equal(t, targetKey, r["target_key"])
 			require.Equal(t, token, r["entry_token"])
+			if expiresDuringPlan {
+				require.Equal(t, map[string]string{"outcome": "confirmed", "evidence": "NATIVE_TRANSPORT_ACCEPTED"}, r["receipt"])
+			}
 			*out.(*[]string) = []string{original}
 		default:
 			t.Fatalf("unexpected command %s", cmd)
@@ -1995,7 +2036,7 @@ func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
 		return nil
 	}), dispatch)
 	o.recovered = true
-	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Minute), OrdinaryCohort: json.RawMessage("2")}
+	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Minute), OrdinaryCohort: json.RawMessage("2"), NativeDeliveryReceipts: json.RawMessage("1")}
 	o.publishLeaseLocked()
 	promoted := &ownerSlot{Generation: m.Generation, Projection: snapshot(source), Operation: mustRaw(t, map[string]string{"kind": "clear", "event_id": m.Event, "source_digest": m.Digest})}
 	closed := now.UnixMilli()
@@ -2004,7 +2045,7 @@ func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
 		return actionMemberProof(state, s, logical)
 	}
 	wire := source.NotificationCopy(now)
-	c := OrdinaryCandidate{Member: wire, Projection: p, Target: target}
+	c := OrdinaryCandidate{Canonical: expiresDuringPlan, Member: wire, Projection: p, Target: target}
 	run := func() OrdinaryAdmission { return o.AdmitCohort(t.Context(), []OrdinaryCandidate{c})[0] }
 	require.Error(t, run().Err)
 	require.Zero(t, claims)
@@ -2015,18 +2056,58 @@ func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
 	require.Error(t, run().Err)
 	require.Zero(t, claims)
 	c.Member = wire
+	if expiresDuringPlan {
+		source2 := alert.New(model.Alert{Labels: model.LabelSet{"host": "sibling", "severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+		ref2 := ref
+		ref2.EpisodeID = uuid.NewString()
+		p2 := EpisodeProjection{ID: uuid.NewString(), episodeUpdate: episodeUpdate{EpisodeRef: ref2, NativeVariant: variantOf(source2), ActiveSince: variantOf(source2).StartsAt, State: "firing", SourceSeverity: "major", LifecycleSeq: 1}}
+		other := OrdinaryCandidate{Member: source2.NotificationCopy(now), Projection: p2, Target: target}
+		var slowPlans int
+		dispatch.beforePlan = func(s *alert.Alert) {
+			if s == source2 {
+				slowPlans++
+				require.False(t, source.Resolved(), "first member still has its firing wire before the sibling plan")
+				time.Sleep(time.Until(source.EndsAt.Add(time.Millisecond)))
+			}
+		}
+		rows := o.AdmitCohort(t.Context(), []OrdinaryCandidate{c, other})
+		require.Equal(t, 1, slowPlans)
+		require.Error(t, rows[0].Err)
+		require.Nil(t, rows[0].Entry)
+		require.True(t, rows[1].Covered)
+		require.Zero(t, claims)
+		require.Zero(t, settlements)
+		c.Member = source.NotificationCopy(time.Now())
+		require.True(t, c.Member.Resolved())
+	}
 	admitted := run()
 	require.NoError(t, admitted.Err)
-	require.True(t, admitted.Entry.ForMember(wire))
+	require.True(t, admitted.Entry.ForMember(c.Member))
 	require.False(t, admitted.Entry.ForMember(&wrong))
 	require.Equal(t, "resolved", admitted.Delivery.State)
 	require.Nil(t, admitted.Delivery.OperationID)
 	require.True(t, admitted.Entry.LocalValid())
+	outcome, evidence := "no_effect", "FENCED_BEFORE_PROVIDER_ENTRY"
+	var writes atomic.Int32
+	if expiresDuringPlan {
+		send := managedTimeoutWebhook(t, c.Member, target, &writes)
+		send(admitted.Entry, admitted.Delivery)
+		require.EqualValues(t, 1, writes.Load())
+		outcome, evidence = "confirmed", "NATIVE_TRANSPORT_ACCEPTED"
+	}
 	o.lease.Epoch++
 	o.publishLeaseLocked()
 	require.False(t, admitted.Entry.LocalValid())
 	dispatch.stamp.Store(false)
-	require.NoError(t, o.SettleCohort(t.Context(), []OrdinaryReceipt{{admitted.Entry, "no_effect", "FENCED_BEFORE_PROVIDER_ENTRY"}}))
+	require.NoError(t, o.SettleCohort(t.Context(), []OrdinaryReceipt{{admitted.Entry, outcome, evidence}}))
+	if expiresDuringPlan {
+		dispatch.stamp.Store(true)
+		replay := run()
+		require.NoError(t, replay.Err)
+		require.True(t, replay.Completed)
+		require.Nil(t, replay.Entry)
+		require.EqualValues(t, 1, writes.Load())
+	}
 	require.Equal(t, 1, claims)
 	require.Equal(t, 1, settlements)
 }

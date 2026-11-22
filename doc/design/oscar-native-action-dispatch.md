@@ -194,6 +194,12 @@ The paired reader and store derive the same terminal UUIDv5 from the individual
 reservation fields. A cohort inspection or admission can find an earlier
 individual receipt. Confirmed delivery and a conclusive native provider no-send
 complete the terminal member. An unknown or already-entered target stays held.
+Immediately before each admission request, the reader rechecks the original
+source publication and wire state. A managed clear whose firing wire expired
+during another member's preparation stays unclaimed until a fresh flush. After
+the last admission response, the reader checks each issued permit again. A
+member whose permit expired between responses stays held and the reader settles
+its original token after the remaining members' provider attempt.
 When a prepared group shrinks during admission, eligible siblings can enter in
 their original order if the new rendering retains every admitted member and
 matches its frozen recipient. A changed recipient or failed entry fence settles

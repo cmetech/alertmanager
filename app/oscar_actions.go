@@ -628,7 +628,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		logMembers = members
 	}
 	result.LogMembers = func() ([]*alert.Alert, error) { return logMembers, held }
-	result.Invoke = func(ctx context.Context, integration *notify.Integration, sent []*alert.Alert) notify.NotifyVerdict {
+	result.Invoke = func(ctx context.Context, integration *notify.Integration, sent []*alert.Alert) (verdict notify.NotifyVerdict) {
 		var truncated uint64
 		if limit := i.maxAlerts; limit != 0 && uint64(len(sent)) > limit {
 			truncated = uint64(len(sent)) - limit
@@ -706,9 +706,18 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			if len(requests) > 0 {
 				admissions = cohort.AdmitCohort(ctx, requests)
 			}
+			var refused []v2.OrdinaryReceipt
 			for n, request := range requests {
 				m := request.Member
 				if n >= len(admissions) || admissions[n].Err != nil || !admissions[n].Covered && !admissions[n].Completed && admissions[n].Entry == nil {
+					hold(m, actionHeld)
+					delete(contacts, m)
+					continue
+				}
+				if e := admissions[n].Entry; e != nil && (!e.LocalValid() || !e.ForMember(m) || request.Projection.State == "firing" && m.ProviderSource().Resolved()) {
+					// An earlier chunk may have included a short existing permit.
+					// Keep usable siblings for the exact-subset render and entry guard.
+					refused = append(refused, v2.OrdinaryReceipt{Entry: e, Outcome: "no_effect", Evidence: "FENCED_BEFORE_PROVIDER_ENTRY"})
 					hold(m, actionHeld)
 					delete(contacts, m)
 					continue
@@ -725,6 +734,15 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				c.admission = &admissions[n]
 				c.target = v2.TargetResult{Target: request.Target, TargetKey: admissions[n].TargetKey, State: "pending"}
 				contacts[m] = c
+			}
+			if len(refused) > 0 {
+				// Late settlement needs only the original tokens. A slow settlement
+				// must not consume the other members' remaining provider-entry time.
+				defer func() {
+					if err := cohort.SettleCohort(ctx, refused); err != nil {
+						verdict = notify.Unrecoverable(errors.Join(verdict.Err(), err), notify.DefaultReason)
+					}
+				}()
 			}
 		}
 		for _, m := range candidates {
