@@ -212,13 +212,53 @@ func (o *nativeActionOwner) reconcileLocked(ctx context.Context, s *episodeSlot,
 	}
 	return "", false, localErr
 }
-func (o *nativeActionOwner) recoverEpisodes(ctx context.Context) error {
+func (l actionLease) currentEpoch(epoch uint64) bool {
+	return epoch != 0 && l.Epoch == epoch && l.ExpiresAt.After(time.Now())
+}
+
+// recoverEpisodes advances a single recovery loop's frozen epoch. A failed page retains
+// earlier progress only if the same lease still owns it.
+func (o *nativeActionOwner) recoverEpisodes(ctx context.Context, epoch uint64) (err error) {
 	o.mu.Lock()
-	epoch := o.lease.Epoch
-	o.mu.Unlock()
-	c := &o.bootCursor
+	if !o.lease.currentEpoch(epoch) {
+		o.mu.Unlock()
+		return unavailable
+	}
+	c := o.bootCursor
+	var invalidate []*episodeSlot
 	if c.epoch != epoch {
 		c.epoch, c.activeAfter, c.keyAfter, c.activeDone, c.keysDone = epoch, "", "", false, false
+		for _, s := range o.byKey {
+			invalidate = append(invalidate, s)
+		}
+	}
+	o.mu.Unlock()
+	// An intervening owner may have resolved a resident omitted from this epoch's firing scan.
+	// Finish invalidation before publishing even the first cursor for this epoch.
+	for _, s := range invalidate {
+		s.turn.Lock()
+		s.uncertain = s.uncertain || s.projection.LifecycleSeq > 0
+		s.turn.Unlock()
+	}
+	defer func() {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if !o.lease.currentEpoch(epoch) {
+			err = unavailable
+			return
+		}
+		o.bootCursor = c
+	}()
+	readPage := func(args map[string]any, out any) error {
+		if err := o.read(ctx, "recover", args, out); err != nil {
+			return err
+		}
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if !o.lease.currentEpoch(epoch) {
+			return unavailable
+		}
+		return nil
 	}
 	if !c.activeDone {
 		const limit = 100
@@ -227,7 +267,7 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context) error {
 			args["after_id"] = c.activeAfter
 		}
 		var rows []EpisodeProjection
-		if err := o.read(ctx, "recover", args, &rows); err != nil {
+		if err := readPage(args, &rows); err != nil {
 			return err
 		}
 		if rows == nil || len(rows) > limit {
@@ -251,7 +291,7 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context) error {
 			args["after_key"] = c.keyAfter
 		}
 		var keys []string
-		if err := o.read(ctx, "recover", args, &keys); err != nil {
+		if err := readPage(args, &keys); err != nil {
 			return err
 		}
 		if keys == nil || len(keys) > limit {
@@ -272,6 +312,10 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context) error {
 			}
 			bucket, bit := membershipBit(binding)
 			o.mu.Lock()
+			if !o.lease.currentEpoch(epoch) {
+				o.mu.Unlock()
+				return unavailable
+			}
 			o.terminalMembership[bucket] |= bit
 			o.mu.Unlock()
 			c.keyAfter = key
@@ -454,6 +498,22 @@ func (o *nativeActionOwner) sweepSlot(ctx context.Context, key string, s *episod
 	}
 }
 
+func (o *nativeActionOwner) recoverAuthority(ctx context.Context, epoch uint64) error {
+	if err := o.recoverEpisodes(ctx, epoch); err != nil {
+		return err
+	}
+	if _, err := o.operationPage(ctx, ""); err != nil {
+		return err
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.lease.currentEpoch(epoch) {
+		return unavailable
+	}
+	o.recovered = true
+	return nil
+}
+
 func (o *nativeActionOwner) maintain(ctx context.Context) {
 	go o.sweep(ctx)
 	go func() {
@@ -484,38 +544,17 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 		if !lease.ExpiresAt.After(time.Now()) {
 			continue
 		}
+		turn := context.WithValue(ctx, actionEpochKey{}, lease.Epoch)
 		if boot {
-			// A previous process may have resolved an episode absent from the firing scan.
-			if o.bootCursor.epoch != lease.Epoch {
-				o.mu.Lock()
-				oldSlots := make([]*episodeSlot, 0, len(o.byKey))
-				for _, slot := range o.byKey {
-					oldSlots = append(oldSlots, slot)
-				}
-				o.mu.Unlock()
-				for _, slot := range oldSlots {
-					slot.turn.Lock()
-					slot.uncertain = slot.projection.LifecycleSeq > 0
-					slot.turn.Unlock()
-				}
-			}
-			if err := o.recoverEpisodes(ctx); err != nil {
+			if err := o.recoverAuthority(turn, lease.Epoch); err != nil {
 				continue
 			}
-			if _, err := o.operationPage(ctx, ""); err != nil {
-				continue
-			}
-			o.mu.Lock()
-			if o.lease.Epoch == lease.Epoch && o.lease.ExpiresAt.After(time.Now()) {
-				o.recovered = true
-			}
-			o.mu.Unlock()
 			after = ""
 		}
-		if !o.ready() {
+		if !o.live(turn) || !o.ready() {
 			continue
 		}
-		rows, err := o.operationPage(ctx, after)
+		rows, err := o.operationPage(turn, after)
 		if err != nil {
 			continue
 		}
@@ -527,7 +566,10 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			_ = o.recoverWork(ctx, r.OperationID, map[string]bool{})
+			if !o.live(turn) {
+				break
+			}
+			_ = o.recoverWork(turn, r.OperationID, map[string]bool{})
 			after = r.OperationID
 		}
 	}

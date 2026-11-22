@@ -374,12 +374,13 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	}
 	i := g.targets[receiver][match]
 	var ordinary []*alert.Alert
+	var held error
 	contacts := make(map[*alert.Alert]ordinaryContact, len(members))
 	for _, m := range members {
 		source := m.ProviderSource()
 		p, pass, err := a.journal.InspectOrdinary(ctx, source)
 		if err != nil {
-			result.Held = err
+			held = err
 			continue
 		}
 		c := ordinaryContact{pass: pass, contact: plannedContact{DispatchTarget: v2.DispatchTarget{ReceiverID: receiver}, integration: i}}
@@ -387,48 +388,63 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			c.p = *p
 			view, err := effectiveMember(source, *p)
 			if err != nil || !view.Labels.Equal(m.Labels) || p.State == "resolved" && !m.TerminalWireValid() {
-				result.Held = actionHeld
+				held = actionHeld
 				continue
 			}
 		}
 		if p == nil || p.State == "resolved" {
 			ordinary = append(ordinary, m)
 		}
-		contacts[source] = c
+		contacts[m] = c
 	}
 	groupDue, subsetDue := due(members), due(ordinary)
 	for _, m := range members {
-		source := m.ProviderSource()
-		c, ok := contacts[source]
+		c, ok := contacts[m]
 		if !ok {
 			continue
 		}
 		if c.p.State != "firing" {
+			source := m.ProviderSource()
 			terminal := c.p.State == "resolved" || source.Resolved() || source.ManagedReceiver && source.ManagedOperationKind == "clear"
 			if terminal && !groupDue || !terminal && !subsetDue {
+				delete(contacts, m)
 				continue
 			}
 		}
 		result.Members = append(result.Members, m)
 	}
 	if len(result.Members) == 0 {
-		return result, result.Held
+		return result, held
 	}
-	result.WriteGroup = result.Held == nil && (groupDue || len(result.Members) == len(members))
-	allowLog := true
-	result.AllowLog = func() bool { return allowLog }
+	full := len(result.Members) == len(members)
+	if i.maxAlerts != 0 {
+		// An unverifiable member could occupy the native post-send_resolved prefix.
+		if held != nil {
+			return result, held
+		}
+		// Keep nondue positions until RetryStage filters resolved members and Invoke fixes the prefix.
+		result.Members = members
+	}
+	var logMembers []*alert.Alert
+	if full {
+		// RetryStage can finish an all-resolved, send_resolved=false batch without invoking a provider.
+		logMembers = members
+	}
+	result.LogMembers = func() ([]*alert.Alert, error) { return logMembers, held }
 	result.Invoke = func(ctx context.Context, integration *notify.Integration, sent []*alert.Alert) notify.NotifyVerdict {
 		var truncated uint64
 		if limit := i.maxAlerts; limit != 0 && uint64(len(sent)) > limit {
 			truncated = uint64(len(sent)) - limit
 			sent = sent[:limit]
 		}
-		var pending []*alert.Alert
+		var pending, accepted []*alert.Alert
 		var entries []ordinaryContact
-		var held error
-		confirmed := 0
+		var ordinaryAcceptance bool
 		for _, m := range sent {
-			c := contacts[m.ProviderSource()]
+			c, eligible := contacts[m]
+			if !eligible {
+				continue
+			}
 			c, err := a.ordinaryContact(ctx, g, m, c)
 			if err != nil {
 				if err.Error() != "NATIVE_SUPPRESSED" {
@@ -436,21 +452,29 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				}
 				continue
 			}
+			accepted = append(accepted, m)
 			if c.target.State == "confirmed" {
-				confirmed++
 				continue
 			}
+			ordinaryAcceptance = ordinaryAcceptance || c.pass != nil || c.p.State == "resolved"
 			pending = append(pending, m)
 			entries = append(entries, c)
 		}
-		allowLog = len(sent) > 0 && confirmed+len(pending) == len(sent)
 		if len(pending) > 0 {
 			v := a.invoke(ctx, g, integration, pending, entries, truncated)
 			if v.Err() != nil {
 				return v
 			}
 		}
-		if held != nil {
+		switch {
+		case full && len(sent) > 0 && len(accepted) == len(sent):
+			logMembers = members // Native truncation still acknowledges the original ordinary group.
+		case ordinaryAcceptance:
+			logMembers = accepted // Record successful ordinary siblings even when another contact was covered or held.
+		default:
+			logMembers = nil
+		}
+		if len(logMembers) == 0 && held != nil {
 			return notify.Unrecoverable(held, notify.DefaultReason)
 		}
 		return notify.Success()

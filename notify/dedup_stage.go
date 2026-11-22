@@ -192,6 +192,8 @@ func (n *DedupStage) Exec(ctx context.Context, _ *slog.Logger, alerts ...*alert.
 		if len(batch.Members) == 0 {
 			return ctx, nil, nil
 		}
+		batch.group, batch.previous = alerts, entry
+		batch.groupFiring, batch.groupResolved, batch.hash = firingSet, resolvedSet, n.hash
 		alerts = batch.Members
 		ctx = context.WithValue(ctx, ordinaryBatchKey{}, batch)
 		firing, resolved, firingSet, resolvedSet = partitionAlertsByState(alerts, n.hash)

@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/nflog/nflogpb"
 )
 
 // SelectedAction describes one pending journal target of one provider member.
@@ -58,11 +59,14 @@ func CurrentProviderEntry(ctx context.Context) *ProviderEntry {
 
 // OrdinaryBatch selects contacts with durable coverage before the group log is advanced.
 type OrdinaryBatch struct {
-	Members    []*alert.Alert
-	WriteGroup bool
-	AllowLog   func() bool // A completely covered firing batch leaves the previous group clock in place.
-	Held       error
-	Invoke     func(context.Context, *Integration, []*alert.Alert) NotifyVerdict
+	Members []*alert.Alert
+	// LogMembers reports ordinary acceptances after invocation. An empty slice preserves the group clock.
+	LogMembers                 func() ([]*alert.Alert, error)
+	Invoke                     func(context.Context, *Integration, []*alert.Alert) NotifyVerdict
+	group                      []*alert.Alert
+	previous                   *nflogpb.Entry
+	groupFiring, groupResolved map[uint64]struct{}
+	hash                       func(*alert.Alert) uint64
 }
 
 // OrdinaryReader integrates member coverage with the receiver's existing group dedup decision.

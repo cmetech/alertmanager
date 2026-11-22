@@ -60,7 +60,7 @@ firing action cannot use a terminal claim. The claim does not advance a repeat
 or reserve firing coverage.
 
 At takeover the native owner pages firing projections and distinct retained
-source keys. Per-epoch cursors resume after transient failures. Each turn
+source keys. Each recovery turn pins its lease epoch. The first turn of a new epoch marks resident projections uncertain before recording any page cursor. A firing slot omitted after another owner closed it must refresh its exact journal row. Page cursors resume after transient failures within their epoch. Each turn
 reads at most 100 firing projections and 64 distinct source keys, irrespective
 of each key's historical interval count. Ordinary entry requires complete
 recovery. A conservative membership hit selects the new indexed exact-interval
@@ -70,7 +70,7 @@ lookup. The matching A2 schema upgrade and private lease marker
 Selection preserves ordinary input order. The native retry stage first applies
 send-resolved, then the action reader fixes the webhook prefix before any
 identity enrollment or reservation. The group log retains ordinary membership
-after a successful truncated send. Only members actually selected for
+after a successful truncated send. A limited batch with an unverifiable input waits for a fresh group. A direct sibling accepted beside a covered member enters the ordinary group log. Its next flush uses that receipt and preserves the covered member’s durable repeat deadline. A partial group-log update retains previously acknowledged siblings still present in the same state. Only members actually selected for
 provider entry receive a claim. Prior confirmed terminal contacts may be
 elided without admitting members beyond the original prefix. An ordinary
 firing copy cannot consume an expired source's clear. A pending reservation

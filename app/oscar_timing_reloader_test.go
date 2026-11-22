@@ -16,6 +16,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -313,6 +314,8 @@ func (fixturePermit) LocalValid() bool                { return true }
 type terminalFixtureJournal struct {
 	v2.ActionJournal
 	projections                        map[*alert.Alert]v2.EpisodeProjection
+	covered                            string
+	coverageChecks                     int
 	first                              bool
 	state                              string
 	reserved, claimed, settled, events []string
@@ -322,7 +325,10 @@ func (j *terminalFixtureJournal) InspectOrdinary(_ context.Context, s *alert.Ale
 	if j.first {
 		return nil, &v2.OrdinaryPass{}, nil
 	}
-	p := j.projections[s]
+	p, ok := j.projections[s]
+	if !ok {
+		return nil, &v2.OrdinaryPass{Enter: func() bool { return true }, Finish: func(bool) {}}, nil
+	}
 	return &p, nil, nil
 }
 func (j *terminalFixtureJournal) Project(_ context.Context, s *alert.Alert) (v2.EpisodeProjection, error) {
@@ -339,6 +345,10 @@ func (j *terminalFixtureJournal) ReserveTerminal(_ context.Context, m *alert.Ale
 	return j.reservation(p.EpisodeRef.EpisodeID, p.EpisodeRef, t), nil
 }
 func (j *terminalFixtureJournal) ReserveOrdinary(_ context.Context, id string, ref v2.EpisodeRef, t v2.DispatchTarget, _ bool) (v2.ActionResultV1, error) {
+	if ref.EpisodeID == j.covered {
+		j.coverageChecks++
+		return v2.ActionResultV1{}, errors.New("NATIVE_SUPPRESSED")
+	}
 	return j.reservation(id, ref, t), nil
 }
 func (j *terminalFixtureJournal) Claim(_ context.Context, _, key string) (v2.Entry, error) {
@@ -370,11 +380,14 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 		canonical, sendResolved, stale, managed, first bool
 		limit                                          int
 		want                                           string
-		wantErr                                        bool
+		wantErr, emptyLog                              bool
 	}{
 		{name: "F first", order: "FR", state: "pending", sendResolved: true, limit: 1, want: "F"},
 		{name: "R first", order: "RF", state: "pending", sendResolved: true, limit: 1, want: "R"},
 		{name: "send-resolved filter before limit", order: "RF", state: "pending", limit: 1, want: "F"},
+		{name: "stale prefix cannot admit F", order: "RF", state: "pending", limit: 1, sendResolved: true, stale: true, wantErr: true},
+		{name: "direct acceptance beside covered A", order: "AB", state: "pending", sendResolved: true, want: "B"},
+		{name: "first direct acceptance beside covered A", order: "AB", state: "pending", sendResolved: true, want: "B", emptyLog: true},
 		{name: "direct stale firing copy", order: "R", state: "pending", sendResolved: true, stale: true, wantErr: true},
 		{name: "stale copy with send-resolved false", order: "R", state: "pending", stale: true, wantErr: true},
 		{name: "signed stale firing copy", order: "R", state: "pending", canonical: true, sendResolved: true, stale: true, wantErr: true},
@@ -458,7 +471,12 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 				var p v2.EpisodeProjection
 				start := source.StartsAt.Format(time.RFC3339Nano)
 				require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":%q,"generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"active_since":%q,"state":%q,"source_severity":%q,"lifecycle_seq":2}`, id, source.Fingerprint().String(), start, start, state, sev)), &p))
-				j.projections[source] = p
+				if host != "B" {
+					j.projections[source] = p
+				}
+				if host == "A" {
+					j.covered = id
+				}
 				flush := now
 				if tc.stale {
 					flush = end.Add(-time.Nanosecond)
@@ -468,7 +486,13 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 			ctx := g.dispatcher.SelectedContext(t.Context(), g.routes.Match(members[0].Labels)[0], members[0])
 			gkey, _ := notify.GroupKey(ctx)
 			recv := &nflogpb.Receiver{GroupName: "team", Integration: "webhook"}
-			require.NoError(t, r.notificationLog.Log(recv, gkey, []uint64{42}, nil, nil, nil, time.Hour))
+			if !tc.emptyLog {
+				baseline := uint64(42)
+				if j.covered != "" {
+					baseline = notify.HashAlert(members[0])
+				}
+				require.NoError(t, r.notificationLog.Log(recv, gkey, []uint64{baseline}, nil, nil, nil, time.Hour))
+			}
 			ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, receiver, name string, index int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
 				return a.prepare(c, g, receiver, name, index, ms, due)
 			})
@@ -490,6 +514,30 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 			c := <-calls
 			require.Len(t, c.msg.Alerts, 1)
 			require.Equal(t, tc.want, c.msg.Alerts[0].Labels["host"])
+			if j.covered != "" {
+				// A's durable repeat deadline remains in the future through both flushes.
+				entries, err := r.notificationLog.Query(nflog.QGroupKey(gkey), nflog.QReceiver(recv))
+				require.NoError(t, err)
+				require.Len(t, entries, 1)
+				require.Contains(t, entries[0].FiringAlerts, notify.HashAlert(members[1]))
+				if tc.emptyLog {
+					require.NotContains(t, entries[0].FiringAlerts, notify.HashAlert(members[0]))
+				} else {
+					require.Contains(t, entries[0].FiringAlerts, notify.HashAlert(members[0]))
+				}
+				stamp := entries[0].Timestamp.AsTime()
+				_, _, err = pipeline.Exec(ctx, r.logger, members...)
+				require.NoError(t, err)
+				require.Empty(t, calls)
+				require.Empty(t, j.reserved)
+				require.Empty(t, j.claimed)
+				require.Empty(t, j.settled)
+				entries, err = r.notificationLog.Query(nflog.QGroupKey(gkey), nflog.QReceiver(recv))
+				require.NoError(t, err)
+				require.Equal(t, stamp, entries[0].Timestamp.AsTime())
+				require.Equal(t, 2, j.coverageChecks)
+				return
+			}
 			require.Equal(t, []string{ids[tc.want]}, j.reserved)
 			require.Equal(t, j.reserved, j.claimed)
 			require.Equal(t, []string{"confirmed"}, j.settled)

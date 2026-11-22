@@ -601,7 +601,7 @@ func TestOverflowGCAndDeferredRecoveryAtCapacity(t *testing.T) {
 	for n := 1; n < maxActionEpisodes; n++ {
 		o.byKey[fmt.Sprint(n)] = &episodeSlot{}
 	}
-	require.NoError(t, o.recoverEpisodes(t.Context()))
+	require.NoError(t, o.recoverEpisodes(t.Context(), o.lease.Epoch))
 	require.Len(t, o.byKey, maxActionEpisodes)
 	s := o.slot(key, false)
 	for n := 1; n <= maxTransitions*4; n++ {
@@ -1037,11 +1037,82 @@ func TestOscarActionIncompleteMembershipResumesAfterIntermediateFailure(t *testi
 		return nil
 	}), testActionDispatch{})
 	o.lease = actionLease{Epoch: 2, ExpiresAt: time.Now().Add(time.Hour)}
-	require.Error(t, o.recoverEpisodes(t.Context()))
+	require.Error(t, o.recoverEpisodes(t.Context(), o.lease.Epoch))
 	require.False(t, o.ready())
-	require.Error(t, o.recoverEpisodes(t.Context()))
+	require.Error(t, o.recoverEpisodes(t.Context(), o.lease.Epoch))
 	require.False(t, o.ready())
-	require.NoError(t, o.recoverEpisodes(t.Context()))
+	require.NoError(t, o.recoverEpisodes(t.Context(), o.lease.Epoch))
 	require.Equal(t, 1, activePages)
 	require.Equal(t, []string{"", "0000000000000040", "0000000000000040"}, cursors)
+}
+
+func TestOscarActionBootEpochSwapAfterRestoringFiringSlot(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
+	p := EpisodeProjection{ID: "11111111-1111-4111-8111-111111111111", episodeUpdate: episodeUpdate{
+		EpisodeRef:    EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1},
+		NativeVariant: variantOf(source), ActiveSince: source.StartsAt.Format(time.RFC3339Nano), LifecycleSeq: 1, State: "firing", SourceSeverity: "major",
+	}}
+	var owner *nativeActionOwner
+	var lookups, pages int
+	owner = newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+		require.Equal(t, "recover", cmd)
+		pages++
+		switch args["projection"] {
+		case "episodes":
+			rows := []EpisodeProjection{}
+			if owner.lease.Epoch == 1 {
+				rows = append(rows, p)
+			}
+			*out.(*[]EpisodeProjection) = rows
+		case "membership":
+			if owner.lease.Epoch == 1 && args["after_key"] == nil {
+				keys := make([]string, 64)
+				for i := range keys {
+					keys[i] = fmt.Sprintf("%016x", i+1)
+				}
+				*out.(*[]string) = keys
+			} else {
+				if owner.lease.Epoch == 1 {
+					// While this page is in flight, another owner closes the interval
+					// and this process then reacquires the lease under a new epoch.
+					p.State, p.LifecycleSeq = "resolved", 2
+					owner.mu.Lock()
+					owner.lease.Epoch = 3
+					owner.mu.Unlock()
+				} else {
+					require.Nil(t, args["after_key"], "new epoch starts its own membership scan")
+				}
+				*out.(*[]string) = []string{source.Fingerprint().String()}
+			}
+		case "episode":
+			require.Equal(t, p.EpisodeRef.EpisodeID, args["episode_id"])
+			*out.(**EpisodeProjection) = &p
+			lookups++
+		case "operations":
+			*out.(*[]ActionResultV1) = []ActionResultV1{}
+		default:
+			t.Fatalf("unexpected projection %v", args["projection"])
+		}
+		return nil
+	}), testActionDispatch{})
+	owner.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
+	require.Error(t, owner.recoverAuthority(t.Context(), 1))
+	slot := owner.slot(sourceKey("", source.Fingerprint().String()), false)
+	require.NotNil(t, slot)
+	require.Equal(t, "firing", slot.projection.State)
+	require.Error(t, owner.recoverAuthority(t.Context(), 1))
+	require.False(t, owner.ready())
+	before := pages
+	require.Error(t, owner.recoverAuthority(t.Context(), 1), "a turn already holding the old epoch cannot act for its replacement")
+	require.Equal(t, before, pages)
+	require.NoError(t, owner.recoverAuthority(t.Context(), 3))
+	require.True(t, owner.ready())
+	slot.turn.Lock()
+	defer slot.turn.Unlock()
+	require.NoError(t, owner.flush(owner.withEpoch(t.Context()), slot))
+	require.Equal(t, 1, lookups)
+	require.Equal(t, "resolved", slot.projection.State)
+	require.Equal(t, p.LifecycleSeq, slot.projection.LifecycleSeq)
 }
