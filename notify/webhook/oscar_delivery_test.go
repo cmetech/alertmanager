@@ -51,6 +51,19 @@ func TestOscarActionPrivateWebhook(t *testing.T) {
 		require.Equal(t, receiver, req.Header.Get("X-Oscar-Native-Receiver"))
 		return io.ReadAll(req.Body)
 	}
+	// Stock Compose selects a verified CA for HTTPS and carries the TLS-only
+	// skip flag on its exact plain-HTTP callback.
+	conf.HTTPConfig.TLSConfig.CAFile = "/home/ssl/ca.pem"
+	conf.HTTPConfig.TLSConfig.InsecureSkipVerify = true
+	_, err = makeRequest()
+	require.Error(t, err)
+	conf.URL = "http://alertmanager-middleware:9400" + alert.NativeCallbackPath
+	conf.HTTPConfig.TLSConfig.CAFile = ""
+	_, err = makeRequest()
+	require.NoError(t, err)
+	conf.URL = "https://alertmanager-middleware:9400" + alert.NativeCallbackPath
+	conf.HTTPConfig.TLSConfig.CAFile = "/home/ssl/ca.pem"
+	conf.HTTPConfig.TLSConfig.InsecureSkipVerify = false
 	wire, err := makeRequest()
 	require.NoError(t, err)
 	var signed Message

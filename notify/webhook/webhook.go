@@ -93,7 +93,7 @@ func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, m
 	path, canonical := strings.CutPrefix(target, base)
 	cfg := n.conf.HTTPConfig
 	if !canonical || (path != alert.NativeCallbackPath && path != alert.NativeCallbackPath+"?notifier_type=oscaradmin") ||
-		n.conf.URLFile != "" || n.conf.Payload != nil || n.conf.MaxAlerts != 0 || cfg == nil || cfg.FollowRedirects || cfg.TLSConfig.InsecureSkipVerify ||
+		n.conf.URLFile != "" || n.conf.Payload != nil || n.conf.MaxAlerts != 0 || cfg == nil || cfg.FollowRedirects || (strings.HasPrefix(target, "https://") && cfg.TLSConfig.InsecureSkipVerify) ||
 		cfg.Authorization == nil || cfg.Authorization.Type != "Bearer" || cfg.Authorization.CredentialsFile == "" {
 		return nil, errors.New("native delivery requires the private callback")
 	}
@@ -266,7 +266,7 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 			allowTarget = allowTarget || target == httpTarget || target == httpTarget+"?notifier_type=oscaradmin"
 		}
 		if !known || !receiverKnown || a.ManagedEligible == nil || !allowTarget ||
-			n.conf.HTTPConfig == nil || n.conf.HTTPConfig.FollowRedirects || n.conf.HTTPConfig.TLSConfig.InsecureSkipVerify ||
+			n.conf.HTTPConfig == nil || n.conf.HTTPConfig.FollowRedirects || (strings.HasPrefix(target, "https://") && n.conf.HTTPConfig.TLSConfig.InsecureSkipVerify) ||
 			n.conf.Payload != nil || n.conf.MaxAlerts != 0 {
 			return notify.Retry(0, errors.New("managed callback eligibility unavailable"), notify.DefaultReason)
 		}

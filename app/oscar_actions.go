@@ -4,6 +4,7 @@
 package app
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,8 +30,7 @@ import (
 	"github.com/prometheus/alertmanager/silence"
 )
 
-// Remain dormant until the transport and recovery readers qualify together.
-const nativeDispatchVersion = 0
+const nativeDispatchVersion = 1
 
 var actionHeld = errors.New("ACTION_RECONCILIATION_REQUIRED")
 
@@ -41,46 +42,61 @@ type actionIntegration struct {
 	prepared     *notify.Integration
 }
 type actionGraph struct {
-	supported  bool
-	key        func() []byte
-	log        notify.NotificationLog
-	routes     *dispatch.Route
-	targets    map[string][]actionIntegration
-	inhibitor  *inhibit.Inhibitor
-	silencer   *silence.Silencer
-	timeMuter  notify.TimeMuter
-	dispatcher *dispatch.Dispatcher
-	pipeline   notify.Stage
-	ctx        context.Context
-	cancel     context.CancelFunc
+	retired              chan *alert.Alert
+	sweepRetired         atomic.Bool
+	generation           uint64
+	adapter              *nativeActions
+	canonical, published bool
+	epoch, cutoff        uint64
+	cursor               *list.Element
+	scanning, rescan     bool
+	dirty                list.List
+	queued               map[*actionResident]*list.Element
+	supported            bool
+	key                  func() []byte
+	log                  notify.NotificationLog
+	routes               *dispatch.Route
+	targets              map[string][]actionIntegration
+	inhibitor            *inhibit.Inhibitor
+	silencer             *silence.Silencer
+	timeMuter            notify.TimeMuter
+	dispatcher           *dispatch.Dispatcher
+	pipeline             notify.Stage
+	ctx                  context.Context
+	cancel               context.CancelFunc
 }
 type publishedMember struct {
 	p      v2.EpisodeProjection
 	member *alert.Alert
 }
 type nativeActions struct {
-	scheme, caFile string
-	recipientKey   func() []byte
-	version        int
-	mu             sync.RWMutex
-	graph          *actionGraph
-	journal        v2.ActionJournal
-	sources        map[model.Fingerprint]publishedMember
-	episodes       map[string]publishedMember
-	pending        map[string]bool
-	read           func(string, string, func(*alert.Alert))
-	key            []byte
-	logger         *slog.Logger
+	recovery             v2.RecoveryJournal
+	residents            map[string]*actionResident
+	order                list.List
+	sequence, generation uint64
+	scheme, caFile       string
+	recipientKey         func() []byte
+	version              int
+	mu                   sync.RWMutex
+	graph                *actionGraph
+	journal              v2.ActionJournal
+	sources              map[model.Fingerprint]publishedMember
+	episodes             map[string]publishedMember
+	pending              map[string]bool
+	read                 func(string, string, func(*alert.Alert))
+	key                  []byte
+	logger               *slog.Logger
 }
 
 func newNativeActions(read func(string, string, func(*alert.Alert)), key []byte, logger *slog.Logger) *nativeActions {
-	return &nativeActions{version: nativeDispatchVersion, read: read, key: key, logger: logger, sources: make(map[model.Fingerprint]publishedMember), episodes: make(map[string]publishedMember), pending: make(map[string]bool)}
+	return &nativeActions{residents: make(map[string]*actionResident), version: nativeDispatchVersion, read: read, key: key, logger: logger, sources: make(map[model.Fingerprint]publishedMember), episodes: make(map[string]publishedMember), pending: make(map[string]bool)}
 }
 
 func (a *nativeActions) Bind(j v2.ActionJournal) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.journal = j
+	a.recovery, _ = j.(v2.RecoveryJournal)
 	a.recipientKey = nil
 	if owner, ok := j.(interface{ RecipientKey() []byte }); ok {
 		a.recipientKey = owner.RecipientKey
@@ -103,7 +119,11 @@ func (a *nativeActions) canInstall() bool {
 func (a *nativeActions) Version() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.journal != nil && a.graph != nil && a.graph.pipeline != nil && a.graph.supported {
+	if a.recovery != nil && a.graph != nil && a.graph.pipeline != nil && a.graph.supported && a.graph.published {
+		epoch, receipts := a.recovery.RecoveryState()
+		if epoch == 0 || epoch != a.graph.epoch || a.graph.canonical && !receipts {
+			return 0
+		}
 		return a.version
 	}
 	return 0
@@ -118,6 +138,7 @@ func (a *nativeActions) snapshot() *actionGraph {
 func (a *nativeActions) pause() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.generation++
 	if a.graph != nil {
 		a.graph.cancel()
 		a.graph = nil
@@ -127,6 +148,9 @@ func (a *nativeActions) pause() {
 func (a *nativeActions) readView(source *alert.Alert, use func(*alert.Alert)) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	if a.recovery != nil && (a.graph == nil || !a.currentLocked(a.graph, source)) {
+		return
+	}
 	p, ok := a.sources[source.Fingerprint()]
 	if !ok {
 		use(source)
@@ -160,6 +184,9 @@ func (a *nativeActions) Publish(ctx context.Context, p v2.EpisodeProjection) err
 }
 
 func (a *nativeActions) PublishSource(ctx context.Context, p v2.EpisodeProjection, source *alert.Alert) error {
+	if a.recovery != nil {
+		return a.publishResident(ctx, p, source)
+	}
 	owner := ""
 	if p.ManagedOwner != nil {
 		owner = p.ManagedOwner.EpisodeKey
@@ -243,6 +270,17 @@ type plannedContact struct {
 }
 
 func (g *actionGraph) contacts(ctx context.Context, source *alert.Alert, p v2.EpisodeProjection, scope []alert.TargetScopeEntry) ([]plannedContact, error) {
+	if a := g.adapter; a != nil && a.recovery != nil {
+		a.mu.RLock()
+		pub, ok := a.sources[source.Fingerprint()]
+		a.mu.RUnlock()
+		base := pub.p
+		if !ok || pub.member.ProviderSource() != source || base.EpisodeRef != p.EpisodeRef || base.LifecycleSeq != p.LifecycleSeq ||
+			!(base.SeverityRevision == p.SeverityRevision && base.EffectiveSeverity() == p.EffectiveSeverity() ||
+				base.SeverityRevision+1 == p.SeverityRevision && p.PreviousEffective == base.EffectiveSeverity()) {
+			return nil, actionHeld
+		}
+	}
 	member, err := effectiveMember(source, p)
 	if err != nil {
 		return nil, err
@@ -320,6 +358,9 @@ func (g *actionGraph) providerStore(ctx context.Context, receiver string, i acti
 }
 
 func (g *actionGraph) matchContacts(ctx context.Context, source, member *alert.Alert, labels []*alert.Alert, scope []alert.TargetScopeEntry) ([]plannedContact, error) {
+	if !g.checkViews(ctx, source, labels) {
+		return nil, actionHeld
+	}
 	for _, m := range labels {
 		available := false
 		for _, route := range g.routes.Match(m.Labels) {
@@ -379,6 +420,16 @@ func (g *actionGraph) matchContacts(ctx context.Context, source, member *alert.A
 				interval++
 			}
 			contacts = append(contacts, plannedContact{v2.DispatchTarget{ReceiverID: opts.Receiver, IntegrationDigest: digest, Scope: frozen, RepeatIntervalUS: interval}, i, route})
+		}
+	}
+	// Rendering and receiver metadata reads can block. Reevaluate the
+	// published dependencies before returning this plan.
+	if !g.checkViews(ctx, source, labels) {
+		return nil, actionHeld
+	}
+	for _, m := range labels {
+		if g.inhibitor.HasInhibitor(m.Labels, source.Fingerprint()) {
+			return nil, nil
 		}
 	}
 	return contacts, nil
@@ -474,6 +525,7 @@ func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id 
 }
 
 type ordinaryContact struct {
+	legacy    bool
 	operation string
 	target    v2.TargetResult
 	contact   plannedContact
@@ -502,6 +554,10 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	for _, m := range members {
 		source := m.ProviderSource()
 		if source.ManagedReceiver && !i.canonical {
+			continue
+		}
+		if !g.checkViews(ctx, source, []*alert.Alert{m, source}) {
+			hold(m, actionHeld)
 			continue
 		}
 		p, pass, err := a.journal.InspectOrdinary(ctx, source)
@@ -766,7 +822,8 @@ func (a *nativeActions) reserve(ctx context.Context, member *alert.Alert, p v2.E
 func (a *nativeActions) planOrdinary(ctx context.Context, g *actionGraph, m *alert.Alert, c ordinaryContact) (ordinaryContact, error) {
 	s := m.ProviderSource()
 	if c.pass != nil {
-		if !c.contact.integration.canonical {
+		c.legacy = c.contact.integration.canonical && !g.callbackCommissioned()
+		if !c.contact.integration.canonical || c.legacy {
 			possible, err := g.matchContacts(ctx, s, m, []*alert.Alert{m}, nil)
 			if err != nil {
 				return c, err
@@ -906,7 +963,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 				bound.ActionID = id + "|" + c.target.TargetKey
 			}
 		}
-		if c.contact.integration.canonical {
+		if c.contact.integration.canonical && !c.legacy {
 			operation, err := uuid.Parse(c.operation)
 			if entry == nil || err != nil {
 				return finish(notify.Unrecoverable(actionHeld, notify.DefaultReason))
@@ -1030,12 +1087,13 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		if ctx.Err() != nil || g != a.snapshot() {
 			return false
 		}
-		if commit {
-			for x, m := range members {
-				entered[x] = entered[x] || active[m]
+		return a.finalPublication(g, members, contacts, active, func() {
+			if commit {
+				for x, m := range members {
+					entered[x] = entered[x] || active[m]
+				}
 			}
-		}
-		return true
+		})
 	}
 	bound.Check = func() bool { return check(false) }
 	bound.Begin = func() bool { return check(true) }

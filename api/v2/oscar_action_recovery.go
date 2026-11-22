@@ -61,12 +61,13 @@ func (o *nativeActionOwner) recoverWork(ctx context.Context, id string, seen map
 		}
 		return nil
 	}
-	s, err := o.episode(r.EpisodeRef)
+	s, err := o.residentEpisode(ctx, r.EpisodeRef)
 	if err != nil {
 		o.mu.Lock()
 		deferred := o.deferredRecovery
 		o.mu.Unlock()
-		if deferred {
+		_, production := o.dispatch.(ActionPublication)
+		if deferred && !production {
 			var p *EpisodeProjection
 			if e := o.read(ctx, "recover", map[string]any{"projection": "episode", "episode_id": r.EpisodeRef.EpisodeID}, &p); e != nil {
 				return e
@@ -184,6 +185,7 @@ func (o *nativeActionOwner) reconcileLocked(ctx context.Context, s *episodeSlot,
 			req.EpisodeRef = p.EpisodeRef
 			routeView := p
 			if req.TargetSeverity != nil && firingRanks[*req.TargetSeverity] > firingRanks[p.Floor] {
+				routeView.PreviousEffective = p.EffectiveSeverity()
 				routeView.Floor = *req.TargetSeverity
 				routeView.SeverityRevision++
 			}
@@ -242,6 +244,9 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context, epoch uint64) (
 	for _, s := range invalidate {
 		s.turn.Lock()
 		s.uncertain = s.uncertain || s.projection.LifecycleSeq > 0
+		if _, production := o.dispatch.(ActionPublication); production {
+			s.needsRestore = true
+		}
 		s.turn.Unlock()
 	}
 	defer func() {
@@ -281,7 +286,16 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context, epoch uint64) (
 			if p.State != "firing" || !managedUUID.MatchString(p.ID) || p.ID <= c.activeAfter {
 				return reconcile
 			}
-			if err := o.restoreEpisode(p); err != nil {
+			if _, production := o.dispatch.(ActionPublication); production {
+				owner, err := o.projectionKey(p)
+				if err != nil {
+					return err
+				}
+				bucket, bit := membershipBit(sourceKey(owner, p.NativeVariant.Fingerprint))
+				o.mu.Lock()
+				o.membership[bucket] |= bit
+				o.mu.Unlock()
+			} else if err := o.restoreEpisode(p); err != nil {
 				return err
 			}
 			c.activeAfter = p.ID
@@ -400,6 +414,7 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	if o.recipientKey != nil && !bytes.Equal(o.recipientKey, key) {
 		o.lease.ExpiresAt = time.Time{}
 		o.recovered = false
+		o.publishLeaseLocked()
 		return unavailable
 	}
 	o.recipientKey = key
@@ -417,6 +432,7 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	o.localAnchor = start
 	l.ExpiresAt = start.Add(30 * time.Second)
 	o.lease = l
+	o.publishLeaseLocked()
 	return nil
 }
 
@@ -425,6 +441,7 @@ func (o *nativeActionOwner) rejectLease() error {
 	defer o.mu.Unlock()
 	o.lease.ExpiresAt = time.Time{}
 	o.recovered = false
+	o.publishLeaseLocked()
 	return unavailable
 }
 
@@ -443,8 +460,16 @@ func (o *nativeActionOwner) sweep(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		if !o.ready() {
+		epoch, _ := o.RecoveryState()
+		if epoch == 0 {
 			continue
+		}
+		turn := o.withEpoch(context.WithValue(ctx, actionEpochKey{}, epoch))
+		o.mu.Lock()
+		work := min(64, o.work.Len())
+		o.mu.Unlock()
+		for range work {
+			o.drainHandoff(turn)
 		}
 		if len(keys) == 0 {
 			o.mu.Lock()
@@ -515,11 +540,8 @@ func (o *nativeActionOwner) sweepSlot(ctx context.Context, key string, s *episod
 	if !s.removed || s.floorWrite != nil || s.observed != observed || o.byKey[key] != s {
 		return
 	}
-	s.detached = true
-	delete(o.byKey, key)
-	if id := s.projection.EpisodeRef.EpisodeID; o.byID[id] == s {
-		delete(o.byID, id)
-	}
+	s.invalidateLocked()
+	o.unlinkLocked(key, s)
 	if s.projection.State != "resolved" || s.ambiguous || s.overflow {
 		o.deferredRecovery = true
 	}
@@ -538,6 +560,7 @@ func (o *nativeActionOwner) recoverAuthority(ctx context.Context, epoch uint64) 
 		return unavailable
 	}
 	o.recovered = true
+	o.publishLeaseLocked()
 	return nil
 }
 
@@ -680,6 +703,7 @@ func (o *nativeActionOwner) transferPolicy(ctx context.Context, s *episodeSlot, 
 	req.EpisodeRef = q.CurrentRef
 	proposed := p
 	if req.TargetSeverity != nil && firingRanks[*req.TargetSeverity] > firingRanks[p.Floor] {
+		proposed.PreviousEffective = p.EffectiveSeverity()
 		proposed.Floor = *req.TargetSeverity
 		proposed.SeverityRevision++
 	}

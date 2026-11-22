@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/common/model"
@@ -146,7 +147,7 @@ func (o *nativeActionOwner) reserveOrdinary(ctx context.Context, id string, memb
 		return r, unavailable
 	}
 	ref, revision := expected.EpisodeRef, expected.SeverityRevision
-	s, err := o.episode(ref)
+	s, err := o.residentEpisode(ctx, ref)
 	if err != nil {
 		return r, err
 	}
@@ -279,7 +280,7 @@ func (o *nativeActionOwner) ReserveTerminal(ctx context.Context, member *alert.A
 		return r, unavailable
 	}
 	source := member.ProviderSource()
-	s, err := o.episode(p.EpisodeRef)
+	s, err := o.residentEpisode(ctx, p.EpisodeRef)
 	if err != nil {
 		return r, err
 	}
@@ -348,7 +349,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	} else if !decodeAction(i.Request, &req) || !validAction(req) {
 		return nil, reconcile
 	}
-	s, err := o.episode(r.EpisodeRef)
+	s, err := o.residentEpisode(ctx, r.EpisodeRef)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +413,12 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 		return nil, reconcile
 	}
 	s.local.Lock()
-	generation := s.publication
+	if s.stamp == nil {
+		s.stamp = &atomic.Bool{}
+		s.stamp.Store(true)
+	}
+	stamp := s.stamp
+	atIssue := s.contactCurrentLocked(p, source, ordinary.Terminal) == nil
 	s.local.Unlock()
 	var logical *string
 	if ordinary.Kind != "ordinary" {
@@ -424,9 +430,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	e := claimedEntry{OperationID: id, TargetKey: key, token: entry.Token, source: source, severity: p.EffectiveSeverity(), terminal: ordinary.Terminal, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, ready: o.ready, valid: func() bool {
 		o.mu.Lock()
 		defer o.mu.Unlock()
-		s.local.Lock()
-		defer s.local.Unlock()
-		return o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && s.publication == generation && s.contactCurrentLocked(p, source, ordinary.Terminal) == nil
+		return atIssue && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && stamp.Load() && (ordinary.Terminal != nil || !source.Resolved())
 	}}
 	if !e.Valid() {
 		_, err = o.Settle(ctx, e, "no_effect", "INVALIDATED_BEFORE_PROVIDER_ENTRY")
@@ -461,6 +465,7 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 	if source == nil || o.readSource == nil {
 		return nil, nil, unverified
 	}
+	ctx = o.withEpoch(ctx)
 	fp, owner := source.Fingerprint().String(), source.ManagedMember.Episode
 	key := sourceKey(owner, fp)
 	bucket, bit := membershipBit(key)
@@ -470,42 +475,42 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 	live := o.recovered && o.lease.ExpiresAt.After(time.Now())
 	tracked := o.byKey[key] != nil
 	candidate := o.membership[bucket]&bit != 0
-	held := o.untracked[key] != 0
+	negative := false
+	if pub, ok := o.dispatch.(ActionPublication); ok && !tracked {
+		negative = pub.VerifiedNegative(source, epoch)
+	}
+	park, parked := o.parked[key]
+	gap := o.gaps[bucket]&bit != 0 && !(parked && park.source == source)
+	held := o.directHeldLocked(key) || o.handoffs[key] != nil
 	o.mu.Unlock()
 	if !live || held {
 		return nil, nil, reconcile
 	}
-	if !tracked && candidate {
-		var rows []EpisodeProjection
-		var managed any
-		if owner != "" {
-			managed = owner
-		}
-		if err := o.read(ctx, "recover", map[string]any{"projection": "source", "fingerprint": fp, "managed_key": managed}, &rows); err != nil {
+	if !tracked && (candidate || gap) && !negative {
+		rows, err := o.sourceRows(ctx, owner, fp)
+		if err != nil {
 			return nil, nil, err
 		}
-		if rows == nil || len(rows) > 1 {
-			return nil, nil, reconcile
-		}
 		if len(rows) == 1 {
-			row := rows[0]
-			currentOwner, err := o.projectionKey(row)
-			if err != nil || row.State != "firing" || !managedUUID.MatchString(row.ID) || currentOwner != owner || owner == "" && row.NativeVariant.Fingerprint != fp {
+			if gap {
 				return nil, nil, reconcile
 			}
-			if err := o.restoreEpisode(row); err != nil {
+			if _, err = o.restoreCurrent(ctx, rows[0], source); err != nil {
 				return nil, nil, err
 			}
 			tracked = true
 		}
 	}
-	if !tracked {
+	if !tracked && !negative {
 		p, err := o.terminalCandidate(ctx, source)
 		if err != nil {
 			return nil, nil, err
 		}
 		if p != nil {
-			if err := o.restoreEpisode(*p); err != nil {
+			if gap {
+				return nil, nil, reconcile
+			}
+			if _, err = o.restoreCurrent(ctx, *p, source); err != nil {
 				return nil, nil, err
 			}
 			tracked = true
@@ -516,16 +521,22 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 		return &p, nil, err
 	}
 	entered := false
+	token := &DirectContact{}
 	pass := &OrdinaryPass{}
 	pass.Enter = func() bool {
 		ok := false
 		o.readSource(owner, fp, func(current *alert.Alert) {
 			o.mu.Lock()
 			defer o.mu.Unlock()
-			if current == source && !entered && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && o.byKey[key] == nil && o.untracked[key] == 0 && len(o.untracked) < maxActionEpisodes &&
+			if current == source && !entered && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && o.byKey[key] == nil && !o.directHeldLocked(key) &&
 				(candidate && o.enrollments == enrollments || !candidate && o.membership[bucket]&bit == 0) {
-				o.untracked[key] = 1
-				entered, ok = true, true
+				if pub, production := o.dispatch.(ActionPublication); production {
+					ok = pub.ChangeDirectContact(key, nil, token)
+				} else if len(o.untracked) < maxActionEpisodes {
+					o.untracked[key] = 1
+					ok = true
+				}
+				entered = ok
 			}
 		})
 		return ok
@@ -535,7 +546,7 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 		o.readSource(owner, fp, func(current *alert.Alert) {
 			o.mu.Lock()
 			defer o.mu.Unlock()
-			valid = entered && current == source && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && o.byKey[key] == nil && o.untracked[key] == 1
+			valid = entered && current == source && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && o.byKey[key] == nil && !token.detached && o.directHeldLocked(key)
 		})
 		return valid
 	}
@@ -543,7 +554,7 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		if entered && conclusive {
-			delete(o.untracked, key)
+			o.finishDirectLocked(key, token)
 		}
 		entered = false
 	}

@@ -227,7 +227,8 @@ func callbackConfigReady(cfg *config.Config, key []byte, transport *managedClien
 			}
 			if transport != nil {
 				cfg := webhook.HTTPConfig
-				if target.Scheme != transport.scheme || target.Host != "alertmanager-middleware:9400" || target.User != nil ||
+				exact := transport.scheme + "://alertmanager-middleware:9400/api/v1/internal/fingerprint-conversion/alerts"
+				if (string(webhook.URL) != exact && string(webhook.URL) != exact+"?notifier_type=oscaradmin") || target.Scheme != transport.scheme || target.Host != "alertmanager-middleware:9400" || target.User != nil ||
 					target.Fragment != "" || target.RawPath != "" || (target.RawQuery != "" && target.RawQuery != "notifier_type=oscaradmin") ||
 					cfg.FollowRedirects || (target.Scheme == "https" && (cfg.TLSConfig.InsecureSkipVerify || cfg.TLSConfig.CAFile != transport.caFile ||
 					(cfg.TLSConfig.ServerName != "" && cfg.TLSConfig.ServerName != "alertmanager-middleware"))) {

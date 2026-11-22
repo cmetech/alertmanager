@@ -5,6 +5,7 @@ package v2
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -149,16 +151,17 @@ type actionIntent struct {
 	Result                 ActionResultV1  `json:"result"`
 }
 type actionLease struct {
-	RecipientBinding     int       `json:"recipient_binding"`
-	RecipientKey         string    `json:"recipient_key"`
-	TerminalObservations int       `json:"terminal_observations"`
-	Protocol             string    `json:"protocol"`
-	RecoverySelectors    int       `json:"recovery_selectors"`
-	AuthorityID          string    `json:"authority_id"`
-	OwnerID              string    `json:"owner_id"`
-	Epoch                uint64    `json:"epoch"`
-	ExpiresAt            time.Time `json:"expires_at"`
-	RenewSeconds         int       `json:"renew_seconds"`
+	NativeDeliveryReceipts json.RawMessage `json:"native_delivery_receipts"`
+	RecipientBinding       int             `json:"recipient_binding"`
+	RecipientKey           string          `json:"recipient_key"`
+	TerminalObservations   int             `json:"terminal_observations"`
+	Protocol               string          `json:"protocol"`
+	RecoverySelectors      int             `json:"recovery_selectors"`
+	AuthorityID            string          `json:"authority_id"`
+	OwnerID                string          `json:"owner_id"`
+	Epoch                  uint64          `json:"epoch"`
+	ExpiresAt              time.Time       `json:"expires_at"`
+	RenewSeconds           int             `json:"renew_seconds"`
 }
 type actionEvent struct {
 	source *alert.Alert
@@ -170,11 +173,14 @@ type pendingFloor struct {
 	epoch               uint64
 }
 type episodeSlot struct {
-	turn         sync.Mutex // All journal commands for this episode, never acquired by the provider.
-	local        sync.Mutex // The provider only updates this bounded in-memory queue.
-	source       *alert.Alert
-	pending      []actionEvent
-	publication  uint64
+	checkGap bool // Validate a bounded lost-edge summary under the episode turn.
+	clock    *list.Element
+	stamp    *atomic.Bool
+	turn     sync.Mutex // All journal commands for this episode, never acquired by the provider.
+	local    sync.Mutex // The provider only updates this bounded in-memory queue.
+	source   *alert.Alert
+	pending  []actionEvent
+
 	observed     uint64
 	removed      bool
 	overflow     bool
@@ -189,6 +195,13 @@ type episodeSlot struct {
 	floorWrite   *pendingFloor
 }
 type nativeActionOwner struct {
+	directOverflow        [1 << 16]uint32
+	publicLease           atomic.Pointer[recoveredLease]
+	clock, work           list.List
+	parked                map[string]parkedEpisode
+	handoffs              map[string]*observationHandoff
+	gaps                  [1 << 16]uint64
+	waiters, admitter     chan struct{}
 	recipientKey          []byte
 	readSource            func(string, string, func(*alert.Alert))
 	lockManaged           func(string) (func(), error)
@@ -218,6 +231,7 @@ type nativeActionOwner struct {
 
 func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *nativeActionOwner {
 	return &nativeActionOwner{
+		parked: make(map[string]parkedEpisode), handoffs: make(map[string]*observationHandoff), waiters: make(chan struct{}, 32), admitter: make(chan struct{}, 1),
 		authority: authority, owner: uuid.NewString(), rpc: rpc, dispatch: d,
 		untracked: make(map[string]uint8), byKey: map[string]*episodeSlot{}, byID: map[string]*episodeSlot{}, slots: make(chan struct{}, 32),
 	}
@@ -237,15 +251,7 @@ func sourceKey(owner, fp string) string {
 func (o *nativeActionOwner) slot(key string, create bool) *episodeSlot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	s := o.byKey[key]
-	if s == nil && create && len(o.byKey) < maxActionEpisodes && o.untracked[key] == 0 {
-		bucket, bit := membershipBit(key)
-		o.membership[bucket] |= bit
-		o.enrollments++
-		s = &episodeSlot{needsRestore: o.deferredRecovery}
-		o.byKey[key] = s
-	}
-	return s
+	return o.slotLocked(key, create)
 }
 
 func sameVariant(x, y alert.NativeVariant) bool {
@@ -274,15 +280,35 @@ func (o *nativeActionOwner) observe(owner string, source *alert.Alert, closed bo
 	if source != nil {
 		fp = source.Fingerprint().String()
 	}
-	s := o.slot(sourceKey(owner, fp), o.readSource == nil && source != nil && !closed)
+	key := sourceKey(owner, fp)
+	o.mu.Lock()
+	s := o.slotLocked(key, o.readSource == nil && source != nil && !closed)
+	bucket, bit := membershipBit(key)
+	possible := !o.recovered || s != nil || o.membership[bucket]&bit != 0 || o.terminalMembership[bucket]&bit != 0 || o.gaps[bucket]&bit != 0
+	var previous *alert.Alert
+	if pub, ok := o.dispatch.(ActionPublication); ok {
+		var contact *DirectContact
+		previous, contact = pub.ObserveSource(owner, source, closed, possible)
+		if contact != nil {
+			o.detachDirectLocked(key, contact)
+		}
+		if closed && source != nil && previous != nil && previous != source {
+			o.mu.Unlock()
+			return
+		}
+	}
 	if s == nil {
+		o.bufferLocked(key, previous, source, closed)
+		o.mu.Unlock()
 		return
 	}
 	s.local.Lock()
+	o.mu.Unlock()
 	defer s.local.Unlock()
-	if s.detached {
-		return
-	}
+	s.observeLocked(owner, source, closed)
+}
+
+func (s *episodeSlot) observeLocked(owner string, source *alert.Alert, closed bool) {
 	if source == nil {
 		source = s.source
 	}
@@ -296,6 +322,7 @@ func (o *nativeActionOwner) observe(owner string, source *alert.Alert, closed bo
 	if s.source != nil && owner == "" && !source.StartsAt.Equal(s.source.StartsAt) && s.source.Resolved() && !s.source.EndsAt.After(source.StartsAt) && len(s.pending) < maxTransitions {
 		s.pending = append(s.pending, actionEvent{s.source, true})
 	}
+	s.invalidateLocked()
 	s.observed++
 	s.removed = closed
 	s.source = source
@@ -329,6 +356,9 @@ func (o *nativeActionOwner) read(ctx context.Context, cmd string, p map[string]a
 type actionEpochKey struct{}
 
 func (o *nativeActionOwner) withEpoch(ctx context.Context) context.Context {
+	if pub, ok := o.dispatch.(ActionPublication); ok && ctx.Value(publicationGenerationKey{}) == nil {
+		ctx = context.WithValue(ctx, publicationGenerationKey{}, pub.PublicationGeneration())
+	}
 	if ctx.Value(actionEpochKey{}) != nil {
 		return ctx
 	}
@@ -354,6 +384,11 @@ func (o *nativeActionOwner) write(ctx context.Context, cmd string, p map[string]
 	o.mu.Unlock()
 	if pinned, ok := ctx.Value(actionEpochKey{}).(uint64); !ok || pinned != lease.Epoch || !lease.ExpiresAt.After(time.Now()) {
 		return unavailable
+	}
+	if pub, ok := o.dispatch.(ActionPublication); ok {
+		if gen, pinned := ctx.Value(publicationGenerationKey{}).(uint64); pinned && pub.PublicationGeneration() != gen {
+			return unavailable
+		}
 	}
 	p["owner_id"], p["epoch"] = o.owner, lease.Epoch
 	err := o.read(ctx, cmd, p, out)
@@ -440,6 +475,7 @@ func (o *nativeActionOwner) restoreEpisode(p EpisodeProjection) error {
 		}
 		// Contradictory restored bindings quarantine this source without stopping other episodes.
 		s.local.Lock()
+		s.invalidateLocked()
 		s.ambiguous = true
 		s.local.Unlock()
 		return nil
@@ -595,8 +631,9 @@ func (o *nativeActionOwner) hydrate(ctx context.Context, s *episodeSlot) error {
 	if rows == nil || len(rows) > 2 {
 		return unavailable
 	}
-	if len(rows) == 2 || len(rows) == 1 && s.projection.ID != "" && s.projection.ID != rows[0].ID {
+	if len(rows) == 2 || len(rows) == 1 && s.projection.ID != "" && s.projection.ID != rows[0].ID || s.checkGap && (len(rows) > 0 || s.projection.ID != "") {
 		s.local.Lock()
+		s.invalidateLocked()
 		s.ambiguous = true
 		s.local.Unlock()
 		return reconcile
@@ -613,6 +650,7 @@ func (o *nativeActionOwner) hydrate(ctx context.Context, s *episodeSlot) error {
 		o.mu.Unlock()
 	}
 	s.needsRestore = false
+	s.checkGap = false
 	return nil
 }
 
@@ -670,7 +708,7 @@ func (o *nativeActionOwner) recoverPrepared(ctx context.Context, s *episodeSlot)
 		return reconcile
 	}
 	s.pending = s.pending[1:]
-	s.publication++
+	s.invalidateLocked()
 	s.next = nil
 	if next.ManagedOwner == nil && key == "" {
 		if sameGeneration {
@@ -698,6 +736,7 @@ func (o *nativeActionOwner) recoverPrepared(ctx context.Context, s *episodeSlot)
 	if !sameSource {
 		// The old CAS has ended, but this slot cannot adopt a different source. GC
 		// may reclaim the local quarantine without changing the durable successor.
+		s.invalidateLocked()
 		s.ambiguous = true
 		s.local.Unlock()
 		return reconcile
@@ -831,6 +870,9 @@ func (o *nativeActionOwner) flush(ctx context.Context, s *episodeSlot) error {
 		recheckClosure := p.LifecycleSeq != 0 && p.State == "firing" && closed
 		next := *s.next
 		if p.LifecycleSeq == 0 {
+			if pub, ok := o.dispatch.(ActionPublication); ok {
+				pub.InvalidateSource(event.source)
+			}
 			s.nextEpoch, _ = ctx.Value(actionEpochKey{}).(uint64)
 			if err := o.write(ctx, "project-episode", map[string]any{"update": next, "expected_seq": next.LifecycleSeq - 1}, &p); err != nil {
 				return err
@@ -840,7 +882,7 @@ func (o *nativeActionOwner) flush(ctx context.Context, s *episodeSlot) error {
 			return reconcile
 		}
 		s.local.Lock()
-		s.publication++
+		s.invalidateLocked()
 		s.local.Unlock()
 		if p.State == "resolved" {
 			if err := o.rememberTerminal(p); err != nil {
@@ -902,17 +944,14 @@ func (o *nativeActionOwner) projectSource(ctx context.Context, source *alert.Ale
 	}
 	key, fp := source.ManagedMember.Episode, source.Fingerprint().String()
 	s := o.slot(sourceKey(key, fp), false)
-	if (s == nil || s.latest() == nil) && o.readSource != nil {
-		o.readSource(key, fp, func(current *alert.Alert) {
-			if current != source {
-				return
-			}
-			s = o.slot(sourceKey(key, fp), enroll)
-			if s != nil && s.latest() == nil {
-				o.observe(key, current, false)
-			}
-		})
+	if o.readSource != nil && (s != nil && s.latest() == nil || s == nil && enroll) {
+		var err error
+		s, err = o.sourceSlot(ctx, source, enroll)
+		if err != nil {
+			return EpisodeProjection{}, err
+		}
 	}
+
 	if s == nil {
 		return EpisodeProjection{}, unverified
 	}
@@ -968,6 +1007,9 @@ func (o *nativeActionOwner) resolveIntent(ctx context.Context, id string) (*acti
 func (o *nativeActionOwner) publish(ctx context.Context, s *episodeSlot, p EpisodeProjection) error {
 	source := s.latest()
 	err := s.current(p, source, false)
+	if _, production := o.dispatch.(ActionPublication); production && err == nil && !sameResident(p, source) {
+		err = reconcile
+	}
 	if err == nil && p.State == "firing" {
 		err = o.verifySource(ctx, source, p.State)
 	}
@@ -1033,7 +1075,7 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if err != nil {
 		return r, err
 	}
-	s, sourceErr := o.episode(req.EpisodeRef)
+	s, sourceErr := o.residentEpisode(ctx, req.EpisodeRef)
 	if sourceErr == nil {
 		s.turn.Lock()
 		defer s.turn.Unlock()
@@ -1086,6 +1128,9 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	}
 	p := s.projection
 	source := s.latest()
+	if f := s.floorWrite; f != nil && f.operationID == req.OperationID && f.digest == digest && ctx.Value(actionEpochKey{}) == f.epoch && floorCASPossible(p, f.update) {
+		ctx = context.WithValue(ctx, floorPlanRetryKey{}, floorPlanRetry{source, p})
+	}
 	if directive != nil {
 		if directive.CurrentRef != p.EpisodeRef || directive.SeverityRevision != p.SeverityRevision {
 			return r, mismatch
@@ -1121,6 +1166,9 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	}
 	if err = o.verifySource(ctx, source, p.State); err != nil {
 		return r, err
+	}
+	if pub, ok := o.dispatch.(ActionPublication); ok && !dispatchKind(req.Kind) && !pub.PublishedEpisode(source, p) {
+		return r, reconcile
 	}
 	if i == nil {
 		if err = o.write(ctx, "reserve", map[string]any{"request": req, "digest": digest, "expected_revision": p.SeverityRevision}, &r); err != nil {
@@ -1240,8 +1288,11 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if update.Floor != nil && !renew {
 		epoch, _ := ctx.Value(actionEpochKey{}).(uint64)
 		s.floorWrite = &pendingFloor{req.OperationID, digest, update, epoch}
+		if pub, ok := o.dispatch.(ActionPublication); ok {
+			pub.InvalidateSource(source)
+		}
 		s.local.Lock()
-		s.publication++
+		s.invalidateLocked()
 		s.local.Unlock()
 	}
 	if err = o.write(ctx, "commit", map[string]any{"operation_id": req.OperationID, "expected_revision": p.SeverityRevision, "update": update, "renew_permit": renew}, &r); err != nil {
@@ -1273,7 +1324,7 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	}
 	p.SeverityRevision = r.SeverityRevision
 	s.local.Lock()
-	s.publication++
+	s.invalidateLocked()
 	s.local.Unlock()
 	s.projection = p
 	s.floorWrite = nil
@@ -1319,7 +1370,7 @@ func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) 
 	out := make([]Eligibility, 0, len(refs))
 	for _, ref := range refs {
 		item := Eligibility{EpisodeRef: ref, Actions: map[string]ActionDecision{}}
-		s, err := o.episode(ref)
+		s, err := o.residentEpisode(ctx, ref)
 		func() {
 			var p EpisodeProjection
 			var source *alert.Alert
@@ -1341,6 +1392,9 @@ func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) 
 						}
 					}
 				}
+			}
+			if pub, ok := o.dispatch.(ActionPublication); ok && err == nil && !pub.PublishedEpisode(source, p) {
+				err = reconcile
 			}
 			if err == nil {
 				revision := p.SeverityRevision
@@ -1433,10 +1487,10 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 		o.verifyManaged = api.managedOwner.verifyActionMember
 		o.lockManaged = func(key string) (func(), error) { _, release, err := api.managedOwner.enter(key); return release, err }
 	}
-	store.SetActionObserver(o.observe)
 	if err = c.Dispatch.Bind(o); err != nil {
 		return fmt.Errorf("native action dispatch: %w", err)
 	}
+	store.SetActionObserver(o.observe)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { <-store.ManagedShutdown(); cancel() }()
 	go o.maintain(ctx)
@@ -1445,7 +1499,11 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 
 // actionView returns effective routing labels without performing a journal read on a list endpoint.
 func (api *API) actionView(source *alert.Alert) *alert.Alert {
-	if o := api.actionOwner; o != nil && o.dispatch != nil && o.dispatch.Version() == 1 {
+	if o := api.actionOwner; o != nil && o.dispatch != nil {
+		_, production := o.dispatch.(ActionPublication)
+		if !production && o.dispatch.Version() != 1 {
+			return source
+		}
 		if reader, ok := o.dispatch.(interface {
 			ReadView(*alert.Alert) *alert.Alert
 		}); ok {

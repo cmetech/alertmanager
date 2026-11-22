@@ -59,9 +59,12 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/dispatch")
 type Dispatcher struct {
 	// Project reads an effective member under the action adapter's publication fence. Installed before Run.
 	Project func(*alert.Alert, func(*alert.Alert))
-	route   *Route
-	alerts  provider.Alerts
-	stage   notify.Stage
+	// SweepRetired requests a group-cache pass after bounded GC handoff overflow.
+	SweepRetired func() bool
+	Retired      func(*alert.Alert) bool
+	route        *Route
+	alerts       provider.Alerts
+	stage        notify.Stage
 	// timeMuter resolves the time intervals referenced by route. It comes from
 	// the same configuration as route so that route names always resolve.
 	timeMuter  notify.TimeMuter
@@ -305,6 +308,20 @@ func (d *Dispatcher) ReplaceProjection(ctx context.Context, old, current *alert.
 	}
 }
 
+// RetireProjection removes only the exact routed object. A late GC must
+// preserve a replacement even when both have the same native timestamp.
+func (d *Dispatcher) RetireProjection(old *alert.Alert) {
+	for _, route := range d.route.Match(old.Labels) {
+		group := getGroupLabels(old, route).Fingerprint()
+		if el, ok := d.routeGroupsSlice[route.Idx].groups.Load(group); ok {
+			ag := el.(*aggrGroup)
+			if ag.alerts.DeleteExact(old) {
+				ag.invalidateRouteLabels()
+			}
+		}
+	}
+}
+
 func (d *Dispatcher) routeMember(ctx context.Context, alrt *alert.Alert) {
 	d.logger.Debug("Received alert", "alert", alrt)
 
@@ -330,9 +347,17 @@ func (d *Dispatcher) routeMember(ctx context.Context, alrt *alert.Alert) {
 }
 
 func (d *Dispatcher) doMaintenance() {
+	sweep := d.SweepRetired != nil && d.SweepRetired()
 	for i := range d.routeGroupsSlice {
 		d.routeGroupsSlice[i].groups.Range(func(key, el any) bool {
 			ag := el.(*aggrGroup)
+			if sweep {
+				for _, m := range ag.alerts.List() {
+					if d.Retired(m) && ag.alerts.DeleteExact(m) {
+						ag.invalidateRouteLabels()
+					}
+				}
+			}
 			if ag.destroyed() {
 				ag.stop()
 				deleted := d.routeGroupsSlice[i].groups.CompareAndDelete(key, ag)

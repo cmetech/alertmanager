@@ -196,6 +196,21 @@ func (a *Alerts) setLocked(alrt *alert.Alert) error {
 	return nil
 }
 
+// DeleteExact removes an identical member and retires an empty group store.
+func (a *Alerts) DeleteExact(member *alert.Alert) bool {
+	a.Lock()
+	defer a.Unlock()
+	fp := member.ProviderSource().Fingerprint()
+	if a.alerts[fp] != member {
+		return false
+	}
+	delete(a.alerts, fp)
+	if len(a.alerts) == 0 {
+		a.destroyed = true
+	}
+	return true
+}
+
 // DeleteIfNotModified deletes the slice of Alerts from the store if not
 // modified.
 func (a *Alerts) DeleteIfNotModified(alerts alert.AlertSlice, destroyIfEmpty bool) error {

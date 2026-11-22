@@ -34,6 +34,7 @@ import (
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/common/version"
 
+	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/api"
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
@@ -63,6 +64,25 @@ func New(opts Options) (*App, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// configureNativeActions is the same factory used by CLI and embedded options.
+func configureNativeActions(opts Options, read func(string, string, func(*alert.Alert)), logger *slog.Logger) (api.ActionOwnerConfig, *nativeActions) {
+	actionOwner := opts.ActionOwner
+	if actionOwner.Enabled && actionOwner.Dispatch == nil {
+		actionOwner.Dispatch = newNativeActions(read, opts.ConversionCallbackKey, logger)
+	}
+	actions, candidate := actionOwner.Dispatch.(*nativeActions)
+	if candidate && (!actionOwner.Enabled || actions == nil || actions.version != 1) {
+		actions, actionOwner.Dispatch = nil, nil
+	} else if actions != nil {
+		actions.key = slices.Clone(opts.ConversionCallbackKey)
+		actions.scheme, actions.caFile = actionOwner.Scheme, actionOwner.CAFile
+		if actions.scheme == "" {
+			actions.scheme = "https"
+		}
+	}
+	return actionOwner, actions
 }
 
 // Run starts an Alertmanager instance using opts and blocks until ctx is
@@ -380,18 +400,7 @@ func (a *App) setup() error {
 		clusterPeer = peer
 	}
 
-	// A dormant embedded adapter must not install observers or ordinary notification readers.
-	actionOwner := opts.ActionOwner
-	actions, candidate := actionOwner.Dispatch.(*nativeActions)
-	if candidate && (!actionOwner.Enabled || actions == nil || actions.version != 1) {
-		actions, actionOwner.Dispatch = nil, nil
-	} else if actions != nil {
-		actions.key = slices.Clone(opts.ConversionCallbackKey)
-		actions.scheme, actions.caFile = actionOwner.Scheme, actionOwner.CAFile
-		if actions.scheme == "" {
-			actions.scheme = "https"
-		}
-	}
+	actionOwner, actions := configureNativeActions(opts, alerts.ReadActionSource, logger)
 	apih, err := api.New(api.Options{
 		Alerts:                     alerts,
 		Silences:                   silences,

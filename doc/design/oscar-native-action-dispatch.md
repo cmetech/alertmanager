@@ -1,10 +1,45 @@
 # Native action dispatch checkpoint
 
-The production CLI does not install this reader. The OSCAR action option stays
-disabled by default. This checkpoint is for source review and operator
-qualification. Deployment needs the matching A2 journal schema and A3 native
-admission, followed by B1/B2 consumer commissioning. Release pins and CI
-configuration are unchanged.
+The existing disabled-by-default OSCAR action option installs the native reader
+through the normal app factory. A compatible private authority lease, recovered
+membership and a published configuration generation are prerequisites for
+version 1. A graph containing any canonical callback additionally requires
+`native_delivery_receipts: 1` in the authenticated acquire/renew response.
+B2 owns that assertion and must implement durable signed receipt recovery before
+advertising it. The current backend omits it. Direct-only graphs use their own
+route and store proof. B1/B2 commissioning and operator qualification are pending.
+
+## Resident recovery and capacity
+
+After the indexed firing and historical membership pages complete, the graph
+classifies its current residents in bounded batches. A summary miss publishes
+the raw pointer. A possible match installs a hold for itself and its potential
+inhibition targets. An indexed source/terminal read and exact current native
+variant, lifecycle and managed proof publish the effective view. The inhibitor
+indexes possible source matches by rule and equal labels over feasible
+severities, including a missing source label. Two-sided and self exclusions
+apply. Each rule holds up to 4,096 exact pairs and uses a conservative marker
+for excess pairs until their observations clear. Uncertainty carries no
+confirmed inhibitor fingerprint. Independent work can proceed while a source
+proof is outstanding.
+
+Provider mutations synchronously retire the old proof. Graph and epoch checks
+fence stale subscribers, blocked lookups and new provider entry. The worker
+uses a 256-item dirty queue and an incremental resident cursor on overflow.
+An ambiguous floor write holds its own and dependent entries while the original
+CAS is reconciled. The selected and ordinary paths reevaluate dependencies after
+blocking preparation. The existing entry token remains sufficient for late settlement.
+
+Up to 4,096 mutable episode coordinators are resident at once. A clock evicts
+quiescent journaled slots, keeps their live projection and claim witness, and
+rehydrates through indexed selectors. Ordered lifecycle handoffs are separately
+bounded; loss of intermediate evidence conservatively holds the affected source
+bucket. A missing provider pointer cannot close an unseen interval. Resident
+direct passes pin local ownership until conclusive settlement, including across
+provider replacement. Detached direct entries use up to 4,096 exact keys with a
+counted hash-bucket hold on overflow. An ambiguous pre-enrollment contact remains
+local to the process.
+
 
 ## Firing member identity and entry
 
@@ -16,7 +51,7 @@ firing status. The group store keys members by the original provider identity.
 Projected nflog hashes distinguish two source alerts with identical effective
 labels.
 
-The first verified private OSCAR callback enrolls the native identity. Every
+The first commissioned signed OSCAR callback enrolls the native identity before producing its proof. Every
 tracked firing contact reserves episode and destination coverage. Explicit work
 is selected by a durable operation ID. Its pending receiver, integration and
 scope are revalidated on claim. Narrow notifier scopes can reach only the
@@ -153,9 +188,7 @@ provider entry receive a claim. Prior confirmed terminal contacts may be
 elided without admitting members beyond the original prefix. An ordinary
 firing copy cannot consume an expired source's clear. A pending reservation
 checks frozen source labels, annotations, generator URL, exact times, managed
-identity, and wire resolution state across retries and owner replacement. Uncommissioned adapters leave ordinary routing, inhibition
-and notification readers on the existing native pipeline. An active reader
-rejects a reload to unsupported destinations. Transport qualification and the inhibition publication barrier remain prerequisites for commissioning.
+identity, and wire resolution state across retries and owner replacement. With the feature disabled, the existing native pipeline handles ordinary traffic. An enabled reader preserves legacy contact only for a proven untracked resident. Loss of canonical consumer compatibility fences signed entry immediately and preserves original-token settlement. An active supported reader rejects a reload to unsupported destinations. The stock HTTP callback uses its exact private destination and bearer credential. HTTPS also requires the commissioned CA and certificate verification.
 
 Measure three separate workloads. A proven untracked direct destination should
 add no journal HTTP or SQL operation on the negative path. First canonical

@@ -95,6 +95,17 @@ func (a *Alerts) SetActionObserver(fn func(string, *alert.Alert, bool)) {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	a.actionObserver = fn
+	if fn != nil {
+		// Installation normally precedes ingestion. Embedded providers may
+		// already contain residents; replay only their current owner variant.
+		for _, s := range a.alerts.List() {
+			fp := s.Fingerprint()
+			owner := a.owners[fp]
+			if owner == "" || a.variants[owner][fp] {
+				fn(owner, s, false)
+			}
+		}
+	}
 }
 
 // ReadActionSource hands a current, provider-owned member to a bounded local reader.

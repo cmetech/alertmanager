@@ -92,6 +92,16 @@ type reloader struct {
 // groups returns the alert groups from the currently active dispatcher.
 // It is wired into the API as its GroupFunc.
 func (r *reloader) groups(ctx context.Context, routeFilter func(*dispatch.Route) bool, alertFilter dispatch.AlertFilter) (dispatch.AlertGroups, map[model.Fingerprint][]string, error) {
+	if r.actions != nil && r.actions.recovery != nil {
+		filter := alertFilter
+		alertFilter = func(m *alert.Alert, now time.Time) (alert.AlertStatus, bool) {
+			view := r.actions.ReadView(m.ProviderSource())
+			if view == nil || !view.Labels.Equal(m.Labels) {
+				return alert.AlertStatus{}, false
+			}
+			return filter(m, now)
+		}
+	}
 	return r.dispatcher.Load().Groups(ctx, routeFilter, alertFilter)
 }
 
@@ -177,7 +187,7 @@ func (r *reloader) reload(conf *config.Config) error {
 			}
 		}
 		supported = supported && v2.ActionCallbackConfigReady(conf, r.actions.key, r.actions.scheme, r.actions.caFile)
-		if !supported && r.actions.snapshot() != nil {
+		if old := r.actions.snapshot(); !supported && old != nil && old.supported {
 			return errors.New("active native action graph cannot switch to unsupported receivers")
 		}
 	}
@@ -229,10 +239,16 @@ func (r *reloader) reload(conf *config.Config) error {
 
 	var stage notify.Stage = pipeline
 	var graph *actionGraph
-	if actions := r.actions; supported {
+	if actions := r.actions; supported || actions != nil && actions.recovery != nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		graph = &actionGraph{key: recipientKey, log: r.notificationLog, supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
-		newInhibitor.Project = actions.readView
+		graph.adapter = actions
+		for _, targets := range actionTargets {
+			for _, t := range targets {
+				graph.canonical = graph.canonical || t.canonical
+			}
+		}
+		newInhibitor.Project = func(s *alert.Alert, use func(*alert.Alert)) { actions.graphView(graph, s, false, use) }
 		stage = notify.StageFunc(func(ctx context.Context, l *slog.Logger, members ...*alert.Alert) (context.Context, []*alert.Alert, error) {
 			reader := func(ctx context.Context, receiver, name string, index int, members []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
 				return actions.prepare(ctx, graph, receiver, name, index, members, due)
@@ -277,7 +293,10 @@ func (r *reloader) reload(conf *config.Config) error {
 	// the old callback and its inhibitor after the reload.
 	if graph != nil {
 		graph.dispatcher = newDispatcher
-		newDispatcher.Project = r.actions.readView
+		graph.retired = make(chan *alert.Alert, 256)
+		newDispatcher.Project = func(s *alert.Alert, use func(*alert.Alert)) { r.actions.graphView(graph, s, true, use) }
+		newDispatcher.SweepRetired = func() bool { return graph.sweepRetired.Swap(false) }
+		newDispatcher.Retired = func(s *alert.Alert) bool { return r.actions.retired(graph, s) }
 	}
 	go newInhibitor.Run()
 	newInhibitor.WaitForLoading()
@@ -311,9 +330,7 @@ func (r *reloader) reload(conf *config.Config) error {
 	}
 	r.apih.PublishTiming(conf, timingIntegrations, intervener, timingLookup)
 	if graph != nil {
-		r.actions.mu.Lock()
-		r.actions.graph = graph
-		r.actions.mu.Unlock()
+		r.actions.installed(graph)
 	}
 
 	return nil

@@ -42,6 +42,8 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/inhibit")
 // currently active alerts and a set of inhibition rules. It implements the
 // Muter interface.
 type Inhibitor struct {
+	uncertainMu sync.RWMutex
+	uncertain   map[model.Fingerprint]*alert.Alert
 	// Project supplies the current effective member under the publication fence. Set before Run.
 	Project    func(*alert.Alert, func(*alert.Alert))
 	alerts     provider.Alerts
@@ -257,6 +259,7 @@ func (ih *Inhibitor) MutesSource(ctx context.Context, lset labelset.LabelSet, so
 // from sending notifications if their meaning is logically a subset of a
 // higher-level alert.
 type InhibitRule struct {
+	unknown unresolvedRule
 	// Name is an optional name for the inhibition rule.
 	Name string
 	// The set of Filters which define the group of source alerts (which inhibit

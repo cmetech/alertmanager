@@ -919,7 +919,7 @@ func TestOscarActionRecoverTerminalUsesExactInterval(t *testing.T) {
 
 func TestOscarActionTerminalClaimAndSignedMember(t *testing.T) {
 	t.Parallel()
-	for _, fault := range []string{"none", "lost claim reply", "annotation replacement on takeover", "promoted managed clear"} {
+	for _, fault := range []string{"none", "lost claim reply", "annotation replacement on takeover", "promoted managed clear", "evicted before late settlement"} {
 		t.Run(fault, func(t *testing.T) {
 			now := time.Now().UTC()
 			source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-2 * time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
@@ -1013,6 +1013,14 @@ func TestOscarActionTerminalClaimAndSignedMember(t *testing.T) {
 			if source.ManagedReceiver {
 				require.False(t, wire.Resolved())
 				return
+			}
+			if fault == "evicted before late settlement" {
+				slotKey := sourceKey("", p.NativeVariant.Fingerprint)
+				slot.clock = o.clock.PushBack(slotKey)
+				require.True(t, o.evictOne())
+				require.True(t, entry.LocalValid())
+				// Use the production provider observer semantics for this detached key.
+				o.readSource = func(_, _ string, use func(*alert.Alert)) { use(source) }
 			}
 			next := *source
 			next.StartsAt, next.EndsAt = now, expires
@@ -1302,4 +1310,173 @@ func TestOperatorReplayReturnsAcceptedIntentNoEffectReceipts(t *testing.T) {
 	got, err := o.Execute(t.Context(), req)
 	require.NoError(t, err)
 	require.Equal(t, receipt, got)
+}
+
+func TestOscarActionCanonicalEnrollmentAndRepeatBeyondSlotCapacity(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	members := make([]*alert.Alert, maxActionEpisodes+13)
+	residents := make(map[string]*alert.Alert)
+	rows := make(map[string]EpisodeProjection)
+	var sourceReads int
+	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+		switch cmd {
+		case "recover":
+			require.Equal(t, "source", args["projection"], "a delivery must never scan an inventory page")
+			sourceReads++
+			found := []EpisodeProjection{}
+			if p, ok := rows[args["fingerprint"].(string)]; ok {
+				found = append(found, p)
+			}
+			*out.(*[]EpisodeProjection) = found
+		case "project-episode":
+			u := args["update"].(episodeUpdate)
+			prev, exists := rows[u.NativeVariant.Fingerprint]
+			if exists {
+				require.Equal(t, prev.EpisodeRef, u.EpisodeRef)
+			}
+			p := EpisodeProjection{episodeUpdate: u, ID: u.EpisodeRef.EpisodeID}
+			rows[u.NativeVariant.Fingerprint] = p
+			*out.(*EpisodeProjection) = p
+		default:
+			t.Fatalf("unexpected %s", cmd)
+		}
+		return nil
+	}), testActionDispatch{})
+	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
+	o.recovered = true
+	o.readSource = func(_, fp string, use func(*alert.Alert)) {
+		if s := residents[fp]; s != nil {
+			use(s)
+		}
+	}
+	for i := range members {
+		s := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(fmt.Sprint(i)), "severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+		members[i] = s
+		residents[s.Fingerprint().String()] = s
+		o.observe("", s, false)
+	}
+	for round := range 2 {
+		for i, s := range members {
+			p, pass, err := o.InspectOrdinary(t.Context(), s)
+			require.NoError(t, err)
+			if round == 0 {
+				require.NotNil(t, pass)
+				require.Nil(t, p)
+			} else {
+				require.Nil(t, pass)
+				require.NotNil(t, p)
+			}
+			d, err := o.Delivery(t.Context(), s, "canonical", fmt.Sprintf("00000000-1111-4111-8111-%012d", i), nil)
+			require.NoError(t, err)
+			require.Equal(t, rows[s.Fingerprint().String()].EpisodeRef, d.EpisodeRef)
+			require.LessOrEqual(t, len(o.byKey), maxActionEpisodes)
+		}
+	}
+	require.Len(t, rows, len(members))
+	require.LessOrEqual(t, sourceReads, 4*len(members))
+}
+
+type directResidentFixture struct {
+	testActionDispatch
+	current  map[string]*alert.Alert
+	contacts map[string]*DirectContact
+}
+
+func (d *directResidentFixture) DirectContact(k string) *DirectContact { return d.contacts[k] }
+func (d *directResidentFixture) ChangeDirectContact(k string, old, next *DirectContact) bool {
+	if d.current[k] == nil || d.contacts[k] != old {
+		return false
+	}
+	if next == nil {
+		delete(d.contacts, k)
+	} else {
+		d.contacts[k] = next
+	}
+	return true
+}
+func (d *directResidentFixture) ObserveSource(owner string, s *alert.Alert, closed, possible bool) (*alert.Alert, *DirectContact) {
+	k := sourceKey(owner, s.Fingerprint().String())
+	old := d.current[k]
+	if closed {
+		p := d.contacts[k]
+		delete(d.current, k)
+		delete(d.contacts, k)
+		return old, p
+	}
+	d.current[k] = s
+	return old, nil
+}
+func (*directResidentFixture) InvalidateSource(*alert.Alert)                         {}
+func (*directResidentFixture) PublicationGeneration() uint64                         { return 1 }
+func (*directResidentFixture) PublishedEpisode(*alert.Alert, EpisodeProjection) bool { return false }
+func (*directResidentFixture) VerifiedNegative(*alert.Alert, uint64) bool            { return true }
+
+func TestOscarActionDirectGroupBeyondSlotCapAndDetachedUnknownOverflow(t *testing.T) {
+	t.Parallel()
+	d := &directResidentFixture{current: map[string]*alert.Alert{}, contacts: map[string]*DirectContact{}}
+	o := newNativeActionOwner(defaultActionAuthority, nil, d) // Direct passes have no RPC client.
+	now := time.Now()
+	o.recovered = true
+	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
+	o.readSource = func(owner, fp string, use func(*alert.Alert)) {
+		if s := d.current[sourceKey(owner, fp)]; s != nil {
+			use(s)
+		}
+	}
+	var sources []*alert.Alert
+	var passes []*OrdinaryPass
+	for i := range maxActionEpisodes + 12 {
+		s := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(fmt.Sprint(i))}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+		o.observe("", s, false)
+		_, pass, err := o.InspectOrdinary(t.Context(), s)
+		require.NoError(t, err)
+		require.True(t, pass.Enter())
+		sources = append(sources, s)
+		passes = append(passes, pass)
+	}
+	for _, p := range passes {
+		require.True(t, p.Valid())
+	}
+	require.Empty(t, o.byKey)
+	require.Empty(t, o.untracked)
+	for i, s := range sources {
+		o.observe("", s, true)
+		require.False(t, passes[i].Valid())
+	}
+	require.Len(t, o.untracked, maxActionEpisodes)
+	for i, s := range sources {
+		o.observe("", s, false)
+		_, _, err := o.InspectOrdinary(t.Context(), s)
+		require.Error(t, err)
+		if i == len(sources)-1 {
+			passes[i].Finish(false)
+		} else {
+			passes[i].Finish(true)
+		}
+	}
+	last := sources[len(sources)-1]
+	_, _, err := o.InspectOrdinary(t.Context(), last)
+	require.Error(t, err, "the last detached unknown cannot be evicted by late conclusive settlements")
+}
+
+func TestOscarActionReceiptLeaseCompatibilityIsAffirmative(t *testing.T) {
+	t.Parallel()
+	o := newNativeActionOwner(defaultActionAuthority, nil, testActionDispatch{})
+	o.recovered = true
+	o.lease = actionLease{Epoch: 3, ExpiresAt: time.Now().Add(time.Hour)}
+	for _, tc := range []struct {
+		value string
+		ready bool
+	}{{"1", true}, {"", false}, {"null", false}, {"true", false}, {`"1"`, false}, {"2", false}, {"1", true}} {
+		o.lease.NativeDeliveryReceipts = json.RawMessage(tc.value)
+		o.publishLeaseLocked()
+		epoch, ready := o.RecoveryState()
+		require.Equal(t, uint64(3), epoch)
+		require.Equal(t, tc.ready, ready)
+	}
+	require.Error(t, o.rejectLease())
+	epoch, ready := o.RecoveryState()
+	require.Zero(t, epoch)
+	require.False(t, ready)
 }
