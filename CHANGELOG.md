@@ -1,5 +1,7 @@
 ## Unreleased — Native action delivery transports
 
+- Dormant native dispatch now delivers outstanding incident.io group members when tracked or direct repeats fill a size-limited payload. The wire count includes members omitted for payload size and for `max_alerts`. The group log records the members actually delivered during recovery. Native implementation `f551a091` uses the existing store schema and configuration.
+
 - Dormant native dispatch preserves completed clear receipts and the firing repeat deadline during persistent partial-resolution holds. Exact operator replay returns conclusive no-effect target receipts, and permanent private authority redirects invalidate local readiness. Implementation `aa975e49` uses the existing version 2 store schema and requires no additional migration.
 
 - The dormant native action reader now requires recipient-binding version 2. Incompatible renewals fence local delivery, and valid pending recipients can renew independently when a sibling's file is unavailable. Ordinary firing reservations bind the inspected lifecycle and severity. Partially acknowledged resolved groups retain their remaining work. Pair native implementation `997c7bc0` with OSCAR `3456c500f` and its authority migration before qualification.
