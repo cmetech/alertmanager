@@ -1,3 +1,8 @@
+## Unreleased — Scheduled native action concurrency
+
+- The leased native owner admits at most four concurrent scheduled policy executions, including requests whose callers have timed out. It checks the signed expiry for initial and recovery mutations.
+- Pair native source `0b065e06` with OSCAR source `eca179df0`. The existing assertion and response wire formats apply. Deploy the matching owner before enabling scheduling. Operator qualification is pending.
+
 ## Unreleased — Leased OSCAR manual alert publication
 
 - Native Alertmanager pulls ordered manual source transitions from its authenticated action store. Observations replace the previous variant at the original start. Exact stamp retries preserve the resident and subscriber stream. Recovery and policy clear use the source owner's terminal position.
