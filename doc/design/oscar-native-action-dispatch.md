@@ -64,7 +64,9 @@ firing status. The group store keys members by the original provider identity.
 Projected nflog hashes distinguish two source alerts with identical effective
 labels. The firing shortcut checks both the outgoing member and the provider
 expiry. A due terminal flush projects the exact closure through the allocated
-slot or the indexed resident before claiming the terminal receipt.
+slot or the indexed resident before claiming the terminal receipt. A managed
+raise or update timeout requires the same native variant and managed generation,
+plus the promoted owner record proving its event, digest and exact expiry.
 
 The first commissioned signed OSCAR callback enrolls the native identity before producing its proof. Every
 tracked firing contact reserves episode and destination coverage. Explicit work

@@ -313,6 +313,95 @@ func TestOscarActionRecoveryInstallKeepsLaterRevisionAcrossReload(t *testing.T) 
 	}, 100*time.Millisecond, time.Millisecond)
 }
 
+// Keep this phase's group silent until a complete native suppression turn has finished.
+// Both the group membership and the suppression count come from the running app.
+func silenceFixtureCohort(t *testing.T, a *App, registry *prometheus.Registry, label, value string) func(string, []*alert.Alert) {
+	t.Helper()
+	base := "http://" + a.Addr()
+	mutate := func(method, path, body string) []byte {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), method, base+path, strings.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Oscar-Silence-Mutation-Key", string(a.opts.SilenceMutationKey))
+		res, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer res.Body.Close()
+		data, err := io.ReadAll(res.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, res.StatusCode, string(data))
+		return data
+	}
+	now := time.Now().UTC()
+	body := fmt.Sprintf(`{"matchers":[{"name":%q,"value":%q,"isRegex":false}],"startsAt":%q,"endsAt":%q,"createdBy":"cohort fixture","comment":"assemble one native group"}`, label, value, now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(2*time.Hour).Format(time.RFC3339Nano))
+	var sil struct {
+		ID string `json:"silenceID"`
+	}
+	require.NoError(t, json.Unmarshal(mutate(http.MethodPost, "/api/v2/silences", body), &sil))
+	require.NotEmpty(t, sil.ID)
+	count := func() float64 {
+		families, err := registry.Gather()
+		if err != nil {
+			return -1
+		}
+		for _, family := range families {
+			if family.GetName() != "alertmanager_notifications_suppressed_total" {
+				continue
+			}
+			for _, metric := range family.Metric {
+				for _, pair := range metric.Label {
+					if pair.GetName() == "reason" && pair.GetValue() == "silence" {
+						return metric.Counter.GetValue()
+					}
+				}
+			}
+		}
+		return 0
+	}
+	return func(receiver string, expected []*alert.Alert) {
+		t.Helper()
+		want := map[string]bool{}
+		for _, s := range expected {
+			want[s.Fingerprint().String()] = true
+		}
+		require.Len(t, want, len(expected))
+		q := url.Values{"receiver": {receiver}, "filter": {fmt.Sprintf("%s=%q", label, value)}}
+		require.Eventually(t, func() bool {
+			res, err := http.Get(base + "/api/v2/alerts/groups?" + q.Encode())
+			if err != nil {
+				return false
+			}
+			defer res.Body.Close()
+			var groups []struct {
+				Alerts []struct {
+					Fingerprint string
+					Status      struct{ SilencedBy []string }
+				}
+			}
+			if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&groups) != nil || len(groups) != 1 || len(groups[0].Alerts) != len(want) {
+				return false
+			}
+			seen := map[string]bool{}
+			for _, m := range groups[0].Alerts {
+				if !want[m.Fingerprint] || seen[m.Fingerprint] || !slices.Contains(m.Status.SilencedBy, sil.ID) {
+					return false
+				}
+				seen[m.Fingerprint] = true
+			}
+			return true
+		}, 2*time.Minute, 250*time.Millisecond)
+		// Only this receiver/group matches the phase's one active silence.
+		// MuteStage.Exec adds len(muted) once after its full filter loop.
+		// Flushes run sequentially. At this baseline at most one earlier
+		// partial snapshot can still add to the counter, by at most N-1.
+		// Another N silenced members therefore includes a complete turn.
+		baseline := count()
+		require.GreaterOrEqual(t, baseline, float64(0))
+		require.Eventually(t, func() bool { return count() >= baseline+float64(len(want)) }, 2*time.Minute, 100*time.Millisecond)
+		mutate(http.MethodDelete, "/api/v2/silence/"+sil.ID, "")
+	}
+}
+
 // Run normal setup (including provider replay, owner maintenance, graph dispatch,
 // signed webhook encoding and settlement). Only TCP dialing goes to the fixture.
 func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
@@ -525,6 +614,7 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	opts := testOptions(t)
 	opts.DispatchStartDelay = 0
 	opts.ConversionCallbackKey = callbackKey
+	opts.SilenceMutationKey = []byte(strings.Repeat("s", 32))
 	write := func(name, value string) string {
 		path := filepath.Join(t.TempDir(), name)
 		require.NoError(t, os.WriteFile(path, []byte(value), 0600))
@@ -551,7 +641,8 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	require.NoError(t, off.Start())
 	require.False(t, capability(off))
 	require.NoError(t, off.Stop(t.Context()))
-	opts.Registerer = prometheus.NewRegistry()
+	registry := prometheus.NewRegistry()
+	opts.Registerer = registry
 	opts.ActionOwner.Enabled = true
 	var provider *mem.Alerts
 	opts.ProbeHandler = func(p *mem.Alerts) http.Handler { provider = p; return http.NotFoundHandler() }
@@ -627,16 +718,15 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	require.NoError(t, instance.Reload())
 	require.Eventually(t, func() bool { return capability(instance) }, 5*time.Second, 20*time.Millisecond)
 	large.Store(true)
-	clock := time.Now()
 	bulk := make([]*alert.Alert, 4109)
-	member := func(host, batch string, useLongReceiver bool) *alert.Alert {
+	member := func(clock time.Time, host, batch string, useLongReceiver bool) *alert.Alert {
 		labels := model.LabelSet{"host": model.LabelValue(host), "batch": model.LabelValue(batch), "severity": "major"}
 		if useLongReceiver {
 			labels["long_receiver"] = "yes"
 		}
 		return alert.New(model.Alert{Labels: labels, StartsAt: clock, EndsAt: clock.Add(time.Hour)}, clock, false)
 	}
-	sibling := member("clock-sibling", "sibling", false)
+	sibling := member(time.Now(), "clock-sibling", "sibling", false)
 	require.NoError(t, provider.Put(t.Context(), sibling))
 	next("clock-sibling", true)
 	siblingTiming := func() string {
@@ -664,10 +754,13 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return siblingTiming() != "" }, 3*time.Second, 25*time.Millisecond)
 	before := siblingTiming()
+	releaseBulk := silenceFixtureCohort(t, instance, registry, "batch", "large")
+	bulkStart := time.Now()
 	for n := range bulk {
-		bulk[n] = member(fmt.Sprintf("bulk-%05d", n), "large", n < 64)
+		bulk[n] = member(bulkStart, fmt.Sprintf("bulk-%05d", n), "large", n < 64)
 	}
 	require.NoError(t, provider.Put(t.Context(), bulk...))
+	releaseBulk("team", bulk)
 	priorDeadlines := map[string]time.Time{}
 	previous := map[string]bool{}
 	for turn := 0; turn < 2; turn++ {
@@ -722,6 +815,7 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	large.Store(false)
 	enabled.Store(false)
 	renewals := uncommissionedRenewals.Load()
+	releaseDirect := silenceFixtureCohort(t, instance, registry, "batch", "large")
 	direct := strings.Replace(bigConfig, "http://alertmanager-middleware:9400"+alert.NativeCallbackPath, "http://direct.example/direct", 1)
 	direct = direct[:strings.Index(direct, "    http_config:")]
 	direct = strings.Replace(direct, "group_wait: 5s", "group_wait: 12s", 1)
@@ -730,6 +824,7 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	require.Eventually(t, func() bool { return uncommissionedRenewals.Load() > renewals && capability(instance) }, 16*time.Second, 100*time.Millisecond)
 	large.Store(true)
 	started := admissions.Load()
+	releaseDirect("team", bulk)
 	timeout := time.After(210 * time.Second)
 	for {
 		select {
@@ -748,7 +843,7 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 		}
 	}
 directDelivered:
-	untracked := member("direct-only", "new", false)
+	untracked := member(time.Now(), "direct-only", "new", false)
 	require.NoError(t, provider.Put(t.Context(), untracked))
 	next("direct-only", false)
 	mu.Lock()
@@ -759,10 +854,12 @@ directDelivered:
 	// A prepared direct URL exercises both inspection and admission. Every
 	// returned claimed target includes its full 4096-byte receiver name.
 	large.Store(false)
+	releaseLong := silenceFixtureCohort(t, instance, registry, "long_receiver", "yes")
 	urlFile := write("direct-long-url", "http://direct.example/long")
 	longConfig := fmt.Sprintf("route:\n  receiver: quiet\n  group_by: [batch]\n  group_wait: 12s\n  group_interval: 90s\n  repeat_interval: 1h\n  routes:\n  - receiver: %s\n    matchers: ['long_receiver=yes']\nreceivers:\n- name: quiet\n- name: %s\n  webhook_configs:\n  - url_file: %s\n    send_resolved: true\n", longName, longName, urlFile)
 	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(longConfig), 0600))
 	require.NoError(t, instance.Reload())
+	releaseLong(longName, bulk[:64])
 	deadline := time.After(150 * time.Second)
 	for {
 		select {

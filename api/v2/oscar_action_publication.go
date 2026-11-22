@@ -183,11 +183,15 @@ func (o *nativeActionOwner) ClassifyResident(ctx context.Context, epoch uint64, 
 			return nil, reconcile
 		}
 		if !sameResident(*p, a) {
-			// A current managed successor proves lineage through the managed
-			// journal. An expired exact ordinary interval proves its own close.
-			managed := a.ManagedReceiver && p.ManagedOwner != nil && p.ManagedOwner.EpisodeKey == owner && p.ManagedOwner.Generation < a.ManagedMember.Generation
-			expired := sameVariant(p.NativeVariant, variantOf(a)) && a.Resolved() && !a.ManagedReceiver && p.ManagedOwner == nil
-			if p.State != "firing" || (!managed && !expired) {
+			// A managed successor and an exact same-generation timeout both
+			// require the promoted owner proof in flush before projecting the edge.
+			managed := a.ManagedReceiver && p.ManagedOwner != nil && p.ManagedOwner.EpisodeKey == owner
+			successor := managed && p.ManagedOwner.Generation < a.ManagedMember.Generation
+			managedTimeout := managed && p.ManagedOwner.Generation == a.ManagedMember.Generation &&
+				(a.ManagedOperationKind == "raise" || a.ManagedOperationKind == "update")
+			ordinary := !a.ManagedReceiver && p.ManagedOwner == nil
+			expired := (ordinary || managedTimeout) && a.Resolved() && sameVariant(p.NativeVariant, variantOf(a))
+			if p.State != "firing" || (!successor && !expired) {
 				return nil, reconcile
 			}
 			s, err := o.sourceSlot(ctx, a, false)
