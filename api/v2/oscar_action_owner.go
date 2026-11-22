@@ -242,13 +242,14 @@ type nativeActionOwner struct {
 	untracked        map[string]uint8 // Entered direct contacts fence enrollment until conclusive settlement.
 	deferredRecovery bool             // An omitted durable source must be checked on later enrollment.
 	slots            chan struct{}
+	policySlots      chan struct{}
 }
 
 func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *nativeActionOwner {
 	return &nativeActionOwner{
 		parked: make(map[string]parkedEpisode), handoffs: make(map[string]*observationHandoff), waiters: make(chan struct{}, 32), admitter: make(chan struct{}, 1),
 		authority: authority, owner: uuid.NewString(), rpc: rpc, dispatch: d,
-		untracked: make(map[string]uint8), byKey: map[string]*episodeSlot{}, byID: map[string]*episodeSlot{}, slots: make(chan struct{}, 32),
+		untracked: make(map[string]uint8), byKey: map[string]*episodeSlot{}, byID: map[string]*episodeSlot{}, slots: make(chan struct{}, 32), policySlots: make(chan struct{}, 4),
 	}
 }
 
@@ -417,6 +418,9 @@ func (o *nativeActionOwner) write(ctx context.Context, cmd string, p map[string]
 		if gen, pinned := ctx.Value(publicationGenerationKey{}).(uint64); pinned && pub.PublicationGeneration() != gen {
 			return unavailable
 		}
+	}
+	if assertion, policy := ctx.Value(policyAssertionKey{}).(policyAssertion); policy && !time.Now().Before(assertion.ExpiresAt) {
+		return actionError{403, "POLICY_ASSERTION_EXPIRED"}
 	}
 	p["owner_id"], p["epoch"] = o.owner, lease.Epoch
 	err := o.read(ctx, cmd, p, out)
@@ -1145,6 +1149,24 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if !validAction(req) {
 		return r, conflict
 	}
+	assertion, authorized := ctx.Value(policyAssertionKey{}).(policyAssertion)
+	if req.Actor.Kind == "policy" {
+		if !authorized {
+			return r, actionError{403, "POLICY_ASSERTION_REQUIRED"}
+		}
+		if !time.Now().Before(assertion.ExpiresAt) {
+			return r, actionError{403, "POLICY_ASSERTION_EXPIRED"}
+		}
+		select {
+		case o.policySlots <- struct{}{}:
+			defer func() { <-o.policySlots }()
+		default:
+			return r, unavailable
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, assertion.ExpiresAt)
+		defer cancel()
+	}
 	select {
 	case o.slots <- struct{}{}:
 		defer func() { <-o.slots }()
@@ -1167,19 +1189,15 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if i != nil && i.Digest != digest {
 		return r, conflict
 	}
-	assertion, authorized := ctx.Value(policyAssertionKey{}).(policyAssertion)
 	directive := assertion.Recovery
 	if req.Actor.Kind == "policy" {
-		if !authorized {
-			return r, actionError{403, "POLICY_ASSERTION_REQUIRED"}
-		}
 		if directive == nil && i != nil {
 			return i.Result, nil
 		}
 		if directive != nil && (i == nil || !directive.valid() || directive.CurrentRef.AuthorityID != req.EpisodeRef.AuthorityID || directive.CurrentRef.EpisodeID != req.EpisodeRef.EpisodeID || directive.CurrentRef.Generation != req.EpisodeRef.Generation) {
 			return r, reconcile
 		}
-		if directive != nil && !time.Now().Before(assertion.ExpiresAt) {
+		if !time.Now().Before(assertion.ExpiresAt) {
 			return r, actionError{403, "POLICY_ASSERTION_EXPIRED"}
 		}
 	}
@@ -1357,7 +1375,7 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if err = s.current(p, source, true); err != nil {
 		return r, err
 	}
-	if directive != nil && !time.Now().Before(assertion.ExpiresAt) {
+	if req.Actor.Kind == "policy" && !time.Now().Before(assertion.ExpiresAt) {
 		return r, actionError{403, "POLICY_ASSERTION_EXPIRED"}
 	}
 	retryingFloor := s.floorWrite != nil

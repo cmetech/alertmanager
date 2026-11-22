@@ -355,7 +355,7 @@ func TestOscarActionPolicyRecoveryRequiresFreshFencedSubmission(t *testing.T) {
 	require.Zero(t, transfers)
 	_, err = o.Execute(t.Context(), req)
 	require.Error(t, err)
-	original := context.WithValue(t.Context(), policyAssertionKey{}, policyAssertion{})
+	original := context.WithValue(t.Context(), policyAssertionKey{}, policyAssertion{ExpiresAt: time.Now().Add(10 * time.Second)})
 	got, err := o.Execute(original, req)
 	require.NoError(t, err)
 	require.Equal(t, "held", got.State)
@@ -405,7 +405,7 @@ func TestOscarActionSuppressedPolicyReservationRemainsTransferable(t *testing.T)
 	o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
 	o.recovered = true
 	o.byID[req.EpisodeRef.EpisodeID] = &episodeSlot{source: source, projection: EpisodeProjection{episodeUpdate: episodeUpdate{EpisodeRef: req.EpisodeRef, NativeVariant: variantOf(source), State: "firing", SourceSeverity: "major", LifecycleSeq: 1}}}
-	ctx := context.WithValue(t.Context(), policyAssertionKey{}, policyAssertion{})
+	ctx := context.WithValue(t.Context(), policyAssertionKey{}, policyAssertion{ExpiresAt: time.Now().Add(10 * time.Second)})
 	got, err := o.Execute(ctx, req)
 	require.NoError(t, err)
 	require.Equal(t, "NATIVE_SUPPRESSED", *got.Reason)
@@ -2110,4 +2110,54 @@ func exerciseTerminalWireProof(t *testing.T, expiresDuringPlan bool) {
 	}
 	require.Equal(t, 1, claims)
 	require.Equal(t, 1, settlements)
+}
+
+// The RPC deliberately survives cancellation of its client. Count owner calls still
+// inside Execute, including a transport that has not yet returned its ambiguous reply.
+func TestScheduledOwnerSlotsSurviveCallerTimeout(t *testing.T) {
+	var req ActionRequestV1
+	require.NoError(t, json.Unmarshal([]byte(actionBody), &req))
+	req.Kind = "resend"
+	req.Actor = ActionActor{Kind: "policy", ID: "resend-policy"}
+	req.PolicyBinding = &PolicyBinding{BindingID: req.OperationID, RevisionID: req.EpisodeRef.EpisodeID}
+	req.TargetScope = []ScopeEntry{{ReceiverID: "ops"}}
+	entered, release, done := make(chan struct{}, 5), make(chan struct{}), make(chan struct{}, 4)
+	var active, peak atomic.Int32
+	rpc := actionRPCFunc(func(ctx context.Context, cmd string, p map[string]any, out any) error {
+		n := active.Add(1)
+		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+		}
+		entered <- struct{}{}
+		<-release
+		active.Add(-1)
+		return ctx.Err()
+	})
+	owner := newNativeActionOwner(req.EpisodeRef.AuthorityID, rpc, testActionDispatch{})
+	owner.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
+	owner.recovered = true
+	auth := context.WithValue(t.Context(), policyAssertionKey{}, policyAssertion{ExpiresAt: time.Now().Add(10 * time.Second)})
+	callers, cancel := context.WithCancel(auth)
+	defer cancel()
+	for range 4 {
+		go func() { _, _ = owner.Execute(callers, req); done <- struct{}{} }()
+	}
+	for range 4 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("policy lane did not enter")
+		}
+	}
+	cancel()
+	_, err := owner.Execute(auth, req)
+	require.Equal(t, unavailable, err)
+	require.EqualValues(t, 4, peak.Load())
+	close(release)
+	for range 4 {
+		<-done
+	}
+	require.Zero(t, len(owner.policySlots))
+	expired := context.WithValue(t.Context(), policyAssertionKey{}, policyAssertion{ExpiresAt: time.Now().Add(-time.Second)})
+	_, err = owner.Execute(expired, req)
+	require.Equal(t, actionError{403, "POLICY_ASSERTION_EXPIRED"}, err)
 }
