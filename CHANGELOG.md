@@ -1,5 +1,8 @@
 ## Unreleased — Tracked terminal contact checkpoint
 
+- Terminal contacts validate the outgoing copy, exact source evidence and managed promotion before provider entry. Ordinary grouped delivery keeps member order and reserves only the native post-filter webhook prefix. Proposed canonical configuration must pass commissioning before replacing the prior graph.
+- Native takeover resumes indexed membership pages within the same epoch. This reader requires the new private lease marker and the paired OSCAR terminal index upgrade. Existing releases remain disabled pending transport, inhibition and operator qualification. Implementation `b5b18c84`.
+
 - Native dispatch reserves a due tracked clear through OSCAR's private terminal journal, validates the original provider alert at entry, and retains its stable delivery identity across reservation replay. Ordinary group eligibility and send-resolved filtering still apply.
 - A dormant embedded adapter leaves the ordinary notification pipeline in place. Native action version remains zero pending full transport and restart qualification. Pair implementation `a2dc58b6` with the matching OSCAR journal. This change requires the existing A2 schema and adds no migration.
 
