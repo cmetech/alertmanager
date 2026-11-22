@@ -1,3 +1,8 @@
+## Unreleased — Native action delivery transports
+
+- The dormant Alertmanager action reader binds the configured recipients of all 18 receiver kinds and checks its entry permit before each provider mutation. Selected notifications use the chosen alert and detached group metadata. Group sends record the members accepted by incident.io after its payload-size fallback. SMTP finalization, Telegram diagnostics, Slack updates, Jira transitions and SNS FIFO publish use their configured provider semantics. Implementation `1f2d5361`.
+- This native-only checkpoint keeps action version zero. It introduces no database migration or new configuration. Operators must quiesce deliveries, reconcile outstanding contacts and account for old repeat deadlines before rotating the native store credential used for recipient bindings. Inhibition recovery, downstream commissioning and runtime qualification remain pending.
+
 ## Unreleased — Tracked terminal contact checkpoint
 
 - Native webhook batches with an unverifiable input and a configured alert limit wait for the next group evaluation. Partial ordinary success records an accepted direct sibling in the notification log while preserving existing coverage deadlines. Paged takeover discards progress after a lease change and refreshes resident projections that an intervening owner may have closed. Implementation `044d263b`. This native-only correction uses the existing private journal and configuration. Operator qualification is pending.
