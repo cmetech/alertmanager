@@ -565,7 +565,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		var pass *v2.OrdinaryPass
 		var err error
 		if a.recovery != nil && (!i.canonical || g.callbackCommissioned()) {
-			p = a.publishedFiring(g, source)
+			p = a.publishedFiring(g, m)
 		}
 		if p == nil {
 			p, pass, err = a.journal.InspectOrdinary(ctx, source)

@@ -11,13 +11,16 @@ route and store proof. B1/B2 commissioning and operator qualification are pendin
 
 The owner finishes enrollment and physical receiver planning before claiming a
 tracked firing group. The store admits up to 64 full-scope ordinary contacts per
-private command using the existing coverage, operation and target rows. Each
+private command using the existing coverage, operation and target rows. Inspection
+and admission also fit each complete encoded request into 256 KiB, including
+the authority envelope, target names and JSON escaping. Each
 operation has its own original token and 30-second permit. The native pipeline
 sends the retained group in its original order and settles the original tokens
 in bounded chunks. A lost admission reply permits only an indexed lookup of the
 original IDs. Entered or unknown coverage holds that member. Direct groups of
 tracked members use the cohort marker independently of B2. Untracked direct
-members use local entry passes.
+members use local entry passes. At provider entry the resident must still have
+the exact negative classification, issuing epoch and original pass token.
 
 ## Resident recovery and capacity
 
@@ -59,7 +62,9 @@ inhibition sources and the local list view. The outgoing member retains its
 provider pointer and exact expiry even when the notification copy freezes its
 firing status. The group store keys members by the original provider identity.
 Projected nflog hashes distinguish two source alerts with identical effective
-labels.
+labels. The firing shortcut checks both the outgoing member and the provider
+expiry. A due terminal flush projects the exact closure through the allocated
+slot or the indexed resident before claiming the terminal receipt.
 
 The first commissioned signed OSCAR callback enrolls the native identity before producing its proof. Every
 tracked firing contact reserves episode and destination coverage. Explicit work

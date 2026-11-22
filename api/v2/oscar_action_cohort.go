@@ -5,6 +5,7 @@ package v2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"slices"
@@ -65,6 +66,42 @@ type cohortResult struct {
 	Evidence string         `json:"evidence"`
 }
 
+type cohortChunk struct {
+	begin, end int
+	err        error
+}
+
+// Account for the complete RPC envelope and the JSON encoding of each target
+// (including string escaping). Compute all boundaries before issuing a permit.
+func (o *nativeActionOwner) cohortChunks(epoch uint64, requests []cohortRequest) []cohortChunk {
+	envelope, _ := json.Marshal(map[string]any{"members": []cohortRequest{}, "authority_id": o.authority, "owner_id": o.owner, "epoch": epoch})
+	start, size := 0, len(envelope)
+	var chunks []cohortChunk
+	for i, r := range requests {
+		encoded, err := json.Marshal(r)
+		if start < i && (i-start == ordinaryChunk || err != nil || size+1+len(encoded) > actionBodyLimit) {
+			chunks = append(chunks, cohortChunk{begin: start, end: i})
+			start, size = i, len(envelope)
+		}
+		if err != nil || len(envelope)+len(encoded) > actionBodyLimit {
+			if err == nil {
+				err = privateCommandTooLarge
+			}
+			chunks = append(chunks, cohortChunk{begin: i, end: i + 1, err: err})
+			start, size = i+1, len(envelope)
+			continue
+		}
+		if start < i {
+			size++ // Comma between adjacent encoded members.
+		}
+		size += len(encoded)
+	}
+	if start < len(requests) {
+		chunks = append(chunks, cohortChunk{begin: start, end: len(requests)})
+	}
+	return chunks
+}
+
 func (o *nativeActionOwner) CohortReady() bool {
 	return o.CohortSupported() && o.ready()
 }
@@ -105,14 +142,24 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 		positions = append(positions, i)
 		stamps = append(stamps, stamp)
 	}
-	for start := 0; start < len(requests); start += ordinaryChunk {
-		end := min(start+ordinaryChunk, len(requests))
-		chunk := requests[start:end]
+	for _, part := range o.cohortChunks(epoch, requests) {
+		start := part.begin
+		if part.err != nil {
+			out[positions[start]].Err = part.err
+			continue
+		}
+		chunk := requests[start:part.end]
 		if !o.CohortReady() || !o.live(ctx) {
 			break
 		}
 		var rows []cohortResult
 		err := o.write(ctx, "admit-cohort", map[string]any{"members": chunk}, &rows)
+		if errors.Is(err, privateCommandTooLarge) {
+			for i := range chunk {
+				out[positions[start+i]].Err = err
+			}
+			continue
+		}
 		if err != nil || len(rows) != len(chunk) {
 			// A lost claim reply cannot recreate the original random token. Only
 			// inspect the submitted IDs; their entered coverage stays fenced.
@@ -174,22 +221,27 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 func (o *nativeActionOwner) InspectCohort(ctx context.Context, members []OrdinaryCandidate) []string {
 	ctx = o.withEpoch(ctx)
 	states := make([]string, len(members))
-	for start := 0; start < len(members); start += ordinaryChunk {
+	epoch, _ := PublicationToken(ctx)
+	requests := make([]cohortRequest, 0, len(members))
+	for _, c := range members {
+		p := c.Projection
+		requests = append(requests, cohortRequest{uuid.NewString(), p.ID, p.EpisodeRef, p.NativeVariant, c.Target, p.SeverityRevision, p.LifecycleSeq})
+	}
+	for _, part := range o.cohortChunks(epoch, requests) {
+		if part.err != nil {
+			continue
+		}
 		if !o.CohortReady() {
 			break
 		}
-		var requests []cohortRequest
-		for _, c := range members[start:min(start+ordinaryChunk, len(members))] {
-			p := c.Projection
-			requests = append(requests, cohortRequest{uuid.NewString(), p.ID, p.EpisodeRef, p.NativeVariant, c.Target, p.SeverityRevision, p.LifecycleSeq})
-		}
+		chunk := requests[part.begin:part.end]
 		var rows []cohortResult
-		if o.write(ctx, "inspect-cohort", map[string]any{"members": requests}, &rows) != nil || len(rows) != len(requests) {
+		if o.write(ctx, "inspect-cohort", map[string]any{"members": chunk}, &rows) != nil || len(rows) != len(chunk) {
 			continue
 		}
 		for n, row := range rows {
-			if row.ID == requests[n].ID {
-				states[start+n] = row.State
+			if row.ID == chunk[n].ID {
+				states[part.begin+n] = row.State
 			}
 		}
 	}

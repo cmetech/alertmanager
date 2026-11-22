@@ -464,8 +464,11 @@ func (o *nativeActionOwner) Settle(ctx context.Context, permit Entry, outcome, e
 
 // OrdinaryPass is a local entry fence for a verified untracked provider member.
 type OrdinaryPass struct {
-	Enter func() bool
-	Valid func() bool
+	// Epoch and Contact identify the issuing lease and exact resident hold.
+	Epoch   uint64
+	Contact *DirectContact
+	Enter   func() bool
+	Valid   func() bool
 	// Finish releases conclusive entries. Unknown acceptance keeps the source fenced.
 	Finish func(conclusive bool)
 }
@@ -489,37 +492,17 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 	if pub, ok := o.dispatch.(ActionPublication); ok && !tracked {
 		negative = pub.VerifiedNegative(source, epoch)
 	}
-	park, parked := o.parked[key]
-	gap := o.gaps[bucket]&bit != 0 && !(parked && park.source == source)
 	held := o.directHeldLocked(key) || o.handoffs[key] != nil
 	o.mu.Unlock()
 	if !live || held {
 		return nil, nil, reconcile
 	}
-	if !tracked && (candidate || gap) && !negative {
-		rows, err := o.sourceRows(ctx, owner, fp)
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(rows) == 1 {
-			if gap {
-				return nil, nil, reconcile
-			}
-			if _, err = o.restoreCurrent(ctx, rows[0], source); err != nil {
-				return nil, nil, err
-			}
-			tracked = true
-		}
-	}
 	if !tracked && !negative {
-		p, err := o.terminalCandidate(ctx, source)
+		p, err := o.ClassifyResident(ctx, epoch, source)
 		if err != nil {
 			return nil, nil, err
 		}
 		if p != nil {
-			if gap {
-				return nil, nil, reconcile
-			}
 			if _, err = o.restoreCurrent(ctx, *p, source); err != nil {
 				return nil, nil, err
 			}
@@ -532,7 +515,7 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 	}
 	entered := false
 	token := &DirectContact{}
-	pass := &OrdinaryPass{}
+	pass := &OrdinaryPass{Epoch: epoch, Contact: token}
 	pass.Enter = func() bool {
 		ok := false
 		o.readSource(owner, fp, func(current *alert.Alert) {

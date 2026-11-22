@@ -86,10 +86,12 @@ func (a *nativeActions) PublishedEpisode(s *alert.Alert, p v2.EpisodeProjection)
 	return ok && prior.p.EpisodeRef == p.EpisodeRef && prior.p.SeverityRevision == p.SeverityRevision && prior.p.LifecycleSeq == p.LifecycleSeq
 }
 
-func (a *nativeActions) publishedFiring(g *actionGraph, s *alert.Alert) *v2.EpisodeProjection {
+func (a *nativeActions) publishedFiring(g *actionGraph, wire *alert.Alert) *v2.EpisodeProjection {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if !a.currentLocked(g, s) {
+	s := wire.ProviderSource()
+	now := time.Now()
+	if wire.ResolvedAt(now) || s.ResolvedAt(now) || s.ManagedOperationKind == "clear" || !a.currentLocked(g, s) {
 		return nil
 	}
 	old, ok := a.sources[s.Fingerprint()]
@@ -562,8 +564,13 @@ func (a *nativeActions) finalPublication(g *actionGraph, members []*alert.Alert,
 		if !a.currentLocked(g, s) {
 			return false
 		}
-		if c.legacy {
-			if _, tracked := a.sources[s.Fingerprint()]; c.pass == nil || tracked {
+		if c.legacy && c.pass == nil {
+			return false
+		}
+		if a.recovery != nil && c.pass != nil {
+			_, tracked := a.sources[s.Fingerprint()]
+			r := a.residents[residentKey(s.ManagedMember.Episode, s)]
+			if tracked || c.pass.Epoch != g.epoch || c.pass.Contact == nil || r.direct != c.pass.Contact {
 				return false
 			}
 		}

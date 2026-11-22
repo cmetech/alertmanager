@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1432,4 +1433,186 @@ func TestOscarActionOriginalClaimExpiresWaitingForFinalPublication(t *testing.T)
 	require.Zero(t, writes.Load())
 	require.Same(t, j.permit, j.original)
 	require.Equal(t, []string{"no_effect"}, j.settled)
+}
+
+func transitionWebhook(t *testing.T, r *reloader, sink *httptest.Server, canonical bool) (*config.Config, *notify.Integration, []byte) {
+	t.Helper()
+	key := []byte(strings.Repeat("k", 32))
+	url, options := sink.URL, ""
+	if canonical {
+		url = "http://alertmanager-middleware:9400" + alert.NativeCallbackPath
+		cred := filepath.Join(t.TempDir(), "callback")
+		require.NoError(t, os.WriteFile(cred, key, 0600))
+		options = fmt.Sprintf("    http_config:\n      follow_redirects: false\n      authorization:\n        type: Bearer\n        credentials_file: %s\n", cred)
+	}
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_wait: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: %s\n    send_resolved: true\n%s", url, options))
+	require.NoError(t, err)
+	tmpl, err := template.FromGlobs(nil)
+	require.NoError(t, err)
+	tmpl.ExternalURL = r.externalURL
+	integrations, err := receiver.BuildReceiverIntegrations(cfg.Receivers[0], tmpl, r.logger, commoncfg.WithDialContextFunc(func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, sink.Listener.Addr().String())
+	}))
+	require.NoError(t, err)
+
+	return cfg, &integrations[0], key
+}
+
+func TestOscarActionDirectPassTurnoverAtProvider(t *testing.T) {
+	for _, change := range []string{"new epoch, same negative", "legacy callback, new epoch", "new binding, same epoch", "different resident token"} {
+		t.Run(change, func(t *testing.T) {
+			var writes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { writes.Add(1) }))
+			defer server.Close()
+			r := newTestReloader(t)
+			t.Cleanup(func() { _ = r.stop() })
+			legacy := change == "legacy callback, new epoch"
+			cfg, integration, callbackKey := transitionWebhook(t, r, server, legacy)
+			now := time.Now()
+			source := alert.New(model.Alert{Labels: model.LabelSet{"host": "one", "severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+			j := &recoveryFixture{classify: func(context.Context, uint64, *alert.Alert) (*v2.EpisodeProjection, error) { return nil, nil }}
+			j.epoch.Store(1)
+			a := newNativeActions(nil, callbackKey, r.logger)
+			a.scheme = "http"
+			r.actions = a
+			require.NoError(t, a.Bind(j))
+			a.ObserveSource("", source, false, false)
+			require.NoError(t, r.reload(cfg))
+			require.Eventually(t, func() bool { return a.ReadView(source) != nil }, time.Second, time.Millisecond)
+			g := a.snapshot()
+			ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, source)
+			wire := source.NotificationCopy(now)
+			cs, err := g.matchContacts(ctx, source, wire, []*alert.Alert{wire}, nil)
+			require.NoError(t, err)
+			require.Len(t, cs, 1)
+			key := residentKey("", source)
+			token := &v2.DirectContact{}
+			valid, release := make(chan struct{}), make(chan struct{})
+			arrived := sync.OnceFunc(func() { close(valid) })
+			resume := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(resume)
+			var released bool
+			pass := &v2.OrdinaryPass{Epoch: 1, Contact: token,
+				Enter: func() bool { return a.ChangeDirectContact(key, nil, token) },
+				Valid: func() bool {
+					checked := j.epoch.Load() == 1 && a.DirectContact(key) == token
+					arrived()
+					<-release
+					return checked
+				},
+				Finish: func(conclusive bool) {
+					released = conclusive
+					if conclusive {
+						a.ChangeDirectContact(key, token, nil)
+					}
+				},
+			}
+			done := make(chan error, 1)
+			go func() {
+				v, _, _ := a.invoke(ctx, g, integration, []*alert.Alert{wire}, []ordinaryContact{{contact: cs[0], pass: pass, legacy: legacy}}, 0)
+				done <- v.Err()
+			}()
+			select {
+			case <-valid:
+			case err := <-done:
+				t.Fatalf("provider never reached pass validation: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("pass wait")
+			}
+			switch change {
+			case "new epoch, same negative", "legacy callback, new epoch":
+				j.epoch.Store(2)
+				require.Eventually(t, func() bool { return a.VerifiedNegative(source, 2) }, 5*time.Second, time.Millisecond)
+			case "new binding, same epoch":
+				p := restoredFixture(t, source)
+				a.mu.Lock()
+				a.installMemberLocked(g, a.residents[key], &p, source)
+				a.mu.Unlock()
+			case "different resident token":
+				require.True(t, a.ChangeDirectContact(key, token, &v2.DirectContact{}))
+			}
+			require.Same(t, g, a.snapshot())
+			resume()
+			require.Error(t, <-done)
+			require.Zero(t, writes.Load())
+			require.True(t, released)
+			if change == "different resident token" {
+				require.NotNil(t, a.DirectContact(key))
+			} else {
+				require.Nil(t, a.DirectContact(key))
+			}
+		})
+	}
+}
+
+func TestOscarActionPublishedFiringClosesOnDueWireBeforeGC(t *testing.T) {
+	for _, canonical := range []bool{false, true} {
+		t.Run(fmt.Sprint(canonical), func(t *testing.T) {
+			var writes atomic.Int32
+			sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var msg webhook.Message
+				if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+					t.Error(err)
+					return
+				}
+				if len(msg.Alerts) != 1 || msg.Alerts[0].Status != "resolved" || (r.Header.Get("X-Oscar-Native-Signature") != "") != canonical {
+					t.Error("incorrect terminal webhook")
+				}
+				writes.Add(1)
+			}))
+			defer sink.Close()
+			r := newTestReloader(t)
+			t.Cleanup(func() { _ = r.stop() })
+			cfg, integration, key := transitionWebhook(t, r, sink, canonical)
+			now := time.Now()
+			s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Second)}, now, false)
+			wire := s.NotificationCopy(now)
+			firing := restoredFixture(t, s)
+			firing.Floor = ""
+			firing.SeverityRevision = 0
+			terminal := firing
+			terminal.State = "resolved"
+			terminal.LifecycleSeq++
+			j := &recoveryFixture{classify: func(context.Context, uint64, *alert.Alert) (*v2.EpisodeProjection, error) { return nil, nil }}
+			j.epoch.Store(1)
+			j.receipts.Store(true)
+			j.state = "pending"
+			j.projections = map[*alert.Alert]v2.EpisodeProjection{s: terminal}
+			a := newNativeActions(nil, key, r.logger)
+			a.scheme = "http"
+			r.actions = a
+			require.NoError(t, a.Bind(j))
+			a.ObserveSource("", s, false, false)
+			require.NoError(t, r.reload(cfg))
+			require.Eventually(t, func() bool { return a.ReadView(s) != nil }, time.Second, time.Millisecond)
+			g := a.snapshot()
+			publish := func(p *v2.EpisodeProjection) {
+				a.mu.Lock()
+				defer a.mu.Unlock()
+				a.installMemberLocked(g, a.residents[residentKey("", s)], p, s)
+			}
+			publish(&firing)
+			inspections := 0
+			j.inspectSource = func(source *alert.Alert) error {
+				require.Same(t, s, source)
+				inspections++
+				publish(&terminal)
+				return nil
+			}
+			ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, s)
+			flush := func() {
+				batch, err := a.prepare(ctx, g, "team", "webhook", 0, []*alert.Alert{wire}, func([]*alert.Alert) bool { return true })
+				require.NoError(t, err)
+				require.Len(t, batch.Members, 1)
+				require.NoError(t, batch.Invoke(ctx, integration, batch.Members).Err())
+			}
+			flush()
+			require.Equal(t, 1, inspections)
+			require.Equal(t, []string{terminal.EpisodeRef.EpisodeID}, j.claimed)
+			require.Equal(t, []string{"confirmed"}, j.settled)
+			j.state = "confirmed"
+			flush()
+			require.EqualValues(t, 1, writes.Load())
+		})
+	}
 }

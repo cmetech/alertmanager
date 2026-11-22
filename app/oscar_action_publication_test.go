@@ -5,13 +5,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/prometheus/alertmanager/notify/webhook"
-	"github.com/prometheus/alertmanager/provider/mem"
-	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"net"
 	"net/http"
@@ -27,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 
@@ -34,6 +33,8 @@ import (
 	v2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/notify/webhook"
+	"github.com/prometheus/alertmanager/provider/mem"
 )
 
 type recoveryFixture struct {
@@ -57,6 +58,19 @@ func restoredFixture(t *testing.T, s *alert.Alert) v2.EpisodeProjection {
 	var p v2.EpisodeProjection
 	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"lifecycle_seq":1,"active_since":%q,"state":"firing","source_severity":"major","floor":"critical","severity_revision":3}`, s.Fingerprint().String(), s.StartsAt.Format(time.RFC3339Nano), s.StartsAt.Format(time.RFC3339Nano))), &p))
 	return p
+}
+
+// Acquire the resident-owned local token when exercising the final publication predicate directly.
+func fixtureDirectPass(t *testing.T, a *nativeActions, s *alert.Alert, epoch uint64) *v2.OrdinaryPass {
+	t.Helper()
+	key := residentKey(s.ManagedMember.Episode, s)
+	token := &v2.DirectContact{}
+	require.True(t, a.ChangeDirectContact(key, nil, token))
+	return &v2.OrdinaryPass{Epoch: epoch, Contact: token, Finish: func(conclusive bool) {
+		if conclusive {
+			a.ChangeDirectContact(key, token, nil)
+		}
+	}}
 }
 
 func TestOscarActionFactoryCommissioningAndReceiptLoss(t *testing.T) {
@@ -104,7 +118,7 @@ func TestOscarActionFactoryCommissioningAndReceiptLoss(t *testing.T) {
 			require.Zero(t, actions.Version())
 			wire := s.NotificationCopy(now)
 			active := map[*alert.Alert]bool{wire: true}
-			c := ordinaryContact{legacy: true, pass: &v2.OrdinaryPass{}, contact: plannedContact{integration: actionIntegration{canonical: true}}}
+			c := ordinaryContact{legacy: true, pass: fixtureDirectPass(t, actions, s, j.epoch.Load()), contact: plannedContact{integration: actionIntegration{canonical: true}}}
 			check := func() bool {
 				return actions.finalPublication(g, []*alert.Alert{wire}, []ordinaryContact{c}, active, entryTransition{ctx: t.Context()}, func() {})
 			}
@@ -175,7 +189,9 @@ func TestOscarActionRecoveryPublishesLateInhibitorBeforeEntry(t *testing.T) {
 	}
 	g := actions.snapshot()
 	enter := func(g *actionGraph, m *alert.Alert) bool {
-		return actions.finalPublication(g, []*alert.Alert{m}, []ordinaryContact{{pass: &v2.OrdinaryPass{}}}, map[*alert.Alert]bool{m: true}, entryTransition{ctx: t.Context()}, func() {})
+		pass := fixtureDirectPass(t, actions, m, j.epoch.Load())
+		defer pass.Finish(true)
+		return actions.finalPublication(g, []*alert.Alert{m}, []ordinaryContact{{pass: pass}}, map[*alert.Alert]bool{m: true}, entryTransition{ctx: t.Context()}, func() {})
 	}
 	require.False(t, enter(g, b))
 	require.True(t, enter(g, c), "unrelated delivery remains available during a blocked indexed proof")
@@ -291,7 +307,9 @@ func TestOscarActionRecoveryInstallKeepsLaterRevisionAcrossReload(t *testing.T) 
 	require.Eventually(t, func() bool { return a.Version() == 1 }, 5*time.Second, time.Millisecond)
 	require.Never(t, func() bool {
 		g := a.snapshot()
-		return a.finalPublication(g, []*alert.Alert{target}, []ordinaryContact{{pass: &v2.OrdinaryPass{}}}, map[*alert.Alert]bool{target: true}, entryTransition{ctx: t.Context()}, func() {})
+		pass := fixtureDirectPass(t, a, target, j.epoch.Load())
+		defer pass.Finish(true)
+		return a.finalPublication(g, []*alert.Alert{target}, []ordinaryContact{{pass: pass}}, map[*alert.Alert]bool{target: true}, entryTransition{ctx: t.Context()}, func() {})
 	}, 100*time.Millisecond, time.Millisecond)
 }
 
@@ -302,7 +320,10 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	storeKey := strings.Repeat("j", 32)
 	var enabled, large atomic.Bool
 	var uncommissionedRenewals atomic.Int32
+	longName := strings.Repeat("L", 4096)
 	type observation struct {
+		entered    time.Time
+		path       string
 		signed     bool
 		hosts      []string
 		deliveries []string
@@ -314,22 +335,33 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	rows := map[string]map[string]any{}
 	tokens := map[string]string{}
 	claims := map[string]string{}
-	confirmed := map[string]bool{}
+	type fixtureContact struct {
+		scope, targetKey, delivery, receiver string
+		repeat                               time.Duration
+	}
+	contacts := map[string]fixtureContact{}
+	pending := map[string]string{}
+	nextEligible := map[string]time.Time{}
+	confirmed := map[string]time.Time{}
+	longCommands := map[string]int{}
+	var longSettled int
+	var earlyCovered atomic.Int32
 	var admissions atomic.Int32
 	authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived := time.Now()
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Error(err)
 			w.WriteHeader(400)
 			return
 		}
-		if r.URL.Path == alert.NativeCallbackPath || r.URL.Path == "/direct" {
+		if r.URL.Path == alert.NativeCallbackPath || r.URL.Path == "/direct" || r.URL.Path == "/long" {
 			var msg webhook.Message
 			if err := json.Unmarshal(raw, &msg); err != nil {
 				t.Error(err)
 				return
 			}
-			item := observation{signed: r.Header.Get("X-Oscar-Native-Signature") != ""}
+			item := observation{entered: arrived, path: r.URL.Path, signed: r.Header.Get("X-Oscar-Native-Signature") != ""}
 			for _, a := range msg.Alerts {
 				item.hosts = append(item.hosts, a.Labels["host"])
 			}
@@ -357,6 +389,11 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 		}
 		if r.Header.Get("Authorization") != "Bearer "+storeKey {
 			w.WriteHeader(401)
+			return
+		}
+		if len(raw) > 256<<10 {
+			t.Errorf("oversized private request: %d", len(raw))
+			w.WriteHeader(413)
 			return
 		}
 		var cmd map[string]any
@@ -393,19 +430,46 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			p["id"] = p["episode_ref"].(map[string]any)["episode_id"]
 			rows[fp] = p
 			response = p
-		case "admit-cohort":
-			if large.Load() {
-				admissions.Add(1)
-			}
+		case "inspect-cohort", "admit-cohort":
+			command := filepath.Base(r.URL.Path)
+			var issued bool
 			var results []any
-			for _, value := range cmd["members"].([]any) {
+			for n, value := range cmd["members"].([]any) {
 				m := value.(map[string]any)
 				id := m["operation_id"].(string)
-				token := strings.ReplaceAll(id, "-", "") + strings.Repeat("0", 32)
-				tokens[id] = token
-				delivery := uuid.NewSHA1(uuid.MustParse(id), []byte(strings.Repeat("f", 64))).String()
-				claims[delivery] = m["native_variant"].(map[string]any)["fingerprint"].(string)
-				results = append(results, map[string]any{"operation_id": id, "state": "entered", "entry_token": token, "target": m["target"], "target_key": strings.Repeat("f", 64), "permit_expires_at": time.Now().Add(30 * time.Second), "lease_expires_at": leaseExpiry})
+				target := m["target"].(map[string]any)
+				receiver := target["receiver_id"].(string)
+				if n == 0 && receiver == longName {
+					longCommands[command]++
+				}
+				fields, _ := json.Marshal([]any{receiver, target["integration_digest"], []any{}})
+				key := fmt.Sprintf("%x", sha256.Sum256(fields))
+				scope := m["row_id"].(string) + "/" + key
+				reply := map[string]any{"operation_id": id}
+				results = append(results, reply)
+				switch {
+				case pending[scope] != "":
+					reply["state"] = "held"
+				case time.Now().Before(nextEligible[scope]):
+					reply["state"] = "covered"
+					if large.Load() && target["repeat_interval_us"].(float64) == float64((180*time.Second).Microseconds()) {
+						earlyCovered.Add(1)
+					}
+				case command == "inspect-cohort":
+					reply["state"] = "due"
+				default:
+					issued = true
+					token := strings.ReplaceAll(id, "-", "") + strings.Repeat("0", 32)
+					delivery := uuid.NewSHA1(uuid.MustParse(id), []byte(key)).String()
+					pending[scope], tokens[id] = id, token
+					contacts[id] = fixtureContact{scope, key, delivery, receiver, time.Duration(target["repeat_interval_us"].(float64)) * time.Microsecond}
+					claims[delivery] = m["native_variant"].(map[string]any)["fingerprint"].(string)
+					reply["state"], reply["entry_token"], reply["target_key"], reply["target"] = "entered", token, key, target
+					reply["permit_expires_at"], reply["lease_expires_at"] = time.Now().Add(30*time.Second), leaseExpiry
+				}
+			}
+			if issued && large.Load() {
+				admissions.Add(1)
 			}
 			response = results
 		case "settle-cohort":
@@ -413,7 +477,8 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			for _, value := range cmd["members"].([]any) {
 				m := value.(map[string]any)
 				id := m["operation_id"].(string)
-				if tokens[id] != m["entry_token"] {
+				c := contacts[id]
+				if tokens[id] != m["entry_token"] || c.targetKey != m["target_key"] || pending[c.scope] != id {
 					t.Error("settlement lost original token")
 					w.WriteHeader(409)
 					return
@@ -421,7 +486,14 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 				ids = append(ids, id)
 				outcome := m["receipt"].(map[string]any)["outcome"].(string)
 				if outcome == "confirmed" {
-					confirmed[uuid.NewSHA1(uuid.MustParse(id), []byte(strings.Repeat("f", 64))).String()] = true
+					deadline := time.Now().Add(c.repeat)
+					confirmed[c.delivery], nextEligible[c.scope] = deadline, deadline
+					if c.receiver == longName {
+						longSettled++
+					}
+				}
+				if outcome != "unknown" {
+					delete(pending, c.scope)
 				}
 				select {
 				case settled <- outcome:
@@ -435,7 +507,13 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response)
+		encoded, err := json.Marshal(response)
+		if err != nil || len(encoded) > 2<<20 {
+			t.Errorf("invalid private fixture response size %d: %v", len(encoded), err)
+			w.WriteHeader(500)
+			return
+		}
+		_, _ = w.Write(encoded)
 	}))
 	t.Cleanup(authority.Close)
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -510,8 +588,8 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	enabled.Store(true)
 	require.Eventually(t, func() bool { return capability(instance) }, 15*time.Second, 100*time.Millisecond)
 	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(strings.Replace(yaml, "send_resolved: true", "send_resolved: false", 1)), 0600))
-	require.NoError(t, instance.Reload())
-	require.False(t, capability(instance), "invalid graph must hold even with both affirmative markers")
+	require.ErrorContains(t, instance.Reload(), "active native action graph cannot switch to unsupported receivers")
+	require.True(t, capability(instance), "the rejected reload preserves the supported live graph")
 	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(yaml), 0600))
 	require.NoError(t, instance.Reload())
 	require.Eventually(t, func() bool { return capability(instance) }, 5*time.Second, 50*time.Millisecond)
@@ -544,17 +622,21 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	bigConfig := strings.Replace(yaml, "group_by: [host]", "group_by: [batch]", 1)
 	bigConfig = strings.Replace(bigConfig, "group_wait: 50ms", "group_wait: 5s", 1)
 	bigConfig = strings.Replace(bigConfig, "group_interval: 200ms", "group_interval: 90s", 1)
-	bigConfig = strings.Replace(bigConfig, "repeat_interval: 2s", "repeat_interval: 1h\n  routes:\n  - receiver: team\n    matchers: ['batch=large']\n    repeat_interval: 90s", 1)
+	bigConfig = strings.Replace(bigConfig, "repeat_interval: 2s", "repeat_interval: 1h\n  routes:\n  - receiver: team\n    matchers: ['batch=large']\n    repeat_interval: 180s", 1)
 	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(bigConfig), 0600))
 	require.NoError(t, instance.Reload())
 	require.Eventually(t, func() bool { return capability(instance) }, 5*time.Second, 20*time.Millisecond)
 	large.Store(true)
 	clock := time.Now()
 	bulk := make([]*alert.Alert, 4109)
-	member := func(host, batch string) *alert.Alert {
-		return alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(host), "batch": model.LabelValue(batch), "severity": "major"}, StartsAt: clock, EndsAt: clock.Add(time.Hour)}, clock, false)
+	member := func(host, batch string, useLongReceiver bool) *alert.Alert {
+		labels := model.LabelSet{"host": model.LabelValue(host), "batch": model.LabelValue(batch), "severity": "major"}
+		if useLongReceiver {
+			labels["long_receiver"] = "yes"
+		}
+		return alert.New(model.Alert{Labels: labels, StartsAt: clock, EndsAt: clock.Add(time.Hour)}, clock, false)
 	}
-	sibling := member("clock-sibling", "sibling")
+	sibling := member("clock-sibling", "sibling", false)
 	require.NoError(t, provider.Put(t.Context(), sibling))
 	next("clock-sibling", true)
 	siblingTiming := func() string {
@@ -583,12 +665,13 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	require.Eventually(t, func() bool { return siblingTiming() != "" }, 3*time.Second, 25*time.Millisecond)
 	before := siblingTiming()
 	for n := range bulk {
-		bulk[n] = member(fmt.Sprintf("bulk-%05d", n), "large")
+		bulk[n] = member(fmt.Sprintf("bulk-%05d", n), "large", n < 64)
 	}
 	require.NoError(t, provider.Put(t.Context(), bulk...))
+	priorDeadlines := map[string]time.Time{}
 	previous := map[string]bool{}
 	for turn := 0; turn < 2; turn++ {
-		timeout := time.After(210 * time.Second)
+		timeout := time.After(300 * time.Second)
 		var physical observation
 		for len(physical.hosts) == 0 {
 			select {
@@ -601,6 +684,9 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			}
 		}
 		require.True(t, physical.signed)
+		for host, due := range priorDeadlines {
+			require.False(t, physical.entered.Before(due), "early repeat for %s", host)
+		}
 		require.Len(t, physical.hosts, len(bulk))
 		require.Len(t, physical.deliveries, len(bulk))
 		seen := map[string]bool{}
@@ -616,14 +702,20 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			for _, id := range physical.deliveries {
-				if !confirmed[id] {
+				if confirmed[id].IsZero() {
 					return false
 				}
 			}
 			return true
 		}, 5*time.Second, 10*time.Millisecond)
+		mu.Lock()
+		for n, id := range physical.deliveries {
+			priorDeadlines[physical.hosts[n]] = confirmed[id]
+		}
+		mu.Unlock()
 		require.Equal(t, before, siblingTiming())
 	}
+	require.Positive(t, earlyCovered.Load(), "a native group interval before next eligibility must be covered")
 	require.Less(t, admissions.Load(), int32(160), "4109 members use bounded private chunks per physical notification")
 	// The same tracked 4109 keep their original journal guards after moving
 	// to a direct-only receiver. It requires no signed callback consumer.
@@ -656,11 +748,52 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 		}
 	}
 directDelivered:
-	untracked := member("direct-only", "new")
+	untracked := member("direct-only", "new", false)
 	require.NoError(t, provider.Put(t.Context(), untracked))
 	next("direct-only", false)
 	mu.Lock()
 	_, exists := rows[untracked.Fingerprint().String()]
 	mu.Unlock()
 	require.False(t, exists, "untracked direct delivery must never enroll")
+
+	// A prepared direct URL exercises both inspection and admission. Every
+	// returned claimed target includes its full 4096-byte receiver name.
+	large.Store(false)
+	urlFile := write("direct-long-url", "http://direct.example/long")
+	longConfig := fmt.Sprintf("route:\n  receiver: quiet\n  group_by: [batch]\n  group_wait: 12s\n  group_interval: 90s\n  repeat_interval: 1h\n  routes:\n  - receiver: %s\n    matchers: ['long_receiver=yes']\nreceivers:\n- name: quiet\n- name: %s\n  webhook_configs:\n  - url_file: %s\n    send_resolved: true\n", longName, longName, urlFile)
+	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(longConfig), 0600))
+	require.NoError(t, instance.Reload())
+	deadline := time.After(150 * time.Second)
+	for {
+		select {
+		case m := <-observed:
+			if m.path != "/long" {
+				continue
+			}
+			require.False(t, m.signed)
+			require.Len(t, m.hosts, 64)
+			var want []string
+			for _, s := range bulk[:64] {
+				want = append(want, string(s.Labels["host"]))
+			}
+			require.ElementsMatch(t, want, m.hosts)
+			require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return longSettled == 64 }, 5*time.Second, 10*time.Millisecond)
+			mu.Lock()
+			inspects, admits := longCommands["inspect-cohort"], longCommands["admit-cohort"]
+			mu.Unlock()
+			require.Greater(t, inspects, 1)
+			require.Greater(t, admits, 1)
+			require.Never(t, func() bool {
+				select {
+				case extra := <-observed:
+					return extra.path == "/long"
+				default:
+					return false
+				}
+			}, 100*time.Millisecond, 10*time.Millisecond)
+			return
+		case <-deadline:
+			t.Fatal("long receiver did not send the original 64-member group")
+		}
+	}
 }

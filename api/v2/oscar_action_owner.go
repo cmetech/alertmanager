@@ -56,11 +56,19 @@ type actionRPC interface {
 }
 type actionClient struct{ *managedClient }
 
+var privateCommandTooLarge = fmt.Errorf("private native action command exceeds its byte limit: %w", conflict)
+
 var incompatibleLease = errors.New("incompatible native authority lease response")
 
 func (c actionClient) call(ctx context.Context, cmd string, args map[string]any, out any) error {
 	b, err := json.Marshal(args)
-	if err != nil || len(b) > actionBodyLimit {
+	if err != nil {
+		return conflict
+	}
+	if len(b) > actionBodyLimit {
+		if cmd == "admit-cohort" || cmd == "inspect-cohort" {
+			return privateCommandTooLarge
+		}
 		return conflict
 	}
 	r, err := http.NewRequestWithContext(ctx, "POST", c.scheme+"://alertmanager-middleware:9400/api/v1/internal/native-actions/"+cmd, bytes.NewReader(b))
