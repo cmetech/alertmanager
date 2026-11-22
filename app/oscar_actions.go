@@ -588,24 +588,25 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		}
 		contentIncomplete := false
 		if len(candidates) > 0 {
-			var retained []*alert.Alert
-			var err error
-			ctx, retained, err = integration.PrepareContent(ctx, candidates, truncated)
+			contentCtx, retained, err := integration.PrepareContent(ctx, candidates, truncated)
 			if err != nil {
 				return notify.Unrecoverable(err, notify.EncodingErrorReason)
 			}
-			if incomplete && repeatDue && len(retained) < len(candidates) {
-				repeat := func(m *alert.Alert) bool { return contacts[m].pass != nil && !m.Resolved() && ack(m) }
+			if incomplete && len(retained) < len(candidates) {
+				// Tracked firing repeats follow the journal's deadline. Direct repeats follow
+				// the group deadline. Either can occupy the only encoded position on every flush.
+				repeat := func(m *alert.Alert) bool { return !m.Resolved() && ack(m) }
 				if slices.ContainsFunc(retained, repeat) && slices.ContainsFunc(candidates[len(retained):], unacknowledged) {
-					// A due repeat could occupy the only encoded position on
-					// every flush. Finish the previously omitted members first.
+					before := len(candidates)
 					candidates = slices.DeleteFunc(candidates, repeat)
-					ctx, retained, err = integration.PrepareContent(ctx, candidates, truncated)
+					truncated += uint64(before - len(candidates))
+					contentCtx, retained, err = integration.PrepareContent(ctx, candidates, truncated)
 					if err != nil {
 						return notify.Unrecoverable(err, notify.EncodingErrorReason)
 					}
 				}
 			}
+			ctx = contentCtx
 			contentIncomplete = len(retained) != len(candidates)
 			if contentIncomplete && slices.ContainsFunc(candidates[len(retained):], func(m *alert.Alert) bool { return m.Resolved() }) {
 				// SetNotifies persists accepted members before reporting the hold.
@@ -648,7 +649,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			providerProgress = len(delivered) > 0 || noSend
 			if i.name == "incidentio" && v.Err() == nil && len(delivered) > 0 {
 				contentIncomplete = contentIncomplete || len(delivered) != len(pending)
-				ordinaryAcceptance = ordinaryAcceptance || contentIncomplete
+				// The last outstanding member can be a firing member with its own journal receipt.
+				ordinaryAcceptance = ordinaryAcceptance || contentIncomplete ||
+					incomplete && slices.ContainsFunc(delivered, unacknowledged)
 			}
 			if !noSend && len(delivered) != len(pending) {
 				omitted := make(map[*alert.Alert]bool, len(pending))

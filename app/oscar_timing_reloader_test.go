@@ -43,6 +43,7 @@ import (
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/notify/incidentio"
 	"github.com/prometheus/alertmanager/notify/webhook"
 	"github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/timeinterval"
@@ -320,6 +321,7 @@ type terminalFixtureJournal struct {
 	coverageChecks                     int
 	confirmed                          map[string]bool
 	inspectSource                      func(*alert.Alert) error
+	enterDirect                        func(*alert.Alert)
 	failInspectHost                    string
 	failReserveAfterFirst              bool
 	firstPermit                        time.Time
@@ -356,7 +358,16 @@ func (j *terminalFixtureJournal) InspectOrdinary(_ context.Context, s *alert.Ale
 	}
 	p, ok := j.projections[s]
 	if !ok {
-		return nil, &v2.OrdinaryPass{Enter: func() bool { return true }, Valid: func() bool { return true }, Finish: func(bool) {}}, nil
+		return nil, &v2.OrdinaryPass{
+			Enter: func() bool {
+				if j.enterDirect != nil {
+					j.enterDirect(s)
+				}
+				return true
+			},
+			Valid:  func() bool { return true },
+			Finish: func(bool) {},
+		}, nil
 	}
 	return &p, nil, nil
 }
@@ -677,59 +688,166 @@ func TestOscarActionReloadChecksProposedCanonicalConfig(t *testing.T) {
 
 func TestOscarActionIncidentContentTail(t *testing.T) {
 	t.Parallel()
-	seen := make(chan []string, 5)
-	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var data struct {
-			Alerts []struct{ Labels map[string]string }
-		}
-		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			w.WriteHeader(400)
-			return
-		}
-		var hosts []string
-		for _, m := range data.Alerts {
-			hosts = append(hosts, m.Labels["host"])
-		}
-		seen <- hosts
-	}))
-	defer sink.Close()
-	r := newTestReloader(t)
-	t.Cleanup(func() { _ = r.stop() })
-	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\nreceivers:\n- name: team\n  incidentio_configs:\n  - url: %s\n    alert_source_token: secret\n", sink.URL))
-	require.NoError(t, err)
-	a := newNativeActions(nil, nil, r.logger)
-	a.version = 1
-	r.actions = a
-	j := &terminalFixtureJournal{}
-	require.NoError(t, a.Bind(j))
-	require.NoError(t, r.reload(cfg))
-	g := a.snapshot()
-	require.NotNil(t, g)
-	now := time.Now()
-	var members []*alert.Alert
-	for _, host := range []string{"A", "B"} {
-		s := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "host": model.LabelValue(host)}, Annotations: model.LabelSet{"message": model.LabelValue(host + strings.Repeat("x", size))}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
-		members = append(members, s.NotificationCopy(now))
+	type flush struct {
+		members   int
+		repeatDue bool
+		wire      string
+		truncated uint64
+		logged    string
 	}
-	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, members[0])
-	ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, recv, kind string, idx int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
-		return a.prepare(c, g, recv, kind, idx, ms, due)
-	})
-	for flush := range 3 {
-		at := ctx
-		if flush == 1 {
-			// Even when A can repeat, the size-limited body must progress to B.
-			repeat, ok := notify.RepeatInterval(ctx)
-			require.True(t, ok)
-			at = notify.WithNow(ctx, now.Add(repeat+time.Minute))
-		}
-		_, _, err := g.pipeline.Exec(at, r.logger, members...)
-		require.NoError(t, err)
+	mixed := []flush{
+		{2, false, "AB", 0, "AB"},
+		{3, true, "A", 2, "AB"},
+		{3, true, "C", 2, "ABC"},
 	}
-	require.Len(t, seen, 2)
-	require.Equal(t, []string{"A"}, <-seen)
-	require.Equal(t, []string{"B"}, <-seen)
-	require.Empty(t, j.claimed)
+	for _, tc := range []struct {
+		name, hosts, tracked string
+		annotationBytes      int
+		maxAlerts            int
+		flushes              []flush
+	}{
+		{"direct tail", "AB", "", 150 * 1024, 0, []flush{
+			{2, false, "A", 1, "A"},
+			{2, true, "B", 1, "AB"},
+			{2, false, "", 0, "AB"},
+		}},
+		// Each distinct annotation appears in its alert and the configured metadata.
+		// Any two 100 KiB members fit, while three exceed the 512 KiB wire limit.
+		{"tracked repeat with a direct tail", "ABC", "A", 100 * 1024, 0, mixed},
+		{"tracked repeat with a tracked tail", "ABC", "AC", 100 * 1024, 0, mixed},
+		{"configured and encoded limits", "ABCDEF", "ACF", 100 * 1024, 5, []flush{
+			{2, false, "AB", 0, "AB"},
+			{6, true, "A", 5, "AB"},
+			{6, true, "C", 5, "ABC"},
+			{6, true, "DE", 4, "ABCDE"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen := make(chan incidentio.Message, 5)
+			sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var msg incidentio.Message
+				if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512*1024)).Decode(&msg); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				seen <- msg
+			}))
+			defer sink.Close()
+			r := newTestReloader(t)
+			t.Cleanup(func() { _ = r.stop() })
+			cfg, err := config.Load(fmt.Sprintf(`route:
+  receiver: team
+  group_by: [alertname]
+  group_wait: 1h
+  group_interval: 90s
+  repeat_interval: 1m
+receivers:
+- name: team
+  incidentio_configs:
+  - url: %s
+    alert_source_token: secret
+    max_alerts: %d
+    metadata:
+      hosts: '{{ range .Alerts }}{{ .Labels.host }}{{ end }}'
+      messages: '{{ range .Alerts }}{{ .Annotations.message }}{{ end }}'
+`, sink.URL, tc.maxAlerts))
+			require.NoError(t, err)
+			a := newNativeActions(nil, nil, r.logger)
+			a.version = 1
+			r.actions = a
+			j := &terminalFixtureJournal{state: "pending", projections: map[*alert.Alert]v2.EpisodeProjection{}}
+			var direct []string
+			j.enterDirect = func(s *alert.Alert) { direct = append(direct, string(s.Labels["host"])) }
+			require.NoError(t, a.Bind(j))
+			require.NoError(t, r.reload(cfg))
+			g := a.snapshot()
+			require.NotNil(t, g)
+			now := time.Now()
+			var members []*alert.Alert
+			tracked := map[string]string{}
+			hashes := map[string]uint64{}
+			messages := map[string]string{}
+			for n, h := range tc.hosts {
+				host := string(h)
+				messages[host] = host + strings.Repeat("x", tc.annotationBytes)
+				s := alert.New(model.Alert{
+					Labels:      model.LabelSet{"alertname": "Disk", "host": model.LabelValue(host), "severity": "major"},
+					Annotations: model.LabelSet{"message": model.LabelValue(messages[host])},
+					StartsAt:    now.Add(-time.Hour),
+					EndsAt:      now.Add(time.Hour),
+				}, now, false)
+				if strings.Contains(tc.tracked, host) {
+					id := fmt.Sprintf("22222222-2222-4222-8222-%012d", n+1)
+					j.projections[s] = transportProjection(t, s, id, "firing")
+					tracked[host] = id
+				}
+				members = append(members, s.NotificationCopy(now))
+				hashes[host] = notify.HashAlert(s)
+			}
+			ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, members[0])
+			ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, recv, kind string, idx int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
+				return a.prepare(c, g, recv, kind, idx, ms, due)
+			})
+			key, _ := notify.GroupKey(ctx)
+			recv := &nflogpb.Receiver{GroupName: "team", Integration: "incidentio"}
+			var lastLog time.Time
+			for _, step := range tc.flushes {
+				at := ctx
+				if step.repeatDue {
+					// Every elapsed flush is after the last write's repeat and before its expiry.
+					at = notify.WithNow(ctx, lastLog.Add(90*time.Second))
+				}
+				reserved, claimed, settled, entered := len(j.reserved), len(j.claimed), len(j.settled), len(direct)
+				_, _, err := g.pipeline.Exec(at, r.logger, members[:step.members]...)
+				require.NoError(t, err)
+				if step.wire == "" {
+					require.Empty(t, seen)
+				} else {
+					require.Len(t, seen, 1)
+					msg := <-seen
+					var hosts []string
+					var metadata strings.Builder
+					for _, m := range msg.Alerts {
+						host := m.Labels["host"]
+						hosts = append(hosts, host)
+						require.True(t, m.Annotations["message"] == messages[host], "wire annotation for %s", host)
+						metadata.WriteString(messages[host])
+					}
+					require.Equal(t, step.wire, strings.Join(hosts, ""))
+					require.Equal(t, step.wire, msg.Metadata["hosts"])
+					require.True(t, metadata.String() == msg.Metadata["messages"], "metadata must match the wire members")
+					require.Equal(t, step.truncated, msg.TruncatedAlerts)
+				}
+				var wantTracked, wantDirect []string
+				for _, h := range step.wire {
+					if id, ok := tracked[string(h)]; ok {
+						wantTracked = append(wantTracked, id)
+					} else {
+						wantDirect = append(wantDirect, string(h))
+					}
+				}
+				require.ElementsMatch(t, wantTracked, j.reserved[reserved:])
+				require.ElementsMatch(t, wantTracked, j.claimed[claimed:])
+				require.Len(t, j.settled[settled:], len(wantTracked))
+				for _, outcome := range j.settled[settled:] {
+					require.Equal(t, "confirmed", outcome)
+				}
+				require.ElementsMatch(t, wantDirect, direct[entered:])
+				entries, err := r.notificationLog.Query(nflog.QGroupKey(key), nflog.QReceiver(recv))
+				require.NoError(t, err)
+				require.Len(t, entries, 1)
+				var wantHashes []uint64
+				for _, h := range step.logged {
+					wantHashes = append(wantHashes, hashes[string(h)])
+				}
+				require.ElementsMatch(t, wantHashes, entries[0].FiringAlerts)
+				if step.wire == "" {
+					require.Equal(t, lastLog, entries[0].Timestamp.AsTime())
+				}
+				lastLog = entries[0].Timestamp.AsTime()
+			}
+		})
+	}
 }
 
 func TestOscarActionRegisteredRecipients(t *testing.T) {

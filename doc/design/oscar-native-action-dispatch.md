@@ -89,10 +89,14 @@ confirmation, a held resolved sibling stays due across native group cleanup.
 While that hold persists, the prior notification log suppresses already
 acknowledged direct clears. Reobserving a completed sibling preserves the
 group timestamp. A firing sibling can repeat at its recorded native deadline.
-If a repeat would fill the provider's size-limited payload and exclude the
-outstanding tail, the sender completes that tail first. A replay of an accepted
-operator intent whose targets all settled with conclusive no-effect evidence
-returns the stored operation and its individual receipts during reconciliation.
+When incident.io truncates an incomplete group to an acknowledged firing repeat
+and leaves an eligible, unacknowledged member out, the sender defers acknowledged
+firing repeats from both tracked and direct sources. It encodes the remaining
+members in native order and includes every size omission in `truncatedAlerts`
+alongside omissions from `max_alerts`. The ordinary log records newly delivered
+members from either source. A replay of an accepted operator intent whose
+targets all settled with conclusive no-effect evidence returns the stored
+operation and its individual receipts during reconciliation.
 
 On guarded HTTP mutations the native client retains configured authentication,
 CA, proxy and pooled connections. A separate HTTP/1 pool gives each active
