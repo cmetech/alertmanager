@@ -1,3 +1,8 @@
+## Unreleased — Ordinary terminal group admission
+
+- Native Alertmanager claims a tracked group’s firing and terminal members in bounded private requests. A clear keeps its deterministic identity and original receipt when the group exceeds 4,096 members. An eligible subset can enter after a concurrent receipt only when its rendered members and recipient still match.
+- Pair native source `a2f63cef` with OSCAR Alertmanager `d592f7c09`. Readiness requires `ordinary_cohort: 2`. Canonical callbacks also require B2’s durable receipt capability. This default-off change uses the existing schema and settings. Runtime qualification is pending.
+
 ## Unreleased — Managed timeout recovery
 
 - An expired managed raise or update can reach its signed terminal callback after its mutable episode slot is reclaimed. Alertmanager verifies the native variant and generation, then checks the promoted managed record before closing the interval and claiming the existing terminal receipt. Source `8da616f6` uses the current configuration and store schema. The feature defaults off and awaits runtime qualification.
