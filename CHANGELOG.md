@@ -1,3 +1,8 @@
+## Unreleased — Direct notification receipts during terminal reconciliation
+
+- Native Alertmanager records the accepted members of a direct notification even when settlement and lookup both fail for an excluded terminal token. A subsequent flush can hold that terminal and honor the direct sibling's earlier delivery. A rejected provider request retains its original failure reason.
+- Source `76b82742` uses the existing private store and configuration. This native-only fix requires no migration or activation. Runtime qualification is pending.
+
 ## Unreleased — Terminal permit expiry during grouped delivery
 
 - Native Alertmanager rechecks each member's original source and wire before private admission. When a permit expires between admission chunks, the remaining eligible members can reach the configured recipient in their original order. The expired member settles with its original token.
