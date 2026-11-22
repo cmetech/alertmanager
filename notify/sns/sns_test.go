@@ -17,8 +17,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -34,6 +37,7 @@ import (
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/notify/test"
 	"github.com/prometheus/alertmanager/template"
 )
 
@@ -280,6 +284,50 @@ func TestClassifyPublishError(t *testing.T) {
 			require.Equal(t, tc.retry, verdict.ShouldRetry())
 			require.Equal(t, tc.reason, verdict.Reason())
 			require.Contains(t, verdict.Err().Error(), tc.errMsg)
+		})
+	}
+}
+
+func TestOscarActionFIFOLogicalIdentity(t *testing.T) {
+	t.Parallel()
+	n := &Notifier{conf: &SNSConfig{TopicARN: "arn:aws:sns:us-east-1:123456789012:example.fifo", Message: "hello"}}
+	ctx := notify.WithGroupKey(t.Context(), "group")
+	var err error
+	render := func(s string) string { return s }
+	input, err := n.createPublishInput(ctx, render, &err)
+	require.NoError(t, err)
+	action, err := n.createPublishInput(notify.WithProviderEntry(ctx, &notify.ProviderEntry{ActionID: "one"}), render, &err)
+	require.NoError(t, err)
+	require.Equal(t, *input.MessageGroupId, *action.MessageGroupId)
+	require.NotEqual(t, *input.MessageDeduplicationId, *action.MessageDeduplicationId)
+	replay, err := n.createPublishInput(notify.WithProviderEntry(ctx, &notify.ProviderEntry{ActionID: "one"}), render, &err)
+	require.NoError(t, err)
+	require.Equal(t, *action.MessageDeduplicationId, *replay.MessageDeduplicationId)
+}
+
+func TestOscarActionSNSDoesNotReplayPublish(t *testing.T) {
+	t.Parallel()
+	for _, buildable := range []bool{false, true} {
+		t.Run(fmt.Sprint(buildable), func(t *testing.T) {
+			var count atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				count.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+			}))
+			defer server.Close()
+			c := &SNSConfig{UseAWSHTTPClient: buildable, APIUrl: server.URL, TopicARN: "arn:aws:sns:us-east-1:123456789012:example", Message: "alarm", Sigv4: sigv4.SigV4Config{Region: "us-east-1", AccessKey: "test", SecretKey: "secret"}, HTTPConfig: &commoncfg.DefaultHTTPClientConfig}
+			n, err := New(c, test.CreateTmpl(t), logger)
+			require.NoError(t, err)
+			var entries int
+			entry := &notify.ProviderEntry{Begin: func() bool { entries++; return true }}
+			ctx := notify.WithProviderEntry(notify.WithGroupKey(t.Context(), "group"), entry)
+			require.Error(t, n.Notify(ctx).Err())
+			require.EqualValues(t, 1, count.Load())
+			require.Equal(t, 1, entries)
 		})
 	}
 }

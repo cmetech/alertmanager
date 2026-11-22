@@ -514,3 +514,15 @@ func TestTelegramTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestOscarActionDiagnosticHasNoEntry(t *testing.T) {
+	t.Parallel()
+	cfg := &TelegramConfig{APIUrl: &amcommoncfg.URL{URL: &url.URL{Scheme: "https", Host: "example.org"}}, HTTPConfig: &commoncfg.DefaultHTTPClientConfig, ChatID: 123, BotToken: "secret", ParseMode: "HTML", Message: strings.Repeat("x", maxMessageLenRunes+1)}
+	n, err := New(cfg, test.CreateTmpl(t), promslog.NewNopLogger())
+	require.NoError(t, err)
+	var calls int
+	ctx := notify.WithProviderEntry(notify.WithGroupKey(t.Context(), "group"), &notify.ProviderEntry{RequireContent: true, Begin: func() bool { calls++; return false }})
+	result := n.Notify(ctx)
+	require.ErrorContains(t, result.Err(), "Telegram limits")
+	require.Zero(t, calls)
+}

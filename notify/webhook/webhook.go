@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -204,6 +205,38 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 	}
 	data := notify.GetTemplateData(ctx, n.tmpl, alerts, n.logger)
 
+	var url string
+	var tmplErr error
+	tmpl := notify.TmplText(n.tmpl, data, &tmplErr)
+
+	if n.conf.URL != "" {
+		url = tmpl(string(n.conf.URL))
+	} else {
+		content, err := os.ReadFile(n.conf.URLFile)
+		if err != nil {
+			return notify.Unrecoverable(fmt.Errorf("read url_file: %w", err), notify.DefaultReason)
+		}
+		url = tmpl(strings.TrimSpace(string(content)))
+	}
+
+	if tmplErr != nil {
+		return notify.Unrecoverable(fmt.Errorf("failed to template webhook URL: %w", tmplErr), notify.DefaultReason)
+	}
+
+	if url == "" {
+		return notify.Unrecoverable(errors.New("webhook URL is empty after templating"), notify.DefaultReason)
+	}
+
+	if notify.CurrentProviderEntry(ctx) != nil && (n.conf.URLFile != "" || strings.Contains(string(n.conf.URL), "{{")) {
+		actual, err := neturl.Parse(url)
+		if err != nil || (strings.EqualFold(actual.Hostname(), "alertmanager-middleware") || actual.Path == alert.NativeCallbackPath) {
+			return notify.Unrecoverable(notify.ErrDestination, notify.ConfigErrorReason)
+		}
+	}
+	if !notify.PreparedHTTPDestination(ctx, n.client, url) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
+
 	groupKey, err := notify.ExtractGroupKey(ctx)
 	if err != nil {
 		return notify.Unrecoverable(err, notify.DefaultReason)
@@ -260,28 +293,6 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		}
 	}
 
-	var url string
-	var tmplErr error
-	tmpl := notify.TmplText(n.tmpl, data, &tmplErr)
-
-	if n.conf.URL != "" {
-		url = tmpl(string(n.conf.URL))
-	} else {
-		content, err := os.ReadFile(n.conf.URLFile)
-		if err != nil {
-			return notify.Unrecoverable(fmt.Errorf("read url_file: %w", err), notify.DefaultReason)
-		}
-		url = tmpl(strings.TrimSpace(string(content)))
-	}
-
-	if tmplErr != nil {
-		return notify.Unrecoverable(fmt.Errorf("failed to template webhook URL: %w", tmplErr), notify.DefaultReason)
-	}
-
-	if url == "" {
-		return notify.Unrecoverable(errors.New("webhook URL is empty after templating"), notify.DefaultReason)
-	}
-
 	if n.conf.Timeout > 0 {
 		postCtx, cancel := context.WithTimeoutCause(ctx, n.conf.Timeout, fmt.Errorf("configured webhook timeout reached (%s)", n.conf.Timeout))
 		defer cancel()
@@ -307,13 +318,7 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", notify.UserAgentHeader)
-		req.GetBody = nil
-		client := *n.client
-		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		if ctx.Err() != nil || entry.Begin == nil || !entry.Begin() {
-			return notify.Unrecoverable(errors.New("native entry invalidated before webhook contact"), notify.DefaultReason)
-		}
-		resp, err = client.Do(req)
+		resp, err = notify.DoMutation(n.client, req)
 		if err != nil {
 			return notify.Unrecoverable(notify.RedactURL(err), notify.DefaultReason)
 		}

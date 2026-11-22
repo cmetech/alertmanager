@@ -95,6 +95,10 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		return notify.Retry(0, err, notify.DefaultReason)
 	}
 
+	group, _ := notify.GroupKey(ctx)
+	if !notify.PreparedHTTPDestination(ctx, n.client, apiURL.String(), group) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
 	resp, err := notify.PostJSON(ctx, n.client, apiURL.String(), buf)
 	if err != nil {
 		return notify.Retry(0, notify.RedactURL(err), notify.DefaultReason)

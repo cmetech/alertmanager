@@ -193,6 +193,9 @@ func (n *Notifier) notifyV1(
 		return false, notify.EncodingErrorReason, err
 	}
 
+	if !notify.PreparedHTTPDestination(ctx, n.client, n.apiV1, msg.ServiceKey, key.Hash()) {
+		return false, notify.ConfigErrorReason, notify.ErrDestination
+	}
 	resp, err := notify.PostJSON(ctx, n.client, n.apiV1, &encodedMsg)
 	if err != nil {
 		return true, notify.RequestErrorReason, fmt.Errorf("failed to post message to PagerDuty v1: %w", err)
@@ -294,6 +297,9 @@ func (n *Notifier) notifyV2(
 		return false, notify.EncodingErrorReason, err
 	}
 
+	if !notify.PreparedHTTPDestination(ctx, n.client, n.conf.URL.String(), msg.RoutingKey, key.Hash()) {
+		return false, notify.ConfigErrorReason, notify.ErrDestination
+	}
 	resp, err := notify.PostJSON(ctx, n.client, n.conf.URL.String(), &encodedMsg)
 	if err != nil {
 		return true, notify.RequestErrorReason, fmt.Errorf("failed to post message to PagerDuty: %w", err)

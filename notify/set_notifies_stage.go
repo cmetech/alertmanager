@@ -89,6 +89,9 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*a
 
 	var held error
 	if batch, ordinary := ctx.Value(ordinaryBatchKey{}).(OrdinaryBatch); ordinary {
+		if batch.LogMembers == nil {
+			return ctx, alerts, nil
+		}
 		var accepted []*alert.Alert
 		accepted, held = batch.LogMembers()
 		if len(accepted) == 0 {

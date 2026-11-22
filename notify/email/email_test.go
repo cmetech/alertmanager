@@ -34,6 +34,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"strconv"
@@ -1043,6 +1044,57 @@ func TestEmailImplicitTLS(t *testing.T) {
 			require.Equal(t, tt.expectImplicit, useImplicitTLS,
 				"Expected useImplicitTLS=%v for port=%s with forceImplicitTLS=%v",
 				tt.expectImplicit, tt.port, tt.forceImplicitTLS)
+		})
+	}
+}
+
+func TestOscarActionSMTPFinalDot(t *testing.T) {
+	t.Parallel()
+	for _, permit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("permit-%t", permit), func(t *testing.T) {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer listener.Close()
+			committed := make(chan bool, 1)
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				wire := textproto.NewConn(conn)
+				defer wire.Close()
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				_ = wire.PrintfLine("220 localhost SMTP")
+				for {
+					line, err := wire.ReadLine()
+					if err != nil {
+						committed <- false
+						return
+					}
+					if line == "DATA" {
+						_ = wire.PrintfLine("354 send message")
+						_, err = wire.ReadDotBytes()
+						committed <- err == nil
+						return // Lose the acknowledgement after a valid final dot.
+					}
+					_ = wire.PrintfLine("250 OK")
+				}
+			}()
+			host, port, err := net.SplitHostPort(listener.Addr().String())
+			require.NoError(t, err)
+			cfg := &EmailConfig{Smarthost: amcommoncfg.HostPort{Host: host, Port: port}, From: emailFrom, To: emailTo, Text: "body"}
+			tmpl, a, err := prepare(cfg)
+			require.NoError(t, err)
+			var entries int
+			ctx := notify.WithProviderEntry(t.Context(), &notify.ProviderEntry{Check: func() bool { return true }, Begin: func() bool { entries++; return permit }})
+			require.Error(t, New(cfg, tmpl, promslog.NewNopLogger()).Notify(ctx, a).Err())
+			require.Equal(t, 1, entries)
+			select {
+			case dot := <-committed:
+				require.Equal(t, permit, dot)
+			case <-time.After(5 * time.Second):
+				t.Fatal("SMTP session did not terminate")
+			}
 		})
 	}
 }

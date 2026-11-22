@@ -122,6 +122,9 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 	if err != nil {
 		return notify.Unrecoverable(err, notify.DefaultReason)
 	}
+	if !notify.PreparedHTTPDestination(ctx, n.client, url, req.Channel) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
 	err = n.sanitizeRequest(ctx, req)
 	if err != nil {
 		return notify.Unrecoverable(err, notify.DefaultReason)

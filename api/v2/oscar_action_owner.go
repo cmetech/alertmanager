@@ -6,6 +6,8 @@ package v2
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,9 +26,11 @@ import (
 	"github.com/prometheus/alertmanager/alert"
 )
 
-const defaultActionAuthority = "64171238-3cc5-448e-bd12-7502a062ec63"
-const maxActionEpisodes = 4096
-const maxTransitions = 16
+const (
+	defaultActionAuthority = "64171238-3cc5-448e-bd12-7502a062ec63"
+	maxActionEpisodes      = 4096
+	maxTransitions         = 16
+)
 
 var nativeFingerprint = regexp.MustCompile("^[0-9a-f]{16}$")
 
@@ -168,6 +172,7 @@ type episodeSlot struct {
 	floorWrite   *pendingFloor
 }
 type nativeActionOwner struct {
+	recipientKey          []byte
 	readSource            func(string, string, func(*alert.Alert))
 	lockManaged           func(string) (func(), error)
 	verifyManaged         func(context.Context, *alert.Alert, string) error
@@ -200,15 +205,18 @@ func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *na
 		untracked: make(map[string]uint8), byKey: map[string]*episodeSlot{}, byID: map[string]*episodeSlot{}, slots: make(chan struct{}, 32),
 	}
 }
+
 func variantOf(a *alert.Alert) alert.NativeVariant {
 	return alert.NativeVariant{Fingerprint: a.Fingerprint().String(), StartsAt: a.StartsAt.UTC().Format(time.RFC3339Nano)}
 }
+
 func sourceKey(owner, fp string) string {
 	if owner != "" {
 		return "m/" + owner
 	}
 	return "n/" + fp
 }
+
 func (o *nativeActionOwner) slot(key string, create bool) *episodeSlot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -222,6 +230,7 @@ func (o *nativeActionOwner) slot(key string, create bool) *episodeSlot {
 	}
 	return s
 }
+
 func sameVariant(x, y alert.NativeVariant) bool {
 	if x.Fingerprint != y.Fingerprint {
 		return false
@@ -230,6 +239,7 @@ func sameVariant(x, y alert.NativeVariant) bool {
 	b, f := time.Parse(time.RFC3339Nano, y.StartsAt)
 	return e == nil && f == nil && a.Equal(b)
 }
+
 func laterOrdinaryVariant(current, previous alert.NativeVariant) bool {
 	if current.Fingerprint != previous.Fingerprint {
 		return false
@@ -286,12 +296,14 @@ func (o *nativeActionOwner) observe(owner string, source *alert.Alert, closed bo
 	}
 	s.pending = append(s.pending, event)
 }
+
 func (o *nativeActionOwner) ready() bool {
 	o.mu.Lock()
 	ready := o.recovered && o.lease.ExpiresAt.After(time.Now())
 	o.mu.Unlock()
 	return ready && o.dispatch != nil && o.dispatch.Version() == 1 && (o.callbackReady == nil || o.callbackReady())
 }
+
 func (o *nativeActionOwner) read(ctx context.Context, cmd string, p map[string]any, out any) error {
 	p["authority_id"] = o.authority
 	return o.rpc.call(ctx, cmd, p, out)
@@ -308,12 +320,14 @@ func (o *nativeActionOwner) withEpoch(ctx context.Context) context.Context {
 	o.mu.Unlock()
 	return context.WithValue(ctx, actionEpochKey{}, epoch)
 }
+
 func (o *nativeActionOwner) live(ctx context.Context) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	epoch, _ := ctx.Value(actionEpochKey{}).(uint64)
 	return epoch != 0 && o.recovered && epoch == o.lease.Epoch && time.Now().Before(o.lease.ExpiresAt)
 }
+
 func (o *nativeActionOwner) write(ctx context.Context, cmd string, p map[string]any, out any) error {
 	if ctx.Err() != nil {
 		return unavailable
@@ -336,6 +350,7 @@ func (o *nativeActionOwner) write(ctx context.Context, cmd string, p map[string]
 	}
 	return nil
 }
+
 func (o *nativeActionOwner) projectionKey(p EpisodeProjection) (string, error) {
 	if !validRef(p.EpisodeRef) || p.EpisodeRef.AuthorityID != o.authority || (p.State != "firing" && p.State != "resolved") || p.LifecycleSeq == 0 || (firingRanks[p.SourceSeverity] == 0 && !(p.State == "resolved" && p.SourceSeverity == "cleared")) || p.Floor != "" && firingRanks[p.Floor] == 0 || !nativeFingerprint.MatchString(p.NativeVariant.Fingerprint) {
 		return "", unavailable
@@ -419,6 +434,7 @@ func (o *nativeActionOwner) restoreEpisode(p EpisodeProjection) error {
 	o.mu.Unlock()
 	return nil
 }
+
 func sourceSeverity(a *alert.Alert, state string) string {
 	sev := strings.ToLower(string(a.Labels["severity"]))
 	if strings.TrimSpace(sev) == "" {
@@ -429,6 +445,7 @@ func sourceSeverity(a *alert.Alert, state string) string {
 	}
 	return sev
 }
+
 func (o *nativeActionOwner) nextUpdate(prev EpisodeProjection, e actionEvent) (episodeUpdate, error) {
 	a := e.source
 	u := prev.episodeUpdate
@@ -831,11 +848,13 @@ func (o *nativeActionOwner) flush(ctx context.Context, s *episodeSlot) error {
 	}
 	return unavailable
 }
+
 func (s *episodeSlot) current(p EpisodeProjection, source *alert.Alert, active bool) error {
 	s.local.Lock()
 	defer s.local.Unlock()
 	return s.currentLocked(p, source, active)
 }
+
 func (s *episodeSlot) currentLocked(p EpisodeProjection, source *alert.Alert, active bool) error {
 	if s.detached || s.overflow || s.ambiguous {
 		return reconcile
@@ -900,6 +919,7 @@ func (o *nativeActionOwner) projectSource(ctx context.Context, source *alert.Ale
 	}
 	return p, s.current(p, source, false)
 }
+
 func (o *nativeActionOwner) verifySource(ctx context.Context, source *alert.Alert, state string) error {
 	if source == nil {
 		return unverified
@@ -921,11 +941,13 @@ func (o *nativeActionOwner) intent(ctx context.Context, id string) (*actionInten
 	}
 	return i, err
 }
+
 func (o *nativeActionOwner) resolveIntent(ctx context.Context, id string) (*actionIntent, error) {
 	lookup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
 	return o.intent(lookup, id)
 }
+
 func (o *nativeActionOwner) publish(ctx context.Context, s *episodeSlot, p EpisodeProjection) error {
 	source := s.latest()
 	err := s.current(p, source, false)
@@ -947,6 +969,7 @@ func (o *nativeActionOwner) publish(ctx context.Context, s *episodeSlot, p Episo
 	s.needsPublish = err != nil
 	return err
 }
+
 func (o *nativeActionOwner) Lookup(ctx context.Context, id string) (ActionResultV1, error) {
 	var r *ActionResultV1
 	if !managedUUID.MatchString(id) {
@@ -960,6 +983,7 @@ func (o *nativeActionOwner) Lookup(ctx context.Context, id string) (ActionResult
 	}
 	return *r, nil
 }
+
 func (o *nativeActionOwner) episode(ref EpisodeRef) (*episodeSlot, error) {
 	if !validRef(ref) || ref.AuthorityID != o.authority {
 		return nil, mismatch
@@ -972,6 +996,7 @@ func (o *nativeActionOwner) episode(ref EpisodeRef) (*episodeSlot, error) {
 	}
 	return s, nil
 }
+
 func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (ActionResultV1, error) {
 	ctx = o.withEpoch(ctx)
 	var r ActionResultV1
@@ -1231,6 +1256,7 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	}
 	return r, s.current(p, source, true)
 }
+
 func equalTargets(a, b []DispatchTarget) bool {
 	if len(a) != len(b) {
 		return false
@@ -1246,6 +1272,7 @@ func equalTargets(a, b []DispatchTarget) bool {
 	}
 	return slices.Equal(encode(a), encode(b))
 }
+
 func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) ([]Eligibility, error) {
 	ctx = o.withEpoch(ctx)
 	if !o.ready() || len(refs) > 100 {
@@ -1348,6 +1375,7 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 		return errors.New("invalid native action namespace")
 	}
 	o := newNativeActionOwner(c.AuthorityID, actionClient{client}, c.Dispatch)
+	o.recipientKey = recipientBindingKey(client.token, c.AuthorityID)
 	api.actionOwner = o
 	o.callbackReady = func() bool { return api.callbacksReadyFor(client, true) }
 	ready := o.ready
@@ -1388,4 +1416,10 @@ func (api *API) actionView(source *alert.Alert) *alert.Alert {
 		}
 	}
 	return source
+}
+
+func recipientBindingKey(storeCredential, authority string) []byte {
+	mac := hmac.New(sha256.New, []byte(storeCredential))
+	mac.Write([]byte("oscar-native-recipient-key-v1/" + authority))
+	return mac.Sum(nil)
 }

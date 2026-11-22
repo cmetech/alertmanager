@@ -18,11 +18,15 @@ import (
 	"github.com/prometheus/alertmanager/alert"
 )
 
+// RecipientKey provides the authority-derived key for opaque recipient bindings.
+func (o *nativeActionOwner) RecipientKey() []byte { return slices.Clone(o.recipientKey) }
+
 // Entry is an opaque journal-issued provider permit. Its issuing journal retains settlement authority.
 type Entry interface {
 	ForMember(*alert.Alert) bool
 	Valid() bool
 	LocalValid() bool
+	LogicalActionID() string
 }
 
 type claimedEntry struct {
@@ -36,6 +40,13 @@ type claimedEntry struct {
 	expires                       time.Time
 	valid                         func() bool
 	ready                         func() bool
+}
+
+func (e claimedEntry) LogicalActionID() string {
+	if e.logicalID == nil {
+		return ""
+	}
+	return *e.logicalID
 }
 
 // ForSource binds the provider invocation to the precise pointer checked at claim.
@@ -358,6 +369,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	}
 	return e, nil
 }
+
 func (o *nativeActionOwner) Settle(ctx context.Context, permit Entry, outcome, evidence string) (ActionResultV1, error) {
 	var r ActionResultV1
 	e, ok := permit.(claimedEntry)
@@ -371,6 +383,7 @@ func (o *nativeActionOwner) Settle(ctx context.Context, permit Entry, outcome, e
 // OrdinaryPass is a local entry fence for a verified untracked provider member.
 type OrdinaryPass struct {
 	Enter func() bool
+	Valid func() bool
 	// Finish releases conclusive entries. Unknown acceptance keeps the source fenced.
 	Finish func(conclusive bool)
 }
@@ -448,6 +461,15 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 			}
 		})
 		return ok
+	}
+	pass.Valid = func() bool {
+		valid := false
+		o.readSource(owner, fp, func(current *alert.Alert) {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			valid = entered && current == source && o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && o.byKey[key] == nil && o.untracked[key] == 1
+		})
+		return valid
 	}
 	pass.Finish = func(conclusive bool) {
 		o.mu.Lock()

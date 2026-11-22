@@ -38,11 +38,12 @@ const (
 
 // Notifier implements a Notifier for incident.io.
 type Notifier struct {
-	conf    *IncidentioConfig
-	tmpl    *template.Template
-	logger  *slog.Logger
-	client  *http.Client
-	retrier *notify.Retrier
+	conf        *IncidentioConfig
+	tmpl        *template.Template
+	logger      *slog.Logger
+	client      *http.Client
+	retrier     *notify.Retrier
+	sourceToken string
 }
 
 // New returns a new incident.io notifier.
@@ -78,10 +79,11 @@ func New(conf *IncidentioConfig, t *template.Template, l *slog.Logger, httpOpts 
 	}
 
 	return &Notifier{
-		conf:   conf,
-		tmpl:   t,
-		logger: l,
-		client: client,
+		conf:        conf,
+		sourceToken: token,
+		tmpl:        t,
+		logger:      l,
+		client:      client,
 		// Always retry on 429 (rate limiting) and 5xx response codes.
 		retrier: &notify.Retrier{
 			RetryCodes:        []int{http.StatusTooManyRequests},
@@ -125,6 +127,7 @@ func (n *Notifier) encodeMessage(msg *Message) (bytes.Buffer, error) {
 	// Drop all but the first alert in the message. For most use cases, a single
 	// alert will be created in incident.io for the group, so including more than
 	// one alert in that group is useful but non-essential.
+	msg.TruncatedAlerts += uint64(len(msg.Alerts) - 1)
 	msg.Alerts = msg.Alerts[:1]
 
 	// Re-encode after annotation truncation
@@ -155,6 +158,9 @@ func (n *Notifier) encodeMessage(msg *Message) (bytes.Buffer, error) {
 // Notify implements the Notifier interface.
 func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.NotifyVerdict {
 	alerts, numTruncated := truncateAlerts(n.conf.MaxAlerts, alerts)
+	if e := notify.CurrentProviderEntry(ctx); e != nil {
+		numTruncated += e.Truncated
+	}
 	data := notify.GetTemplateData(ctx, n.tmpl, alerts, n.logger)
 
 	groupKey, err := notify.ExtractGroupKey(ctx)
@@ -203,6 +209,12 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		url = strings.TrimSpace(string(content))
 	}
 
+	if !notify.PreparedHTTPDestination(ctx, n.client, url, n.sourceToken) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
+	if e := notify.CurrentProviderEntry(ctx); e != nil && e.Select != nil {
+		e.Select(alerts[:len(msg.Alerts)])
+	}
 	if n.conf.Timeout > 0 {
 		ctxWithTimeout, cancel := context.WithTimeoutCause(ctx, n.conf.Timeout, fmt.Errorf("configured incident.io timeout reached (%s)", n.conf.Timeout))
 		defer cancel()

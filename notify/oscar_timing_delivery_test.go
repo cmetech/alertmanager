@@ -78,14 +78,24 @@ func TestOscarActionSelectedMemberPreservesSiblingAndClock(t *testing.T) {
 	a := alert.New(model.Alert{Labels: model.LabelSet{"member": "A"}}, time.Now(), false)
 	b := alert.New(model.Alert{Labels: model.LabelSet{"member": "B"}}, time.Now(), false)
 	hashes := []uint64{HashAlert(a), HashAlert(b)}
-	require.NoError(t, log.Log(recv, "group", hashes, nil, nil, nil, time.Hour))
+	store := nflog.NewStore(nil)
+	store.SetStr("channelId", "ordinary")
+	require.NoError(t, log.Log(recv, "group", hashes, nil, nil, store, time.Hour))
 	baseline := log.LookupTiming("group", recv, hashes, 2)
 	selected := WithSelectedAction(WithRepeatInterval(WithGroupKey(context.Background(), "group"), time.Hour),
-		SelectedAction{Source: a, Receiver: "team", Integration: "webhook", Index: 0,
+		SelectedAction{
+			Source: a, Receiver: "team", Integration: "webhook", Index: 0,
 			Invoke: func(ctx context.Context, integration *Integration, member *alert.Alert) NotifyVerdict {
 				require.Same(t, a, member.ProviderSource())
+				detached, ok := NflogStore(ctx)
+				require.True(t, ok)
+				id, ok := detached.GetStr("channelId")
+				require.True(t, ok)
+				require.Equal(t, "ordinary", id)
+				detached.SetStr("channelId", "selected")
 				return integration.Notify(ctx, member)
-			}})
+			},
+		})
 	var calls int
 	stage := func(index int) MultiStage {
 		integration := NewIntegration(notifierFunc(func(_ context.Context, members ...*alert.Alert) NotifyVerdict {
@@ -108,4 +118,18 @@ func TestOscarActionSelectedMemberPreservesSiblingAndClock(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, calls)
 	require.Equal(t, baseline, log.LookupTiming("group", recv, hashes, 2))
+	entries, err := log.Query(nflog.QReceiver(recv), nflog.QGroupKey("group"))
+	require.NoError(t, err)
+	id, ok := nflog.NewStore(entries[0]).GetStr("channelId")
+	require.True(t, ok)
+	require.Equal(t, "ordinary", id)
+}
+
+func TestOscarActionOrdinaryMissingLogCallback(t *testing.T) {
+	t.Parallel()
+	ctx := WithResolvedAlerts(WithFiringAlerts(WithGroupKey(t.Context(), "group"), []uint64{10}), nil)
+	ctx = context.WithValue(ctx, ordinaryBatchKey{}, OrdinaryBatch{})
+	s := NewSetNotifiesStage(nil, nil, featurecontrol.NoopFlags{})
+	_, _, err := s.Exec(ctx, promslog.NewNopLogger())
+	require.NoError(t, err)
 }

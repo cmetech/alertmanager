@@ -49,7 +49,7 @@ func NewClientWithTracing(cfg commoncfg.HTTPClientConfig, name string, httpOpts 
 	if err != nil {
 		return nil, err
 	}
-	client.Transport = tracing.Transport(client.Transport)
+	client.Transport = newProviderTransport(client.Transport, tracing.Transport(client.Transport), cfg, name, httpOpts)
 	return client, nil
 }
 
@@ -92,6 +92,9 @@ func request(ctx context.Context, client *http.Client, method, url, bodyType str
 		req.Header.Set("Content-Type", bodyType)
 	}
 
+	if method == http.MethodPost {
+		return DoMutation(client, req.WithContext(ctx))
+	}
 	return client.Do(req.WithContext(ctx))
 }
 

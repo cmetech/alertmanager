@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	commoncfg "github.com/prometheus/common/config"
@@ -41,6 +42,8 @@ type Notifier struct {
 	logger *slog.Logger
 	client *http.Client
 
+	mu            sync.Mutex
+	principal     string
 	accessToken   string
 	accessTokenAt time.Time
 }
@@ -95,43 +98,6 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 	var tmplErr error
 	tmpl := notify.TmplText(n.tmpl, data, &tmplErr)
 
-	// Refresh AccessToken over 2 hours
-	if n.accessToken == "" || time.Since(n.accessTokenAt) > 2*time.Hour {
-		parameters := url.Values{}
-		apiSecret, err := n.getApiSecret()
-		if err != nil {
-			return notify.Unrecoverable(err, notify.DefaultReason)
-		}
-		parameters.Add("corpsecret", tmpl(apiSecret))
-		parameters.Add("corpid", tmpl(string(n.conf.CorpID)))
-		if tmplErr != nil {
-			return notify.Unrecoverable(fmt.Errorf("templating error: %w", tmplErr), notify.TemplateErrorReason)
-		}
-
-		u := n.conf.APIURL.Copy()
-		u.Path += "gettoken"
-		u.RawQuery = parameters.Encode()
-
-		resp, err := notify.Get(ctx, n.client, u.String())
-		if err != nil {
-			return notify.Retry(0, notify.RedactURL(err), notify.DefaultReason)
-		}
-		defer notify.Drain(resp)
-
-		var wechatToken token
-		if err := json.NewDecoder(resp.Body).Decode(&wechatToken); err != nil {
-			return notify.Unrecoverable(err, notify.DefaultReason)
-		}
-
-		if wechatToken.AccessToken == "" {
-			return notify.Unrecoverable(fmt.Errorf("invalid APISecret for CorpID: %s", n.conf.CorpID), notify.DefaultReason)
-		}
-
-		// Cache accessToken
-		n.accessToken = wechatToken.AccessToken
-		n.accessTokenAt = time.Now()
-	}
-
 	msg := &weChatMessage{
 		ToUser:  tmpl(n.conf.ToUser),
 		ToParty: tmpl(n.conf.ToParty),
@@ -154,6 +120,21 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		return notify.Unrecoverable(fmt.Errorf("templating error: %w", tmplErr), notify.TemplateErrorReason)
 	}
 
+	apiSecret, err := n.getApiSecret()
+	if err != nil {
+		return notify.Unrecoverable(err, notify.FileReadErrorReason)
+	}
+	parameters := url.Values{"corpsecret": {tmpl(apiSecret)}, "corpid": {tmpl(string(n.conf.CorpID))}}
+	if tmplErr != nil {
+		return notify.Unrecoverable(tmplErr, notify.TemplateErrorReason)
+	}
+	if !notify.PreparedHTTPDestination(ctx, n.client, n.conf.APIURL.String(), parameters.Get("corpid"), parameters.Get("corpsecret"), msg.AgentID, msg.ToUser, msg.ToParty, msg.Totag) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
+	accessToken, verdict := n.token(ctx, parameters)
+	if verdict.Err() != nil {
+		return verdict
+	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(msg); err != nil {
 		return notify.Unrecoverable(err, notify.DefaultReason)
@@ -162,7 +143,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 	postMessageURL := n.conf.APIURL.Copy()
 	postMessageURL.Path += "message/send"
 	q := postMessageURL.Query()
-	q.Set("access_token", n.accessToken)
+	q.Set("access_token", accessToken)
 	postMessageURL.RawQuery = q.Encode()
 
 	resp, err := notify.PostJSON(ctx, n.client, postMessageURL.String(), &buf)
@@ -179,7 +160,6 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 	if err != nil {
 		return notify.Retry(0, err, notify.DefaultReason)
 	}
-	logger.Debug(string(body))
 
 	var weResp weChatResponse
 	if err := json.Unmarshal(body, &weResp); err != nil {
@@ -193,7 +173,11 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 
 	// AccessToken is expired
 	if weResp.Code == 42001 {
-		n.accessToken = ""
+		n.mu.Lock()
+		if n.accessToken == accessToken {
+			n.accessToken = ""
+		}
+		n.mu.Unlock()
 		return notify.Retry(0, errors.New(weResp.Error), notify.DefaultReason)
 	}
 
@@ -209,4 +193,38 @@ func (n *Notifier) getApiSecret() (string, error) {
 		return strings.TrimSpace(string(content)), nil
 	}
 	return string(n.conf.APISecret), nil
+}
+
+func (n *Notifier) token(ctx context.Context, parameters url.Values) (string, notify.NotifyVerdict) {
+	principal := parameters.Encode()
+	n.mu.Lock()
+	if n.principal == principal && n.accessToken != "" && time.Since(n.accessTokenAt) <= 2*time.Hour {
+		token := n.accessToken
+		n.mu.Unlock()
+		return token, notify.Success()
+	}
+	n.mu.Unlock()
+	u := n.conf.APIURL.Copy()
+	u.Path += "gettoken"
+	u.RawQuery = parameters.Encode()
+
+	resp, err := notify.Get(ctx, n.client, u.String())
+	if err != nil {
+		return "", notify.Retry(0, notify.RedactURL(err), notify.DefaultReason)
+	}
+	defer notify.Drain(resp)
+
+	var wechatToken token
+	if err := json.NewDecoder(resp.Body).Decode(&wechatToken); err != nil {
+		return "", notify.Unrecoverable(err, notify.DefaultReason)
+	}
+
+	if wechatToken.AccessToken == "" {
+		return "", notify.Unrecoverable(errors.New("invalid WeChat credentials"), notify.DefaultReason)
+	}
+
+	n.mu.Lock()
+	n.accessToken, n.accessTokenAt, n.principal = wechatToken.AccessToken, time.Now(), principal
+	n.mu.Unlock()
+	return wechatToken.AccessToken, notify.Success()
 }

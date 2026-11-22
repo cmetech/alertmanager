@@ -309,6 +309,7 @@ type fixturePermit struct{ source *alert.Alert }
 
 func (e fixturePermit) ForMember(m *alert.Alert) bool { return m.ProviderSource() == e.source }
 func (fixturePermit) Valid() bool                     { return true }
+func (fixturePermit) LogicalActionID() string         { return "" }
 func (fixturePermit) LocalValid() bool                { return true }
 
 type terminalFixtureJournal struct {
@@ -321,29 +322,34 @@ type terminalFixtureJournal struct {
 	reserved, claimed, settled, events []string
 }
 
+func (*terminalFixtureJournal) RecipientKey() []byte { return []byte(strings.Repeat("r", 32)) }
 func (j *terminalFixtureJournal) InspectOrdinary(_ context.Context, s *alert.Alert) (*v2.EpisodeProjection, *v2.OrdinaryPass, error) {
 	if j.first {
 		return nil, &v2.OrdinaryPass{}, nil
 	}
 	p, ok := j.projections[s]
 	if !ok {
-		return nil, &v2.OrdinaryPass{Enter: func() bool { return true }, Finish: func(bool) {}}, nil
+		return nil, &v2.OrdinaryPass{Enter: func() bool { return true }, Valid: func() bool { return true }, Finish: func(bool) {}}, nil
 	}
 	return &p, nil, nil
 }
+
 func (j *terminalFixtureJournal) Project(_ context.Context, s *alert.Alert) (v2.EpisodeProjection, error) {
 	j.first = false
 	j.events = append(j.events, "enroll")
 	return j.projections[s], nil
 }
+
 func (j *terminalFixtureJournal) reservation(id string, ref v2.EpisodeRef, t v2.DispatchTarget) v2.ActionResultV1 {
 	j.reserved = append(j.reserved, ref.EpisodeID)
 	j.events = append(j.events, "reserve")
 	return v2.ActionResultV1{OperationID: id, EpisodeRef: ref, Targets: []v2.TargetResult{{Target: t, TargetKey: ref.EpisodeID, State: j.state}}}
 }
+
 func (j *terminalFixtureJournal) ReserveTerminal(_ context.Context, m *alert.Alert, p v2.EpisodeProjection, t v2.DispatchTarget) (v2.ActionResultV1, error) {
 	return j.reservation(p.EpisodeRef.EpisodeID, p.EpisodeRef, t), nil
 }
+
 func (j *terminalFixtureJournal) ReserveOrdinary(_ context.Context, id string, ref v2.EpisodeRef, t v2.DispatchTarget, _ bool) (v2.ActionResultV1, error) {
 	if ref.EpisodeID == j.covered {
 		j.coverageChecks++
@@ -351,6 +357,7 @@ func (j *terminalFixtureJournal) ReserveOrdinary(_ context.Context, id string, r
 	}
 	return j.reservation(id, ref, t), nil
 }
+
 func (j *terminalFixtureJournal) Claim(_ context.Context, _, key string) (v2.Entry, error) {
 	j.claimed = append(j.claimed, key)
 	j.events = append(j.events, "claim")
@@ -361,6 +368,7 @@ func (j *terminalFixtureJournal) Claim(_ context.Context, _, key string) (v2.Ent
 	}
 	return nil, actionHeld
 }
+
 func (j *terminalFixtureJournal) Delivery(_ context.Context, s *alert.Alert, _, id string, e v2.Entry) (alert.NativeDeliveryV1, error) {
 	if !e.ForMember(s) {
 		return alert.NativeDeliveryV1{}, actionHeld
@@ -369,6 +377,7 @@ func (j *terminalFixtureJournal) Delivery(_ context.Context, s *alert.Alert, _, 
 	j.events = append(j.events, "stamp")
 	return alert.NativeDeliveryV1{Version: 1, EpisodeRef: p.EpisodeRef, NativeVariant: p.NativeVariant, LifecycleSeq: p.LifecycleSeq, State: p.State, ActiveSince: p.ActiveSince, SourceSeverity: p.SourceSeverity, EffectiveSeverity: p.EffectiveSeverity(), DeliveryID: id, TargetScope: []alert.TargetScopeEntry{}}, nil
 }
+
 func (j *terminalFixtureJournal) Settle(_ context.Context, e v2.Entry, outcome, _ string) (v2.ActionResultV1, error) {
 	j.settled = append(j.settled, outcome)
 	return v2.ActionResultV1{}, nil
@@ -418,7 +427,7 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 			t.Cleanup(func() { _ = r.stop() })
 			key := []byte(strings.Repeat("k", 32))
 			file := filepath.Join(t.TempDir(), "callback")
-			require.NoError(t, os.WriteFile(file, key, 0600))
+			require.NoError(t, os.WriteFile(file, key, 0o600))
 			url, options := sink.URL, ""
 			if tc.canonical {
 				url = "http://alertmanager-middleware:9400" + alert.NativeCallbackPath
@@ -585,8 +594,8 @@ func TestOscarActionReloadChecksProposedCanonicalConfig(t *testing.T) {
 	key := []byte(strings.Repeat("k", 32))
 	file := filepath.Join(dir, "callback")
 	bad := filepath.Join(dir, "wrong")
-	require.NoError(t, os.WriteFile(file, key, 0600))
-	require.NoError(t, os.WriteFile(bad, []byte(strings.Repeat("x", 32)), 0600))
+	require.NoError(t, os.WriteFile(file, key, 0o600))
+	require.NoError(t, os.WriteFile(bad, []byte(strings.Repeat("x", 32)), 0o600))
 	a := newNativeActions(nil, key, r.logger)
 	a.version = 1
 	a.scheme = "http"
@@ -609,4 +618,264 @@ func TestOscarActionReloadChecksProposedCanonicalConfig(t *testing.T) {
 		require.Same(t, old, a.snapshot())
 		require.Same(t, dispatcher, r.dispatcher.Load())
 	}
+}
+
+func TestOscarActionIncidentContentTail(t *testing.T) {
+	t.Parallel()
+	seen := make(chan []string, 5)
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var data struct {
+			Alerts []struct{ Labels map[string]string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		var hosts []string
+		for _, m := range data.Alerts {
+			hosts = append(hosts, m.Labels["host"])
+		}
+		seen <- hosts
+	}))
+	defer sink.Close()
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\nreceivers:\n- name: team\n  incidentio_configs:\n  - url: %s\n    alert_source_token: secret\n", sink.URL))
+	require.NoError(t, err)
+	a := newNativeActions(nil, nil, r.logger)
+	a.version = 1
+	r.actions = a
+	j := &terminalFixtureJournal{}
+	require.NoError(t, a.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	g := a.snapshot()
+	require.NotNil(t, g)
+	now := time.Now()
+	var members []*alert.Alert
+	for _, host := range []string{"A", "B"} {
+		s := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "host": model.LabelValue(host)}, Annotations: model.LabelSet{"message": model.LabelValue(host + strings.Repeat("x", 300*1024))}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
+		members = append(members, s.NotificationCopy(now))
+	}
+	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, members[0])
+	ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, recv, kind string, idx int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
+		return a.prepare(c, g, recv, kind, idx, ms, due)
+	})
+	for range 3 {
+		_, _, err := g.pipeline.Exec(ctx, r.logger, members...)
+		require.NoError(t, err)
+	}
+	require.Len(t, seen, 2)
+	require.Equal(t, []string{"A"}, <-seen)
+	require.Equal(t, []string{"B"}, <-seen)
+	require.Empty(t, j.claimed)
+}
+
+func TestOscarActionRegisteredRecipients(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load(`route:
+  receiver: team
+global:
+  smtp_smarthost: localhost:25
+  smtp_from: sender@example.org
+receivers:
+- name: team
+  webhook_configs: [{url: "http://example.org/{{ .CommonLabels.host }}"}]
+  discord_configs: [{webhook_url: "https://example.org"}]
+  msteams_configs: [{webhook_url: "https://example.org"}]
+  msteamsv2_configs: [{webhook_url: "https://example.org"}]
+  mattermost_configs: [{webhook_url: "https://example.org"}]
+  email_configs: [{to: team@example.org}]
+  webex_configs: [{room_id: room, http_config: {authorization: {credentials: value}}}]
+  slack_configs: [{api_url: "https://example.org", channel: "#team"}]
+  rocketchat_configs: [{api_url: "https://example.org", token: token, token_id: account}]
+  jira_configs: [{api_url: "https://example.org", project: OPS, issue_type: Incident}]
+  incidentio_configs: [{url: "https://example.org", alert_source_token: secret}]
+  pagerduty_configs: [{routing_key: key}]
+  victorops_configs: [{routing_key: route, api_key: key}]
+  opsgenie_configs: [{api_key: key}]
+  pushover_configs: [{token: token, user_key: user}]
+  telegram_configs: [{chat_id: 123, bot_token: token}]
+  wechat_configs: [{corp_id: corp, api_secret: secret, agent_id: agent}]
+  sns_configs: [{topic_arn: "arn:aws:sns:us-east-1:123456789012:example", sigv4: {region: us-east-1, access_key: test, secret_key: test}}]
+`)
+	require.NoError(t, err)
+	tmpl, err := template.FromGlobs(nil)
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	tmpl.ExternalURL = r.externalURL
+	integrations, err := receiver.BuildReceiverIntegrations(cfg.Receivers[0], tmpl, r.logger, commoncfg.WithDialContextFunc(func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("planning attempted provider I/O")
+	}))
+	require.NoError(t, err)
+	targets, supported, err := actionDestinations(cfg, map[string][]notify.Integration{"team": integrations})
+	require.NoError(t, err)
+	require.True(t, supported)
+	require.Len(t, targets["team"], 18)
+	now := time.Now()
+	m := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Alarm", "host": "A"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	ctx := notify.WithNotificationReason(notify.WithReceiverName(notify.WithGroupLabels(notify.WithGroupKey(t.Context(), "group"), model.LabelSet{}), "team"), notify.ReasonUnknown)
+	for _, target := range targets["team"] {
+		t.Run(target.name, func(t *testing.T) {
+			require.NotNil(t, target.prepared)
+			digest, err := target.prepared.PreparedDigest(ctx, []byte(strings.Repeat("k", 32)), target.digest, []*alert.Alert{m})
+			require.NoError(t, err)
+			require.Len(t, digest, 64)
+		})
+	}
+}
+
+type transportFixturePermit struct {
+	fixturePermit
+	valid func() bool
+}
+
+func (p transportFixturePermit) Valid() bool { return p.valid() }
+
+type transportFixtureJournal struct {
+	terminalFixtureJournal
+	permit transportFixturePermit
+}
+
+func (j *transportFixtureJournal) Claim(_ context.Context, _, key string) (v2.Entry, error) {
+	j.claimed = append(j.claimed, key)
+	return j.permit, nil
+}
+
+func TestOscarActionSelectedOpsgenieLaterMutationFenced(t *testing.T) {
+	t.Parallel()
+	received := make(chan string, 3)
+	valid := make(chan struct{})
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Message string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		received <- body.Message
+		select {
+		case <-valid:
+		default:
+			close(valid)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer sink.Close()
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\nreceivers:\n- name: team\n  opsgenie_configs:\n  - api_url: %s\n    api_key: key\n    update_alerts: true\n    message: '{{ range .Alerts }}{{ .Labels.host }}{{ end }}'\n", sink.URL))
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	now := time.Now()
+	member := func(host string) *alert.Alert {
+		return alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Alarm", "severity": "major", "host": model.LabelValue(host)}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	}
+	a, b := member("A"), member("B")
+	j := &transportFixtureJournal{permit: transportFixturePermit{fixturePermit{a}, func() bool {
+		select {
+		case <-valid:
+			return false
+		default:
+			return true
+		}
+	}}}
+	actions := newNativeActions(nil, []byte(strings.Repeat("k", 32)), r.logger)
+	actions.version = 1
+	r.actions = actions
+	require.NoError(t, actions.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	g := actions.snapshot()
+	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, a)
+	key, _ := notify.GroupKey(ctx)
+	recv := &nflogpb.Receiver{GroupName: "team", Integration: "opsgenie"}
+	hashes := []uint64{notify.HashAlert(a), notify.HashAlert(b)}
+	require.NoError(t, r.notificationLog.Log(recv, key, hashes, nil, nil, nil, time.Hour))
+	log := r.notificationLog.(*nflog.Log)
+	before := log.LookupTiming(key, recv, hashes, 2)
+	var p v2.EpisodeProjection
+	start := a.StartsAt.UTC().Format(time.RFC3339Nano)
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"active_since":%q,"state":"firing","source_severity":"major","lifecycle_seq":1}`, a.Fingerprint().String(), start, start)), &p))
+	contacts, err := g.contacts(ctx, a, p, nil)
+	require.NoError(t, err)
+	require.Len(t, contacts, 1)
+	c := contacts[0]
+	sel := notify.SelectedAction{Source: a, Receiver: "team", Integration: "opsgenie", Invoke: func(ctx context.Context, i *notify.Integration, m *alert.Alert) notify.NotifyVerdict {
+		v, _ := actions.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: "A", Target: c.DispatchTarget}, contact: c, p: p}}, 0)
+		return v
+	}}
+	_, _, err = g.pipeline.Exec(notify.WithSelectedAction(ctx, sel), r.logger, a.NotificationCopy(now))
+	require.Error(t, err)
+	require.Len(t, received, 1)
+	require.Equal(t, "A", <-received)
+	require.Equal(t, []string{"A"}, j.claimed)
+	require.Equal(t, []string{"unknown"}, j.settled)
+	require.Equal(t, before, log.LookupTiming(key, recv, hashes, 2))
+}
+
+func TestOscarActionURLFileChangedDuringFinalClaimCheck(t *testing.T) {
+	t.Parallel()
+	calls := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls <- struct{}{} }))
+	defer server.Close()
+	file := filepath.Join(t.TempDir(), "url")
+	require.NoError(t, os.WriteFile(file, []byte(server.URL+"/before"), 0o600))
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\nreceivers:\n- name: team\n  webhook_configs:\n  - url_file: %s\n", file))
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major", "host": "A"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	j := &transportFixtureJournal{permit: transportFixturePermit{fixturePermit{a}, func() bool { return os.WriteFile(file, []byte(server.URL+"/after"), 0o600) == nil }}}
+	actions := newNativeActions(nil, nil, r.logger)
+	actions.version = 1
+	r.actions = actions
+	require.NoError(t, actions.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	g := actions.snapshot()
+	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, a)
+	var p v2.EpisodeProjection
+	start := a.StartsAt.UTC().Format(time.RFC3339Nano)
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"active_since":%q,"state":"firing","source_severity":"major","lifecycle_seq":1}`, a.Fingerprint().String(), start, start)), &p))
+	contacts, err := g.contacts(ctx, a, p, nil)
+	require.NoError(t, err)
+	require.Len(t, contacts, 1)
+	c := contacts[0]
+	v, _ := actions.invoke(ctx, g, c.integration.prepared, []*alert.Alert{a.NotificationCopy(now)}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: "A", Target: c.DispatchTarget}, contact: c, p: p}}, 0)
+	require.Error(t, v.Err())
+	require.Empty(t, calls)
+	require.Equal(t, []string{"no_effect"}, j.settled)
+}
+
+func TestOscarActionTelegramDiagnosticPreservesPublishedFloor(t *testing.T) {
+	t.Parallel()
+	calls := make(chan struct{}, 1)
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls <- struct{}{} }))
+	defer sink.Close()
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\nreceivers:\n- name: team\n  telegram_configs:\n  - api_url: %s\n    bot_token: token\n    chat_id: 123\n    parse_mode: HTML\n    message: '{{ (index .Alerts 0).Annotations.body }}'\n", sink.URL))
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	now := time.Now()
+	s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, Annotations: model.LabelSet{"body": model.LabelValue(strings.Repeat("x", 5000))}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	var p v2.EpisodeProjection
+	start := s.StartsAt.UTC().Format(time.RFC3339Nano)
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"active_since":%q,"state":"firing","source_severity":"major","floor":"critical","severity_revision":1,"lifecycle_seq":1}`, s.Fingerprint().String(), start, start)), &p))
+	actions := newNativeActions(func(_, _ string, use func(*alert.Alert)) { use(s) }, nil, r.logger)
+	actions.version = 1
+	r.actions = actions
+	j := &terminalFixtureJournal{projections: map[*alert.Alert]v2.EpisodeProjection{s: p}}
+	require.NoError(t, actions.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	require.NoError(t, actions.PublishSource(t.Context(), p, s))
+	view := actions.ReadView(s)
+	require.Equal(t, model.LabelValue("critical"), view.Labels["severity"])
+	g := actions.snapshot()
+	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, view)
+	targets, err := g.contacts(ctx, s, p, nil)
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	c := targets[0]
+	v, delivered := actions.invoke(ctx, g, c.integration.prepared, []*alert.Alert{view.NotificationCopy(now)}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: p.EpisodeRef.EpisodeID, Target: c.DispatchTarget}, contact: c, p: p}}, 0)
+	require.Error(t, v.Err())
+	require.Equal(t, notify.EncodingErrorReason, v.Reason())
+	require.Empty(t, delivered)
+	require.Empty(t, calls)
+	require.Equal(t, []string{"no_effect"}, j.settled)
+	require.Equal(t, model.LabelValue("critical"), actions.ReadView(s).Labels["severity"])
 }

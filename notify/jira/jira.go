@@ -86,6 +86,37 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		method = http.MethodPost
 	)
 
+	project, err := tmplTextFunc(n.conf.Project)
+	if err != nil {
+		return notify.Unrecoverable(err, notify.TemplateErrorReason)
+	}
+	var routingFields map[string]any
+	if notify.CurrentProviderEntry(ctx) != nil {
+		routingFields = make(map[string]any)
+		for _, name := range []string{"project", "assignee", "reporter"} {
+			if field, ok := n.conf.Fields[name]; ok {
+				routingFields[name], err = template.DeepCopyWithTemplate(field, tmplTextFunc)
+				if err != nil {
+					return notify.Unrecoverable(err, notify.TemplateErrorReason)
+				}
+			}
+		}
+		encoded, err := json.Marshal(routingFields)
+		if err != nil {
+			return notify.Unrecoverable(err, notify.EncodingErrorReason)
+		}
+		if !notify.PreparedHTTPDestination(ctx, n.client, n.conf.APIURL.String(), project, key.Hash(), string(encoded)) {
+			return notify.Unrecoverable(notify.ErrDestination, notify.ConfigErrorReason)
+		}
+	}
+	// Search and issue creation must use the same rendered project.
+	render := tmplTextFunc
+	tmplTextFunc = func(value string) (string, error) {
+		if value == n.conf.Project {
+			return project, nil
+		}
+		return render(value)
+	}
 	existingIssue, shouldRetry, reason, err := n.searchExistingIssue(ctx, logger, key.Hash(), alerts.HasFiring(), tmplTextFunc)
 	if err != nil {
 		err = fmt.Errorf("failed to look up existing issues: %w", err)
@@ -98,6 +129,9 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 	if existingIssue == nil {
 		// Do not create new issues for resolved alerts
 		if alerts.Status() == model.AlertResolved {
+			if entry := notify.CurrentProviderEntry(ctx); entry != nil {
+				entry.NoSend = true
+			}
 			return notify.Success()
 		}
 
@@ -113,6 +147,9 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		return notify.Unrecoverable(err, notify.DefaultReason)
 	}
 
+	for name, value := range routingFields {
+		requestBody.Fields.Fields[name] = value
+	}
 	if method == http.MethodPut && requestBody.Fields != nil {
 		if !n.conf.Description.EnableUpdateValue() {
 			requestBody.Fields.Description = nil
@@ -263,9 +300,9 @@ func (n *Notifier) searchExistingIssue(ctx context.Context, logger *slog.Logger,
 
 	requestBody, searchPath := n.prepareSearchRequest(jql.String())
 
-	logger.Debug("search for recent issues", "jql", jql.String())
+	logger.Debug("search for recent issues")
 
-	responseBody, shouldRetry, reason, err := n.doAPIRequestFullPath(ctx, http.MethodPost, searchPath, requestBody)
+	responseBody, shouldRetry, reason, err := n.doAPIRequestFullPath(ctx, http.MethodPost, searchPath, requestBody, false)
 	if err != nil {
 		return nil, shouldRetry, reason, fmt.Errorf("HTTP request to JIRA API: %w", err)
 	}
@@ -383,17 +420,17 @@ func (n *Notifier) transitionIssue(ctx context.Context, logger *slog.Logger, i *
 	path := fmt.Sprintf("issue/%s/transitions", i.Key)
 
 	logger.Debug("transitions jira issue", "issue_key", i.Key, "transition", transition)
-	_, shouldRetry, reason, err = n.doAPIRequest(ctx, http.MethodPost, path, requestBody)
+	_, shouldRetry, reason, err = n.doAPIRequest(notify.WithMutationStep(ctx, 1), http.MethodPost, path, requestBody)
 
 	return shouldRetry, reason, err
 }
 
 func (n *Notifier) doAPIRequest(ctx context.Context, method, path string, requestBody any) ([]byte, bool, notify.Reason, error) {
 	url := n.conf.APIURL.JoinPath(path)
-	return n.doAPIRequestFullPath(ctx, method, url.String(), requestBody)
+	return n.doAPIRequestFullPath(ctx, method, url.String(), requestBody, method != http.MethodGet)
 }
 
-func (n *Notifier) doAPIRequestFullPath(ctx context.Context, method, path string, requestBody any) ([]byte, bool, notify.Reason, error) {
+func (n *Notifier) doAPIRequestFullPath(ctx context.Context, method, path string, requestBody any, mutation bool) ([]byte, bool, notify.Reason, error) {
 	var body io.Reader
 	if requestBody != nil {
 		var buf bytes.Buffer
@@ -412,7 +449,12 @@ func (n *Notifier) doAPIRequestFullPath(ctx context.Context, method, path string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Language", "en")
 
-	resp, err := n.client.Do(req)
+	var resp *http.Response
+	if mutation {
+		resp, err = notify.DoMutation(n.client, req)
+	} else {
+		resp, err = n.client.Do(req)
+	}
 	if err != nil {
 		return nil, false, notify.DefaultReason, err
 	}

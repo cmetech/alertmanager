@@ -148,6 +148,9 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		url = strings.TrimSpace(string(b))
 	}
 
+	if !notify.PreparedHTTPDestination(ctx, n.client, url) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
 	w := webhook{
 		Content:  content,
 		Username: n.conf.Username,

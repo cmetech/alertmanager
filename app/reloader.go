@@ -160,10 +160,21 @@ func (r *reloader) reload(conf *config.Config) error {
 	// errors.
 	var actionTargets map[string][]actionIntegration
 	var supported bool
+	var recipientKey []byte
 	if r.actions != nil && r.actions.canInstall() {
 		actionTargets, supported, err = actionDestinations(conf, receivers)
 		if err != nil {
 			return err
+		}
+		recipientKey = r.actions.bindingKey()
+		if len(recipientKey) < 32 {
+			for _, targets := range actionTargets {
+				for _, target := range targets {
+					if target.prepared != nil {
+						supported = false
+					}
+				}
+			}
 		}
 		supported = supported && v2.ActionCallbackConfigReady(conf, r.actions.key, r.actions.scheme, r.actions.caFile)
 		if !supported && r.actions.snapshot() != nil {
@@ -220,7 +231,7 @@ func (r *reloader) reload(conf *config.Config) error {
 	var graph *actionGraph
 	if actions := r.actions; supported {
 		ctx, cancel := context.WithCancel(context.Background())
-		graph = &actionGraph{supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
+		graph = &actionGraph{key: recipientKey, log: r.notificationLog, supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
 		newInhibitor.Project = actions.readView
 		stage = notify.StageFunc(func(ctx context.Context, l *slog.Logger, members ...*alert.Alert) (context.Context, []*alert.Alert, error) {
 			reader := func(ctx context.Context, receiver, name string, index int, members []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {

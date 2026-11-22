@@ -43,11 +43,58 @@ never-enrolled contact has no durable pre-entry row after process loss. A replac
 
 Action transport validation can distinguish a verified canonical private
 callback from a direct native receiver. The managed conversion producer retains
-its separate commissioning predicate. The adapter's source checkpoint
-supports literal webhook destinations. File-based or templated destinations
-and non-webhook integrations still need a qualified final-entry boundary.
-Some SDKs and protocols perform additional operations inside a single notifier
-invocation.
+its separate commissioning predicate. The dormant adapter handles the 18 registered integration kinds. Selected
+dispatch supplies the selected alert and a detached copy of the group's
+provider metadata. Slack retains its configured parent update and thread reply
+behavior. A guarded first Slack post records an opaque binding for the assigned
+channel and parent message in the ordinary provider metadata. An update of that
+parent retains the original recipient identity and repeat deadline. A different
+parent receives its own binding. Jira searches the existing group issue and applies its normal field
+updates and transitions. These configured operations can replace the remote
+group's displayed content. The local ordinary member set and repeat clock stay
+with the ordinary pipeline.
+
+Prepared destinations include actual template/file addresses and provider
+routing fields. For dynamic identities the journal stores a length-delimited
+HMAC digest derived from the integration configuration, the existing native
+store credential and the authority ID. The same authority, credential,
+configuration and addressing fields reproduce the binding after restart.
+Canonical callback signing uses its independent callback key. Dynamic
+webhooks cannot acquire canonical signing rights. The direct-only graph can
+derive its recipient key without a callback credential.
+
+Store credential rotation changes these digests. Dispatch compares retained
+target identities with current routing and only enters matching pending
+targets. The original entry token can still settle its original target.
+An independently admitted contact can receive a new target key after
+rotation. Existing repeat deadlines also belong to the old key. Before rotating
+this credential, quiesce deliveries, reconcile outstanding pending and unknown
+contacts and account for live repeat deadlines. Operators must enforce this
+sequence. The native journal has no cross-key migration or automatic rotation
+barrier.
+
+On guarded HTTP mutations the native client retains configured authentication,
+CA, proxy and pooled connections. A separate HTTP/1 pool gives each active
+request exclusive use of its connection. The sender checks admission after
+connection acquisition and closes the connection before a rejected write. A
+second connection attempt cannot repeat a submitted mutation. HTTP/2 shares
+connections between streams, so closing a connection there could interrupt
+unrelated requests. Ordinary capability-off requests use their configured
+protocol. The native probe of a changed destination holds the original claim
+for no-effect reconciliation. Provider accept/drop outcomes remain unknown.
+
+SMTP renders before DATA and checks again before committing the final dot.
+Telegram uses an invocation-local bot and preserves native timeouts. Oversized
+HTML that would replace all alert content with a generic diagnostic fails
+before a tracked write. Ordinary untracked notifications retain the configured
+fallback. SNS guards the signed Publish request with a single SDK attempt.
+Selected FIFO deduplication uses the logical action and target while preserving
+the native message group. Slack, OpsGenie and Jira authorize each distinct write
+and retain an earlier possible effect if a later write fails. Jira can resolve
+with zero effects when the group has no matching issue. Incident.io records
+the actual encoded member prefix, with tail progress in the ordinary
+notification log. Provider transport acceptance and downstream OSCAR ticket
+settlement have distinct receipts.
 
 Tracked ordinary resolution uses the private `reserve-terminal` command after
 normal group eligibility, send-resolved filtering and webhook truncation.
@@ -77,8 +124,7 @@ firing copy cannot consume an expired source's clear. A pending reservation
 checks frozen source labels, annotations, generator URL, exact times, managed
 identity, and wire resolution state across retries and owner replacement. Uncommissioned adapters leave ordinary routing, inhibition
 and notification readers on the existing native pipeline. An active reader
-rejects a reload to unsupported destinations. The full transport set and the
-inhibition publication barrier remain prerequisites for commissioning.
+rejects a reload to unsupported destinations. Transport qualification and the inhibition publication barrier remain prerequisites for commissioning.
 
 Measure three separate workloads. A proven untracked direct destination should
 add no journal HTTP or SQL operation on the negative path. First canonical

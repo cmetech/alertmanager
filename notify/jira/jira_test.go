@@ -1302,3 +1302,25 @@ func TestPrepareIssueRequestBodyAPIv3DescriptionValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestOscarActionResolvedSearchHasNoEffect(t *testing.T) {
+	t.Parallel()
+	calls := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- r.URL.Path
+		_, _ = io.WriteString(w, `{"issues":[]}`)
+	}))
+	defer server.Close()
+	u, err := url.Parse(server.URL + "/rest/api/2")
+	require.NoError(t, err)
+	n, err := New(&JiraConfig{APIURL: &amcommoncfg.URL{URL: u}, Project: "OPS", HTTPConfig: &commoncfg.DefaultHTTPClientConfig}, test.CreateTmpl(t), promslog.NewNopLogger())
+	require.NoError(t, err)
+	entry := &notify.ProviderEntry{Begin: func() bool { t.Fatal("Jira search consumed provider entry"); return false }}
+	ctx := notify.WithProviderEntry(notify.WithGroupKey(t.Context(), "group"), entry)
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"host": "A"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
+	require.NoError(t, n.Notify(ctx, a).Err())
+	require.True(t, entry.NoSend)
+	require.Len(t, calls, 1)
+	require.Contains(t, <-calls, "/search")
+}

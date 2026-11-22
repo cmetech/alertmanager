@@ -22,6 +22,8 @@ import (
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
 	"github.com/prometheus/alertmanager/inhibit"
+	"github.com/prometheus/alertmanager/nflog"
+	"github.com/prometheus/alertmanager/nflog/nflogpb"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/silence"
 )
@@ -36,9 +38,12 @@ type actionIntegration struct {
 	index        int
 	canonical    bool
 	maxAlerts    uint64
+	prepared     *notify.Integration
 }
 type actionGraph struct {
 	supported  bool
+	key        []byte
+	log        notify.NotificationLog
 	routes     *dispatch.Route
 	targets    map[string][]actionIntegration
 	inhibitor  *inhibit.Inhibitor
@@ -55,6 +60,7 @@ type publishedMember struct {
 }
 type nativeActions struct {
 	scheme, caFile string
+	recipientKey   []byte
 	version        int
 	mu             sync.RWMutex
 	graph          *actionGraph
@@ -70,17 +76,30 @@ type nativeActions struct {
 func newNativeActions(read func(string, string, func(*alert.Alert)), key []byte, logger *slog.Logger) *nativeActions {
 	return &nativeActions{version: nativeDispatchVersion, read: read, key: key, logger: logger, sources: make(map[model.Fingerprint]publishedMember), episodes: make(map[string]publishedMember), pending: make(map[string]bool)}
 }
+
 func (a *nativeActions) Bind(j v2.ActionJournal) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.journal = j
+	a.recipientKey = nil
+	if owner, ok := j.(interface{ RecipientKey() []byte }); ok {
+		a.recipientKey = owner.RecipientKey()
+	}
 	return nil
 }
+
+func (a *nativeActions) bindingKey() []byte {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.recipientKey
+}
+
 func (a *nativeActions) canInstall() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.version == 1 && a.journal != nil
 }
+
 func (a *nativeActions) Version() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -89,11 +108,13 @@ func (a *nativeActions) Version() int {
 	}
 	return 0
 }
+
 func (a *nativeActions) snapshot() *actionGraph {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.graph
 }
+
 func (a *nativeActions) pause() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -102,6 +123,7 @@ func (a *nativeActions) pause() {
 		a.graph = nil
 	}
 }
+
 func (a *nativeActions) readView(source *alert.Alert, use func(*alert.Alert)) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -112,11 +134,13 @@ func (a *nativeActions) readView(source *alert.Alert, use func(*alert.Alert)) {
 		use(p.member)
 	}
 }
+
 func (a *nativeActions) ReadView(source *alert.Alert) *alert.Alert {
 	var result *alert.Alert
 	a.readView(source, func(v *alert.Alert) { result = v })
 	return result
 }
+
 func effectiveMember(source *alert.Alert, p v2.EpisodeProjection) (*alert.Alert, error) {
 	if p.State == "resolved" && p.EffectiveSeverity() == "cleared" {
 		return source, nil
@@ -127,12 +151,14 @@ func effectiveMember(source *alert.Alert, p v2.EpisodeProjection) (*alert.Alert,
 	}
 	return view.NotificationMember(), nil
 }
+
 func (a *nativeActions) Publish(ctx context.Context, p v2.EpisodeProjection) error {
 	if p.State != "resolved" {
 		return actionHeld
 	}
 	return a.PublishSource(ctx, p, nil)
 }
+
 func (a *nativeActions) PublishSource(ctx context.Context, p v2.EpisodeProjection, source *alert.Alert) error {
 	owner := ""
 	if p.ManagedOwner != nil {
@@ -229,6 +255,67 @@ func (g *actionGraph) contacts(ctx context.Context, source *alert.Alert, p v2.Ep
 		}
 		labels = append(labels, v.NotificationMember())
 	}
+	return g.matchContacts(ctx, source, member, labels, scope)
+}
+
+type batchDestination struct {
+	config  string
+	members []*alert.Alert
+	digest  string
+}
+type batchDestinationKey struct{}
+
+func (g *actionGraph) destination(ctx context.Context, i actionIntegration, route *dispatch.Route, member *alert.Alert) (string, error) {
+	if i.prepared == nil {
+		return i.digest, nil
+	}
+	if len(g.key) < 32 {
+		return "", actionHeld
+	}
+	var members []*alert.Alert
+	batch, _ := ctx.Value(batchDestinationKey{}).(*batchDestination)
+	if batch != nil && batch.config == i.digest {
+		if batch.digest != "" {
+			return batch.digest, nil
+		}
+		members = batch.members
+	} else {
+		members = []*alert.Alert{member.NotificationCopy(time.Now())}
+		ctx = notify.WithNotificationReason(g.dispatcher.SelectedContext(ctx, route, member), notify.ReasonUnknown)
+	}
+	if i.name == "slack" {
+		store, err := g.providerStore(ctx, route.RouteOpts.Receiver, i)
+		if err != nil {
+			return "", err
+		}
+		ctx = notify.WithNflogStore(ctx, store)
+	}
+	digest, err := i.prepared.PreparedDigest(ctx, g.key, i.digest, members)
+	if batch != nil && err == nil {
+		batch.digest = digest
+	}
+	return digest, err
+}
+
+func (g *actionGraph) providerStore(ctx context.Context, receiver string, i actionIntegration) (*nflog.Store, error) {
+	key, _ := notify.GroupKey(ctx)
+	entries, err := g.log.Query(nflog.QGroupKey(key), nflog.QReceiver(&nflogpb.Receiver{GroupName: receiver, Integration: i.name, Idx: uint32(i.index)}))
+	if err != nil && !errors.Is(err, nflog.ErrNotFound) || len(entries) > 1 {
+		return nil, actionHeld
+	}
+	if len(entries) == 0 {
+		return nflog.NewStore(nil), nil
+	}
+	if reason, _ := notify.NotificationReason(ctx); reason == notify.ReasonFirstNotification {
+		// Dedup starts a fresh ordinary provider store after a resolved group.
+		if prior, ok := notify.PreviousNotification(ctx); ok && entries[0].GetTimestamp().AsTime().UnixNano() == prior {
+			return nflog.NewStore(nil), nil
+		}
+	}
+	return nflog.NewStore(entries[0]), nil
+}
+
+func (g *actionGraph) matchContacts(ctx context.Context, source, member *alert.Alert, labels []*alert.Alert, scope []alert.TargetScopeEntry) ([]plannedContact, error) {
 	for _, m := range labels {
 		available := false
 		for _, route := range g.routes.Match(m.Labels) {
@@ -262,19 +349,30 @@ func (g *actionGraph) contacts(ctx context.Context, source *alert.Alert, p v2.Ep
 		}
 		for _, i := range g.targets[opts.Receiver] {
 			frozen, ok := actionScope(opts.Receiver, i.canonical, scope)
-			if !ok || source.ManagedReceiver && !i.canonical || seen[i.digest] {
+			if !ok || source.ManagedReceiver && !i.canonical {
 				continue
 			}
-			seen[i.digest] = true
+			if batch, ok := ctx.Value(batchDestinationKey{}).(*batchDestination); ok && (batch.config != i.digest || !currentGroup(ctx, member, route)) {
+				continue
+			}
+			digest, err := g.destination(ctx, i, route, member)
+			if err != nil {
+				return nil, err
+			}
+			if seen[digest] {
+				continue
+			}
+			seen[digest] = true
 			interval := opts.RepeatInterval.Microseconds()
 			if opts.RepeatInterval%time.Microsecond != 0 {
 				interval++
 			}
-			contacts = append(contacts, plannedContact{v2.DispatchTarget{ReceiverID: opts.Receiver, IntegrationDigest: i.digest, Scope: frozen, RepeatIntervalUS: interval}, i, route})
+			contacts = append(contacts, plannedContact{v2.DispatchTarget{ReceiverID: opts.Receiver, IntegrationDigest: digest, Scope: frozen, RepeatIntervalUS: interval}, i, route})
 		}
 	}
 	return contacts, nil
 }
+
 func (a *nativeActions) Plan(ctx context.Context, s *alert.Alert, p v2.EpisodeProjection, req v2.ActionRequestV1) ([]v2.DispatchTarget, string, error) {
 	g := a.snapshot()
 	if g == nil {
@@ -293,6 +391,7 @@ func (a *nativeActions) Plan(ctx context.Context, s *alert.Alert, p v2.EpisodePr
 	}
 	return out, "", nil
 }
+
 func (a *nativeActions) Wake(_ context.Context, id string) error {
 	a.mu.Lock()
 	g := a.graph
@@ -316,6 +415,7 @@ func (a *nativeActions) Wake(_ context.Context, id string) error {
 	}()
 	return nil
 }
+
 func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id string) error {
 	r, err := a.journal.Lookup(ctx, id)
 	if err != nil {
@@ -343,10 +443,13 @@ func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id 
 			}
 			member := pub.member.NotificationCopy(time.Now())
 			cctx := g.dispatcher.SelectedContext(ctx, c.route, member)
-			s := notify.SelectedAction{Source: source, Receiver: c.ReceiverID, Integration: c.integration.name, Index: c.integration.index,
+			s := notify.SelectedAction{
+				Source: source, Receiver: c.ReceiverID, Integration: c.integration.name, Index: c.integration.index,
 				Invoke: func(ctx context.Context, i *notify.Integration, m *alert.Alert) notify.NotifyVerdict {
-					return a.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: id, target: t, contact: c, p: pub.p}}, 0)
-				}}
+					v, _ := a.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: id, target: t, contact: c, p: pub.p}}, 0)
+					return v
+				},
+			}
 			_, _, err = g.pipeline.Exec(notify.WithSelectedAction(cctx, s), a.logger, member)
 			result = errors.Join(result, err)
 			break
@@ -378,6 +481,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	contacts := make(map[*alert.Alert]ordinaryContact, len(members))
 	for _, m := range members {
 		source := m.ProviderSource()
+		if source.ManagedReceiver && !i.canonical {
+			continue
+		}
 		p, pass, err := a.journal.InspectOrdinary(ctx, source)
 		if err != nil {
 			held = err
@@ -398,6 +504,8 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		contacts[m] = c
 	}
 	groupDue, subsetDue := due(members), due(ordinary)
+	ack := notify.ContentBaseline(ctx)
+	resume := ack != nil && slices.ContainsFunc(members, func(m *alert.Alert) bool { return !ack(m) })
 	for _, m := range members {
 		c, ok := contacts[m]
 		if !ok {
@@ -406,7 +514,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		if c.p.State != "firing" {
 			source := m.ProviderSource()
 			terminal := c.p.State == "resolved" || source.Resolved() || source.ManagedReceiver && source.ManagedOperationKind == "clear"
-			if terminal && !groupDue || !terminal && !subsetDue {
+			if !resume && (terminal && !groupDue || !terminal && !subsetDue) {
 				delete(contacts, m)
 				continue
 			}
@@ -437,12 +545,18 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			truncated = uint64(len(sent)) - limit
 			sent = sent[:limit]
 		}
+		ctx = context.WithValue(ctx, batchDestinationKey{}, &batchDestination{config: i.digest, members: sent})
 		var pending, accepted []*alert.Alert
 		var entries []ordinaryContact
 		var ordinaryAcceptance bool
+		resumePrefix := resume && slices.ContainsFunc(sent, func(m *alert.Alert) bool { return !ack(m) })
 		for _, m := range sent {
 			c, eligible := contacts[m]
 			if !eligible {
+				continue
+			}
+			if resumePrefix && ack(m) && c.pass != nil {
+				accepted = append(accepted, m)
 				continue
 			}
 			c, err := a.ordinaryContact(ctx, g, m, c)
@@ -450,6 +564,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				if err.Error() != "NATIVE_SUPPRESSED" {
 					held = errors.Join(held, err)
 				}
+				continue
+			}
+			if c.target.State == "no_effect" {
 				continue
 			}
 			accepted = append(accepted, m)
@@ -461,7 +578,22 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			entries = append(entries, c)
 		}
 		if len(pending) > 0 {
-			v := a.invoke(ctx, g, integration, pending, entries, truncated)
+			v, delivered := a.invoke(ctx, g, integration, pending, entries, truncated)
+			if i.name == "incidentio" && v.Err() == nil && len(delivered) > 0 {
+				incomplete := len(delivered) != len(pending)
+				notify.MarkContentIncomplete(ctx, incomplete)
+				ordinaryAcceptance = ordinaryAcceptance || incomplete
+			}
+			if len(delivered) != len(pending) {
+				omitted := make(map[*alert.Alert]bool, len(pending))
+				for _, m := range pending {
+					omitted[m] = true
+				}
+				for _, m := range delivered {
+					delete(omitted, m)
+				}
+				accepted = slices.DeleteFunc(accepted, func(m *alert.Alert) bool { return omitted[m] })
+			}
 			if v.Err() != nil {
 				return v
 			}
@@ -481,10 +613,12 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	}
 	return result, nil
 }
+
 func currentGroup(ctx context.Context, m *alert.Alert, r *dispatch.Route) bool {
 	key, _ := notify.GroupKey(ctx)
 	return dispatch.GroupKeyForAlert(m, r) == key
 }
+
 func (a *nativeActions) reserve(ctx context.Context, p v2.EpisodeProjection, t plannedContact) (ordinaryContact, error) {
 	id := uuid.NewString()
 	r, err := a.journal.ReserveOrdinary(ctx, id, p.EpisodeRef, t.DispatchTarget, false)
@@ -502,7 +636,17 @@ func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *
 	s := m.ProviderSource()
 	if c.pass != nil {
 		if !c.contact.integration.canonical {
-			return c, nil
+			possible, err := g.matchContacts(ctx, s, m, []*alert.Alert{m}, nil)
+			if err != nil {
+				return c, err
+			}
+			for _, t := range possible {
+				if t.integration.digest == c.contact.integration.digest && currentGroup(ctx, m, t.route) {
+					c.contact = t
+					return c, nil
+				}
+			}
+			return c, actionHeld
 		}
 		p, err := a.journal.Project(ctx, s)
 		if err != nil {
@@ -522,7 +666,7 @@ func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *
 		return c, err
 	}
 	idx := slices.IndexFunc(possible, func(t plannedContact) bool {
-		return t.ReceiverID == c.contact.ReceiverID && t.IntegrationDigest == c.contact.integration.digest && currentGroup(ctx, m, t.route)
+		return t.ReceiverID == c.contact.ReceiverID && t.integration.digest == c.contact.integration.digest && currentGroup(ctx, m, t.route)
 	})
 	if idx < 0 {
 		return c, actionHeld
@@ -543,6 +687,11 @@ func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *
 	}
 	c.operation, c.target = r.OperationID, r.Targets[0]
 	switch c.target.State {
+	case "no_effect":
+		if c.target.Evidence != nil && *c.target.Evidence == "NATIVE_PROVIDER_NO_SEND" {
+			return c, nil
+		}
+		return c, actionHeld
 	case "pending", "confirmed":
 		return c, nil
 	default:
@@ -550,105 +699,191 @@ func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *
 	}
 }
 
-func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.Integration, members []*alert.Alert, contacts []ordinaryContact, truncated uint64) notify.NotifyVerdict {
-	var claimed []v2.Entry
-	var passes []*v2.OrdinaryPass
-	entered := false
-	finish := func(v notify.NotifyVerdict) notify.NotifyVerdict {
-		outcome, evidence := "no_effect", "FENCED_BEFORE_PROVIDER_ENTRY"
-		if entered {
-			outcome, evidence = "confirmed", "NATIVE_TRANSPORT_ACCEPTED"
-			if v.Err() != nil {
-				outcome, evidence = "unknown", "NATIVE_TRANSPORT_ACCEPTANCE_UNKNOWN"
-			}
+func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.Integration, members []*alert.Alert, contacts []ordinaryContact, truncated uint64) (notify.NotifyVerdict, []*alert.Alert) {
+	claimed := make([]v2.Entry, len(members))
+	active := make(map[*alert.Alert]bool, len(members))
+	selectMembers := func(subset []*alert.Alert) {
+		clear(active)
+		for _, m := range subset {
+			active[m] = true
 		}
-		for _, p := range passes {
-			p.Finish(!entered || v.Err() == nil)
-		}
+	}
+	selectMembers(members)
+	acquired := make([]bool, len(members))
+	entered := make([]bool, len(members))
+	bound := &notify.ProviderEntry{Truncated: truncated, Select: selectMembers}
+	finish := func(v notify.NotifyVerdict) (notify.NotifyVerdict, []*alert.Alert) {
 		late, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
-		for _, e := range claimed {
-			if _, err := a.journal.Settle(late, e, outcome, evidence); err != nil {
-				v = notify.Unrecoverable(err, notify.DefaultReason)
+		var accepted []*alert.Alert
+		var settlement error
+		for x, c := range contacts {
+			outcome, evidence := "no_effect", "FENCED_BEFORE_PROVIDER_ENTRY"
+			if entered[x] {
+				if v.Err() != nil {
+					outcome, evidence = "unknown", "NATIVE_TRANSPORT_ACCEPTANCE_UNKNOWN"
+				} else {
+					outcome, evidence = "confirmed", "NATIVE_TRANSPORT_ACCEPTED"
+					accepted = append(accepted, members[x])
+				}
+			} else if v.Err() != nil && v.Reason() == notify.EncodingErrorReason {
+				evidence = "NATIVE_ALERT_CONTENT_UNDELIVERABLE"
+			} else if bound.NoSend {
+				evidence = "NATIVE_PROVIDER_NO_SEND"
+			}
+			if acquired[x] {
+				c.pass.Finish(!entered[x] || v.Err() == nil)
+			}
+			if e := claimed[x]; e != nil {
+				_, err := a.journal.Settle(late, e, outcome, evidence)
+				settlement = errors.Join(settlement, err)
 			}
 		}
-		return v
+		if settlement != nil {
+			v = notify.Unrecoverable(settlement, notify.DefaultReason)
+		}
+		return v, accepted
 	}
-	fail := func(err error) notify.NotifyVerdict { return finish(notify.Unrecoverable(err, notify.DefaultReason)) }
-	bound := &notify.ProviderEntry{Truncated: truncated}
 	for x, c := range contacts {
 		s := members[x].ProviderSource()
 		var entry v2.Entry
 		if c.operation != "" {
 			e, err := a.journal.Claim(ctx, c.operation, c.target.TargetKey)
 			if err != nil {
-				return fail(err)
+				return finish(notify.Unrecoverable(err, notify.DefaultReason))
 			}
-			claimed = append(claimed, e)
+			claimed[x] = e
+			bound.RequireContent = true
 			if e == nil || !e.ForMember(members[x]) {
-				return fail(actionHeld)
+				return finish(notify.Unrecoverable(actionHeld, notify.DefaultReason))
 			}
 			entry = e
+			if id := e.LogicalActionID(); id != "" {
+				bound.ActionID = id + "|" + c.target.TargetKey
+			}
 		}
 		if c.contact.integration.canonical {
 			operation, err := uuid.Parse(c.operation)
 			if entry == nil || err != nil {
-				return fail(actionHeld)
+				return finish(notify.Unrecoverable(actionHeld, notify.DefaultReason))
 			}
 			id := uuid.NewSHA1(operation, []byte(c.target.TargetKey)).String()
 			stamp, err := a.journal.Delivery(ctx, s, c.contact.ReceiverID, id, entry)
 			if err != nil {
-				return fail(err)
+				return finish(notify.Unrecoverable(err, notify.DefaultReason))
 			}
 			bound.Members = append(bound.Members, alert.NativeDeliveryMember{Index: x, Delivery: stamp})
 			bound.Key = a.key
 		}
 	}
-	bound.Begin = func() bool {
-		if entered || g != a.snapshot() || ctx.Err() != nil {
+
+	first := contacts[0].contact
+	bound.AddressID = func(fields ...string) string {
+		return notify.DestinationDigest(g.key, first.integration.digest, fields...)
+	}
+	var prepared bool
+	bound.Destination = func(fields ...string) bool {
+		if first.integration.prepared != nil {
+			digest := notify.DestinationDigest(g.key, first.integration.digest, fields...)
+			for _, c := range contacts {
+				if c.contact.IntegrationDigest != digest {
+					return false
+				}
+			}
+		}
+		prepared = true
+		return true
+	}
+	check := func(commit bool) bool {
+		if !prepared || len(active) == 0 || ctx.Err() != nil || g != a.snapshot() {
+			return false
+		}
+		for x, e := range claimed {
+			if active[members[x]] && e != nil && (!e.ForMember(members[x]) || !e.Valid()) {
+				return false
+			}
+		}
+		if i.Name() == "slack" {
+			frozen, ok := notify.NflogStore(ctx)
+			current, err := g.providerStore(ctx, first.ReceiverID, first.integration)
+			if !ok || err != nil {
+				return false
+			}
+			for _, field := range []string{"channelId", "threadTs"} {
+				before, _ := frozen.GetStr(field)
+				after, _ := current.GetStr(field)
+				if before != after {
+					return false
+				}
+			}
+		}
+		if bound.RecheckHTTP != nil && !bound.RecheckHTTP() {
+			return false
+		}
+		// Re-render this exact invocation once after the last blocking authority
+		// check. All routing, suppression and local permit checks follow it.
+		batch := &batchDestination{config: first.integration.digest, members: members}
+		checkCtx := context.WithValue(ctx, batchDestinationKey{}, batch)
+		digest, err := g.destination(checkCtx, first.integration, first.route, members[0])
+		if err != nil || digest != first.IntegrationDigest {
 			return false
 		}
 		for x, c := range contacts {
-			s := members[x].ProviderSource()
+			m := members[x]
+			if !active[m] {
+				continue
+			}
+			var now []plannedContact
+			var err error
 			if c.pass != nil {
+				now, err = g.matchContacts(checkCtx, m.ProviderSource(), m, []*alert.Alert{m}, nil)
+			} else {
+				now, err = g.contacts(checkCtx, m.ProviderSource(), c.p, c.target.Target.Scope)
+			}
+			if err != nil || !slices.ContainsFunc(now, func(t plannedContact) bool {
+				return t.route == c.contact.route && reflect.DeepEqual(t.DispatchTarget, c.contact.DispatchTarget)
+			}) {
+				return false
+			}
+		}
+		for x, c := range contacts {
+			if !active[members[x]] {
+				continue
+			}
+			if c.pass != nil && !acquired[x] {
 				if !c.pass.Enter() {
 					return false
 				}
-				passes = append(passes, c.pass)
-			} else if c.operation == "" {
-				return false
+				acquired[x] = true
 			}
-			if c.operation != "" {
-				now, err := g.contacts(ctx, s, c.p, c.target.Target.Scope)
-				if err != nil || !slices.ContainsFunc(now, func(t plannedContact) bool {
-					return t.route == c.contact.route && reflect.DeepEqual(c.target.Target, t.DispatchTarget)
-				}) {
+		}
+		for x, c := range contacts {
+			if !active[members[x]] {
+				continue
+			}
+			if c.pass != nil {
+				if c.pass.Valid == nil || !c.pass.Valid() {
 					return false
 				}
-			}
-		}
-		for _, e := range claimed {
-			if !e.Valid() {
+			} else if claimed[x] == nil || !claimed[x].LocalValid() {
 				return false
 			}
 		}
-		for _, e := range claimed {
-			if !e.LocalValid() {
-				return false
-			}
-		}
-		if g != a.snapshot() || ctx.Err() != nil {
+		if ctx.Err() != nil || g != a.snapshot() {
 			return false
 		}
-		entered = true
+		if commit {
+			for x, m := range members {
+				entered[x] = entered[x] || active[m]
+			}
+		}
 		return true
 	}
-	if i.Name() != "webhook" {
-		return fail(actionHeld)
-	}
+	bound.Check = func() bool { return check(false) }
+	bound.Begin = func() bool { return check(true) }
 	v := i.Notify(notify.WithProviderEntry(ctx, bound), members...)
-	if !entered && v.Err() == nil {
-		return fail(actionHeld)
+	if !slices.Contains(entered, true) && !bound.NoSend && v.Err() == nil {
+		v = notify.Unrecoverable(actionHeld, notify.DefaultReason)
 	}
 	return finish(v)
 }
@@ -671,17 +906,26 @@ func actionDestinations(conf *config.Config, receivers map[string][]notify.Integ
 				webhook := r.WebhookConfigs[i.Index()]
 				target.maxAlerts = webhook.MaxAlerts
 				url := string(webhook.URL)
-				if webhook.URLFile != "" || strings.Contains(url, "{{") {
-					allSupported = false
+				if webhook.URLFile != "" || strings.Contains(url, "{{") || notify.HasHTTPIdentityFiles(webhook.HTTPConfig) {
+					target.prepared = &i
 				}
 				for _, scheme := range []string{"http", "https"} {
 					base := scheme + "://alertmanager-middleware:9400" + alert.NativeCallbackPath
 					if url == base || url == base+"?notifier_type=oscaradmin" {
 						target.canonical = true
+						target.prepared = nil
 					}
 				}
 			} else {
-				allSupported = false
+				switch i.Name() {
+				case "incidentio":
+					target.maxAlerts = r.IncidentioConfigs[i.Index()].MaxAlerts
+					target.prepared = &i
+				case "discord", "email", "jira", "mattermost", "msteams", "msteamsv2", "opsgenie", "pagerduty", "pushover", "rocketchat", "slack", "sns", "telegram", "victorops", "webex", "wechat":
+					target.prepared = &i
+				default:
+					allSupported = false
+				}
 			}
 			out[r.Name] = append(out[r.Name], target)
 		}

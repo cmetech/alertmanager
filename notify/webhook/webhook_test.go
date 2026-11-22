@@ -19,10 +19,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -581,21 +583,17 @@ func TestWebhookCustomPayloadPreservesYAMLLikeStrings(t *testing.T) {
 	)
 }
 
-type acceptedThenLost func(*http.Request) (*http.Response, error)
-
-func (f acceptedThenLost) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
 func TestOscarActionWebhookLostResponse(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	a := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 	for _, canonical := range []bool{false, true} {
-		url := "https://direct.example/alerts"
+		url := "http://direct.example/alerts"
 		cfg := &commoncfg.HTTPClientConfig{}
 		entry := &notify.ProviderEntry{}
 		if canonical {
-			url = "https://alertmanager-middleware:9400" + alert.NativeCallbackPath
-			cfg.Authorization = &commoncfg.Authorization{Type: "Bearer", CredentialsFile: "unused"}
+			url = "http://alertmanager-middleware:9400" + alert.NativeCallbackPath
+			cfg.Authorization = &commoncfg.Authorization{Type: "Bearer", CredentialsFile: t.TempDir() + "/token"}
 			entry.Key = bytes.Repeat([]byte("x"), 32)
 			entry.Members = []alert.NativeDeliveryMember{{Index: 0, Delivery: alert.NativeDeliveryV1{
 				Version: 1, EpisodeRef: alert.EpisodeRef{AuthorityID: "11111111-1111-4111-8111-111111111111", EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1},
@@ -603,24 +601,32 @@ func TestOscarActionWebhookLostResponse(t *testing.T) {
 				State: "firing", ActiveSince: now.UTC().Format(time.RFC3339Nano), SourceSeverity: "major", EffectiveSeverity: "major", DeliveryID: "33333333-3333-4333-8333-333333333333", TargetScope: []alert.TargetScopeEntry{},
 			}}}
 		}
-		n, err := New(&WebhookConfig{URL: amcommoncfg.SecretTemplateURL(url), HTTPConfig: cfg}, test.CreateTmpl(t), promslog.NewNopLogger())
-		require.NoError(t, err)
-		var calls int
-		n.client.Transport = acceptedThenLost(func(r *http.Request) (*http.Response, error) {
-			calls++
-			_, err := io.ReadAll(r.Body)
-			require.NoError(t, err)
+		var calls atomic.Int32
+		if canonical {
+			require.NoError(t, os.WriteFile(cfg.Authorization.CredentialsFile, entry.Key, 0o600))
+		}
+		sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			_, _ = io.Copy(io.Discard, r.Body)
 			require.Equal(t, canonical, r.Header.Get("X-Oscar-Native-Signature") != "")
-			return nil, io.ErrUnexpectedEOF
-		})
+			conn, _, err := w.(http.Hijacker).Hijack()
+			require.NoError(t, err)
+			_ = conn.Close()
+		}))
+		t.Cleanup(sink.Close)
+		n, err := New(&WebhookConfig{URL: amcommoncfg.SecretTemplateURL(url), HTTPConfig: cfg}, test.CreateTmpl(t), promslog.NewNopLogger(), commoncfg.WithDialContextFunc(func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, sink.Listener.Addr().String())
+		}))
+		require.NoError(t, err)
 		ctx := notify.WithProviderEntry(notify.WithReceiverName(notify.WithGroupKey(t.Context(), "group"), "team"), entry)
 		entry.Begin = func() bool { return false }
 		require.Error(t, n.Notify(ctx, a.NotificationCopy(now)).Err())
-		require.Zero(t, calls)
-		entry.Begin = func() bool { return true }
+		require.Zero(t, calls.Load())
+		entry = &notify.ProviderEntry{Members: entry.Members, Key: entry.Key, Begin: func() bool { return true }}
+		ctx = notify.WithProviderEntry(ctx, entry)
 		result := n.Notify(ctx, a.NotificationCopy(now))
 		require.Error(t, result.Err())
 		require.False(t, result.ShouldRetry())
-		require.Equal(t, 1, calls)
+		require.EqualValues(t, 1, calls.Load())
 	}
 }

@@ -182,26 +182,60 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		} else {
 			threadTs, _ = store.GetStr("threadTs")
 			channelId, _ = store.GetStr("channelId")
-			logger.Debug("attempt recovering threadTs and channelId of the initial message", "threadTs", threadTs, "channelId", channelId)
+			logger.Debug("attempt recovering threadTs and channelId of the initial message")
 		}
 	}
 
+	channel := channelId
 	if threadTs == "" || channelId == "" {
-		return n.postRequest(ctx, u, &request{message: msg, Channel: tmplText(n.conf.Channel)}, store)
+		channel = tmplText(n.conf.Channel)
+	}
+	if err != nil {
+		return notify.Unrecoverable(err, notify.TemplateErrorReason)
+	}
+	// A new Slack parent gains a channel ID and timestamp only after it
+	// succeeds. Link that exact parent to the original configured recipient
+	// so its first update still observes the existing repeat deadline.
+	entry := notify.CurrentProviderEntry(ctx)
+	var recipient string
+	if entry != nil && entry.AddressID != nil {
+		recipient = entry.AddressID("slack-recipient", u, channel, threadTs, key.String())
+		if store != nil && threadTs != "" && channelId != "" {
+			origin, _ := store.GetStr("oscarSlackRecipient")
+			proof, _ := store.GetStr("oscarSlackParent")
+			if origin != "" && proof == entry.AddressID("slack-parent", u, channelId, threadTs, origin) {
+				recipient = origin
+			}
+		}
+	}
+	if !notify.PreparedHTTPDestination(ctx, n.client, u, recipient) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.ConfigErrorReason)
+	}
+	if threadTs == "" || channelId == "" {
+		v := n.postRequest(ctx, u, &request{message: msg, Channel: channel}, store)
+		if v.Err() == nil && store != nil && recipient != "" {
+			ch, _ := store.GetStr("channelId")
+			ts, _ := store.GetStr("threadTs")
+			if ch != "" && ts != "" {
+				store.SetStr("oscarSlackRecipient", recipient)
+				store.SetStr("oscarSlackParent", entry.AddressID("slack-parent", u, ch, ts, recipient))
+			}
+		}
+		return v
 	}
 
 	// Requests targeting the initial message get no store, so its identifiers are never overwritten.
 	if n.conf.UpdateMessage {
-		logger.Debug("updating previously sent message", "threadTs", threadTs, "channelId", channelId)
+		logger.Debug("updating previously sent message")
 		updateReq := &request{message: msg, Channel: channelId, Timestamp: threadTs}
 		if verdict := n.postRequest(ctx, "https://slack.com/api/chat.update", updateReq, nil); verdict.Err() != nil {
 			return verdict
 		}
 	}
 	if n.conf.PostUpdatesToThread {
-		logger.Debug("posting to thread of previously sent message", "threadTs", threadTs, "channelId", channelId)
+		logger.Debug("posting to thread of previously sent message")
 		threadReq := &request{message: msg, Channel: channelId, ThreadTimestamp: threadTs}
-		return n.postRequest(ctx, u, threadReq, nil)
+		return n.postRequest(notify.WithMutationStep(ctx, 1), u, threadReq, nil)
 	}
 
 	return notify.Success()
@@ -273,7 +307,7 @@ func (n *Notifier) slackResponseHandler(resp *http.Response, store *nflog.Store)
 	if store != nil && data.Timestamp != "" && data.Channel != "" {
 		store.SetStr("threadTs", data.Timestamp)
 		store.SetStr("channelId", data.Channel)
-		n.logger.Debug("stored threadTs and channelId", "threadTs", data.Timestamp, "channelId", data.Channel)
+		n.logger.Debug("stored threadTs and channelId")
 	}
 	return false, nil
 }

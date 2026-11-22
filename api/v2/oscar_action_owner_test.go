@@ -124,6 +124,7 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 		})
 	}
 }
+
 func mustRaw(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -1115,4 +1116,13 @@ func TestOscarActionBootEpochSwapAfterRestoringFiringSlot(t *testing.T) {
 	require.Equal(t, 1, lookups)
 	require.Equal(t, "resolved", slot.projection.State)
 	require.Equal(t, p.LifecycleSeq, slot.projection.LifecycleSeq)
+}
+
+func TestOscarActionRecipientKeyRotation(t *testing.T) {
+	t.Parallel()
+	first := recipientBindingKey("store-one", "authority-a")
+	require.Len(t, first, 32)
+	require.Equal(t, first, recipientBindingKey("store-one", "authority-a"))
+	require.NotEqual(t, first, recipientBindingKey("store-two", "authority-a"))
+	require.NotEqual(t, first, recipientBindingKey("store-one", "authority-b"))
 }
