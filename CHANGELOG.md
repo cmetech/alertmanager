@@ -1,3 +1,8 @@
+## Unreleased — Source severity for Active Alerts
+
+- The version 2 Active Alerts page includes an optional source severity map for selected alerts whose effective severity is higher. Matching and sorting use the existing effective view.
+- Pair native source `09688a83` with OSCAR Alertmanager and Middleware source `a09ec7fea` and AdminUI source `292304d34`. The read contract is additive and uses the existing C2/C3 storage prerequisites. Operator qualification is pending.
+
 ## Unreleased — Scheduled native action concurrency
 
 - The leased native owner admits at most four concurrent scheduled policy executions, including requests whose callers have timed out. It checks the signed expiry for initial and recovery mutations.
