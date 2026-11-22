@@ -1,3 +1,8 @@
+## Unreleased — Native ordinary entry and terminal delivery
+
+- Alertmanager verifies each untracked direct or legacy callback's original resident token and issuing epoch at provider entry. When a tracked alert expires, the next due flush recovers its terminal receipt through the current slot or the indexed source.
+- Tracked firing groups split private inspection and admission requests at both 64 members and 256 KiB of encoded JSON. Long receiver names retain the native group and original receipt tokens. Source `7300d30f` uses the existing store contract and default-off setting. This native change requires no migration. Runtime qualification is pending.
+
 ## Unreleased — Native action recovery and group entry
 
 - Alertmanager checks the earliest active source or claim expiry at the provider transition. Rehydrated slots reread the durable row, read-side inhibition uses the original provider identity, and unsupported first-enrollment severities release capacity for supported alerts.
