@@ -628,7 +628,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		logMembers = members
 	}
 	result.LogMembers = func() ([]*alert.Alert, error) { return logMembers, held }
-	result.Invoke = func(ctx context.Context, integration *notify.Integration, sent []*alert.Alert) (verdict notify.NotifyVerdict) {
+	result.Invoke = func(ctx context.Context, integration *notify.Integration, sent []*alert.Alert) notify.NotifyVerdict {
 		var truncated uint64
 		if limit := i.maxAlerts; limit != 0 && uint64(len(sent)) > limit {
 			truncated = uint64(len(sent)) - limit
@@ -740,7 +740,8 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				// must not consume the other members' remaining provider-entry time.
 				defer func() {
 					if err := cohort.SettleCohort(ctx, refused); err != nil {
-						verdict = notify.Unrecoverable(errors.Join(verdict.Err(), err), notify.DefaultReason)
+						// SetNotifies logs accepted siblings before reporting the hold.
+						held = errors.Join(held, err)
 					}
 				}()
 			}

@@ -34,6 +34,9 @@ import (
 	v2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/nflog"
+	"github.com/prometheus/alertmanager/nflog/nflogpb"
+	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/notify/webhook"
 	"github.com/prometheus/alertmanager/provider/mem"
 )
@@ -417,10 +420,18 @@ func TestOscarTerminalGroupShortIndividualPermitThroughAppAndProvider(t *testing
 	exerciseCommissionedProvider(t, "short individual permit")
 }
 
+func TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome(t *testing.T) {
+	for _, outcome := range []string{"accepted", "rejected"} {
+		t.Run(outcome, func(t *testing.T) { exerciseCommissionedProvider(t, "direct settlement failure/"+outcome) })
+	}
+}
+
 func exerciseCommissionedProvider(t *testing.T, scenario string) {
 	t.Helper()
 	terminalGroup := scenario != "firing"
-	shortPermit := scenario == "short individual permit"
+	excludedFailure := strings.HasPrefix(scenario, "direct settlement failure/")
+	rejected := scenario == "direct settlement failure/rejected"
+	shortPermit := scenario == "short individual permit" || excludedFailure
 	groupInterval := 3 * time.Minute
 	memberCount := 4109
 	if shortPermit {
@@ -463,6 +474,7 @@ func exerciseCommissionedProvider(t *testing.T, scenario string) {
 	longCommands := map[string]int{}
 	var longSettled, terminalSettled, terminalCommands int
 	var bulkWrites atomic.Int32
+	var failedSettles, failedLookups int
 	var shortID, shortFingerprint string
 	var shortDeadline time.Time
 	replayed := map[string]bool{}
@@ -526,6 +538,9 @@ func exerciseCommissionedProvider(t *testing.T, scenario string) {
 				mu.Unlock()
 			} else if len(msg.NativeDeliveries) != 0 {
 				t.Error("unsigned callback contains delivery claims")
+			}
+			if rejected && bulkRequest && r.URL.Path == "/direct" {
+				w.WriteHeader(http.StatusBadRequest)
 			}
 			observed <- item
 			return
@@ -632,6 +647,9 @@ func exerciseCommissionedProvider(t *testing.T, scenario string) {
 					}
 				case pending[scope] != "":
 					reply["state"] = "held"
+					if excludedFailure && id == shortID && failedLookups > 0 {
+						replayed[id] = true
+					}
 				case time.Now().Before(nextEligible[scope]):
 					reply["state"] = "covered"
 					if large.Load() && target["repeat_interval_us"].(float64) == float64((180*time.Second).Microseconds()) {
@@ -678,6 +696,14 @@ func exerciseCommissionedProvider(t *testing.T, scenario string) {
 					if id == shortID && (terminalCommands < 2 || outcome != "no_effect" || m["receipt"].(map[string]any)["evidence"] != "FENCED_BEFORE_PROVIDER_ENTRY") {
 						t.Error("short permit must survive its own RPC and settle individually after the later chunk")
 					}
+					if excludedFailure && id == shortID {
+						if len(cmd["members"].([]any)) != 1 {
+							t.Error("excluded settlement must use only the refused member's original token")
+						}
+						failedSettles++
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
 					if terminalReceipts[id] != "" {
 						t.Error("terminal token settled twice")
 					}
@@ -701,6 +727,14 @@ func exerciseCommissionedProvider(t *testing.T, scenario string) {
 				}
 			}
 			response = ids
+		case "lookup-cohort":
+			ids := cmd["operation_ids"].([]any)
+			if !excludedFailure || len(ids) != 1 || ids[0] != shortID || shortID == "" || failedSettles != 1 {
+				t.Errorf("unexpected reconciliation lookup %v", ids)
+			}
+			failedLookups++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		default:
 			t.Errorf("unexpected private command %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -739,6 +773,43 @@ func exerciseCommissionedProvider(t *testing.T, scenario string) {
 	opts.ActionOwner.StoreKeyFile = write("store", storeKey)
 	opts.ActionOwner.OperatorKeyFile = write("operator", strings.Repeat("o", 32))
 	opts.ActionOwner.PolicyKeyFile = write("policy", strings.Repeat("p", 32))
+	if excludedFailure {
+		members := exerciseDirectSettlementFailure(t, opts, dial, rejected, func(expiry time.Time) {
+			mu.Lock()
+			defer mu.Unlock()
+			terminalEnd = expiry
+		})
+		require.EqualValues(t, 1, bulkWrites.Load(), "count every physical subset or fresh-only replay")
+		require.Len(t, observed, 1)
+		call := <-observed
+		require.Equal(t, "/direct", call.path)
+		require.False(t, call.signed)
+		require.Equal(t, "firing", call.status)
+		require.Empty(t, call.deliveries)
+		require.Len(t, call.hosts, len(members)-1)
+		for i, m := range members[1:] {
+			require.Equal(t, string(m.Labels["host"]), call.hosts[i])
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		require.Equal(t, members[0].Fingerprint().String(), shortFingerprint)
+		require.Equal(t, 2, terminalCommands)
+		require.Equal(t, 1, failedSettles)
+		require.Equal(t, 1, failedLookups)
+		require.Equal(t, shortID, pending["terminal/"+shortID])
+		require.NotContains(t, terminalReceipts, shortID)
+		require.NotContains(t, rows, members[len(members)-1].Fingerprint().String())
+		require.Len(t, terminalReceipts, len(members)-2)
+		if rejected {
+			for _, outcome := range terminalReceipts {
+				require.Equal(t, "unknown", outcome)
+			}
+		} else {
+			require.Equal(t, len(members)-2, terminalSettled)
+			require.Len(t, replayed, len(members)-1, "the next flush observes all terminal IDs, including the held one")
+		}
+		return
+	}
 	cred := write("callback", string(callbackKey))
 	yaml := fmt.Sprintf("route:\n  receiver: team\n  group_by: [host]\n  group_wait: 50ms\n  group_interval: 200ms\n  repeat_interval: 2s\nreceivers:\n- name: team\n  webhook_configs:\n  - url: http://alertmanager-middleware:9400%s\n    send_resolved: true\n    http_config:\n      follow_redirects: false\n      tls_config:\n        insecure_skip_verify: true\n      authorization:\n        type: Bearer\n        credentials_file: %s\n", alert.NativeCallbackPath, cred)
 	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(yaml), 0600))
@@ -1096,4 +1167,127 @@ directDelivered:
 			t.Fatal("long receiver did not send the original 64-member group")
 		}
 	}
+}
+
+// Drive the installed direct integration through dedup, retry and SetNotifies.
+// The long group wait leaves both ordinary flushes under the fixture's control.
+func exerciseDirectSettlementFailure(t *testing.T, opts Options, dial v2.ActionDialer, rejected bool, setExpiry func(time.Time)) []*alert.Alert {
+	t.Helper()
+	var provider *mem.Alerts
+	opts.ProbeHandler = func(p *mem.Alerts) http.Handler { provider = p; return http.NotFoundHandler() }
+	actions := newNativeActions(func(owner, fp string, visit func(*alert.Alert)) {
+		provider.ReadActionSource(owner, fp, visit)
+	}, opts.ConversionCallbackKey, opts.Logger)
+	opts.ActionOwner.Enabled = true
+	opts.ActionOwner.Dispatch = actions
+	const cfg = `route:
+  receiver: team
+  group_by: [alertname]
+  group_wait: 1h
+  group_interval: 1m
+  repeat_interval: 1h
+receivers:
+- name: team
+  webhook_configs:
+  - url: http://direct.example/direct
+    send_resolved: true
+`
+	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(cfg), 0600))
+	app, err := newWithActionDialer(opts, dial)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = app.Stop(context.Background()) })
+	require.NoError(t, app.Start())
+	require.Eventually(t, func() bool { return actions.Version() == 1 }, 15*time.Second, 10*time.Millisecond)
+	g := actions.snapshot()
+	now := time.Now()
+	const tracked = 65 // A short first permit is still valid until the second admission RPC.
+	members := make([]*alert.Alert, tracked+1)
+	for n := range members {
+		host := fmt.Sprintf("bulk-%03d", n)
+		if n == tracked {
+			host = "bulk-never-enrolled"
+		}
+		members[n] = alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "host": model.LabelValue(host), "severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	}
+	require.NoError(t, provider.Put(t.Context(), members...))
+	for _, m := range members[:tracked] {
+		p, err := actions.journal.Project(t.Context(), m)
+		require.NoError(t, err)
+		require.Equal(t, "firing", p.State)
+	}
+	fresh := members[tracked]
+	epoch, _ := actions.recovery.RecoveryState()
+	require.Eventually(t, func() bool { return actions.VerifiedNegative(fresh, epoch) }, 5*time.Second, 10*time.Millisecond)
+	expiry := time.Now()
+	setExpiry(expiry)
+	for n, m := range members[:tracked] {
+		closed := *m
+		closed.EndsAt, closed.UpdatedAt = expiry, expiry
+		require.NoError(t, provider.Put(t.Context(), &closed))
+		resident, err := provider.Get(m.Fingerprint())
+		require.NoError(t, err)
+		p, err := actions.journal.Project(t.Context(), resident)
+		require.NoError(t, err)
+		require.Equal(t, "resolved", p.State)
+		members[n] = resident
+	}
+	flushTime := time.Now()
+	for i, m := range members {
+		members[i] = m.NotificationCopy(flushTime)
+	}
+	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, members[0])
+	key, _ := notify.GroupKey(ctx)
+	receiver := &nflogpb.Receiver{GroupName: "team", Integration: "webhook"}
+	query := func() ([]*nflogpb.Entry, error) {
+		return g.log.Query(nflog.QGroupKey(key), nflog.QReceiver(receiver))
+	}
+	var verdict notify.NotifyVerdict
+	var invocations int
+	ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, receiver, name string, index int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
+		batch, err := actions.prepare(c, g, receiver, name, index, ms, due)
+		if invoke := batch.Invoke; invoke != nil {
+			batch.Invoke = func(c context.Context, i *notify.Integration, sent []*alert.Alert) notify.NotifyVerdict {
+				invocations++
+				verdict = invoke(c, i, sent)
+				return verdict
+			}
+		}
+		return batch, err
+	})
+	_, _, err = g.pipeline.Exec(ctx, opts.Logger, members...)
+	require.Equal(t, 1, invocations)
+	require.Error(t, err)
+	if rejected {
+		require.ErrorContains(t, verdict.Err(), "400")
+		require.NotContains(t, verdict.Err().Error(), actionHeld.Error())
+		require.Equal(t, notify.GetFailureReasonFromStatusCode(http.StatusBadRequest), verdict.Reason())
+		require.ErrorContains(t, err, "400")
+		_, err = query()
+		require.ErrorIs(t, err, nflog.ErrNotFound)
+		return members
+	}
+	require.NoError(t, verdict.Err())
+	// Both the exclusion and the failed exact-ID reconciliation reach the group.
+	require.Equal(t, 2, strings.Count(err.Error(), actionHeld.Error()))
+	entries, err := query()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, []uint64{notify.HashAlert(fresh)}, entries[0].FiringAlerts)
+	var resolved []uint64
+	for _, m := range members[1:tracked] {
+		resolved = append(resolved, notify.HashAlert(m))
+	}
+	require.ElementsMatch(t, resolved, entries[0].ResolvedAlerts)
+	stamp := entries[0].Timestamp.AsTime()
+	p, pass, err := actions.journal.InspectOrdinary(t.Context(), fresh)
+	require.NoError(t, err)
+	require.Nil(t, p)
+	require.NotNil(t, pass, "the released direct pass leaves replay suppression to the native log")
+	_, _, err = g.pipeline.Exec(notify.WithNow(ctx, stamp.Add(time.Minute)), opts.Logger, members...)
+	require.ErrorContains(t, err, actionHeld.Error())
+	entries, err = query()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, stamp, entries[0].Timestamp.AsTime())
+	return members
 }

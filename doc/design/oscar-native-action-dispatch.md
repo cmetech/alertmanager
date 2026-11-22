@@ -199,7 +199,10 @@ source publication and wire state. A managed clear whose firing wire expired
 during another member's preparation stays unclaimed until a fresh flush. After
 the last admission response, the reader checks each issued permit again. A
 member whose permit expired between responses stays held and the reader settles
-its original token after the remaining members' provider attempt.
+its original token after the remaining members' provider attempt. If that
+settlement and its lookup fail, the ordinary notification log records accepted
+siblings before reporting the hold. A failed provider attempt keeps its
+original error and reason.
 When a prepared group shrinks during admission, eligible siblings can enter in
 their original order if the new rendering retains every admitted member and
 matches its frozen recipient. A changed recipient or failed entry fence settles
