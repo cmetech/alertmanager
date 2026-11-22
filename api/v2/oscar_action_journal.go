@@ -411,7 +411,11 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	o.mu.Lock()
 	epoch := o.lease.Epoch
 	o.mu.Unlock()
-	if err = o.write(ctx, "claim-target", map[string]any{"operation_id": id, "target_key": key}, &entry); err != nil {
+	args := map[string]any{"operation_id": id, "target_key": key}
+	if proof, ok := ctx.Value(callbackProvenanceKey{}).(*CallbackProvenance); ok {
+		args["callback"] = proof
+	}
+	if err = o.write(ctx, "claim-target", args, &entry); err != nil {
 		// A response arriving after the local cutoff may still contain our original token.
 		if managedHash.MatchString(entry.Token) {
 			_, _ = o.Settle(ctx, claimedEntry{OperationID: id, TargetKey: key, token: entry.Token}, "no_effect", "LEASE_EXPIRED_BEFORE_PROVIDER_ENTRY")

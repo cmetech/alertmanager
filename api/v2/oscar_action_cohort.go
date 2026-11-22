@@ -28,6 +28,7 @@ type OrdinaryCohortJournal interface {
 }
 
 type OrdinaryCandidate struct {
+	Provenance *CallbackProvenance
 	Canonical  bool
 	Member     *alert.Alert
 	Projection EpisodeProjection
@@ -49,14 +50,15 @@ type OrdinaryReceipt struct {
 const ordinaryChunk = 64
 
 type cohortRequest struct {
-	ID        string              `json:"operation_id"`
-	Row       string              `json:"row_id"`
-	Ref       EpisodeRef          `json:"ref"`
-	Variant   alert.NativeVariant `json:"native_variant"`
-	Target    DispatchTarget      `json:"target"`
-	Revision  uint64              `json:"expected_revision"`
-	Lifecycle uint64              `json:"lifecycle_seq"`
-	Terminal  *cohortTerminal     `json:"terminal,omitempty"`
+	Provenance *CallbackProvenance `json:"callback,omitempty"`
+	ID         string              `json:"operation_id"`
+	Row        string              `json:"row_id"`
+	Ref        EpisodeRef          `json:"ref"`
+	Variant    alert.NativeVariant `json:"native_variant"`
+	Target     DispatchTarget      `json:"target"`
+	Revision   uint64              `json:"expected_revision"`
+	Lifecycle  uint64              `json:"lifecycle_seq"`
+	Terminal   *cohortTerminal     `json:"terminal,omitempty"`
 }
 type cohortTerminal struct {
 	SourceEndsAt time.Time `json:"source_ends_at"`
@@ -181,6 +183,7 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 		if err != nil || reason != "" || !slices.ContainsFunc(targets, func(t DispatchTarget) bool { return reflect.DeepEqual(t, c.Target) }) {
 			continue
 		}
+		r.Provenance = c.Provenance
 		requests = append(requests, r)
 		positions = append(positions, i)
 		stamps[i] = stamp

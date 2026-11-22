@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/alertmanager/alert"
@@ -247,7 +248,7 @@ func (r *reloader) reload(conf *config.Config) error {
 	var graph *actionGraph
 	if actions := r.actions; supported || actions != nil && actions.recovery != nil {
 		ctx, cancel := context.WithCancel(context.Background())
-		graph = &actionGraph{key: recipientKey, log: r.notificationLog, supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
+		graph = &actionGraph{graphID: uuid.NewString(), key: recipientKey, log: r.notificationLog, supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
 		graph.adapter = actions
 		for _, targets := range actionTargets {
 			for _, t := range targets {

@@ -6,6 +6,8 @@ package app
 import (
 	"container/list"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,13 +37,14 @@ const nativeDispatchVersion = 1
 var actionHeld = errors.New("ACTION_RECONCILIATION_REQUIRED")
 
 type actionIntegration struct {
-	name, digest string
-	index        int
-	canonical    bool
-	maxAlerts    uint64
-	prepared     *notify.Integration
+	name, digest, callbackPath string
+	index                      int
+	canonical                  bool
+	maxAlerts                  uint64
+	prepared                   *notify.Integration
 }
 type actionGraph struct {
+	graphID              string
 	retired              chan *alert.Alert
 	sweepRetired         atomic.Bool
 	generation           uint64
@@ -270,6 +273,48 @@ type plannedContact struct {
 	v2.DispatchTarget
 	integration actionIntegration
 	route       *dispatch.Route
+}
+
+// callbackProvenance uses structural routing before mute, time, dedup or action scope
+// filters. An oversized set drops the whole enrollment description.
+func (g *actionGraph) callbackProvenance(m *alert.Alert, sent plannedContact) *v2.CallbackProvenance {
+	if !sent.integration.canonical || sent.route == nil {
+		return nil
+	}
+	selected := sent.route.ID()
+	proof := &v2.CallbackProvenance{Graph: g.graphID, Path: sent.integration.callbackPath,
+		GroupDigest:   fmt.Sprintf("%x", sha256.Sum256([]byte(dispatch.GroupKeyForAlert(m, sent.route)))),
+		SelectedRoute: fmt.Sprintf("%x", sha256.Sum256([]byte(selected)))}
+	source := m.ProviderSource()
+	if !source.ManagedReceiver {
+		if value, ok := source.Labels["severity"]; ok {
+			value := string(value)
+			proof.SourceSeverity = &value
+		}
+	}
+	var routes []v2.CanonicalRoute
+	var contains bool
+	size := 0
+	for _, r := range g.routes.Match(m.Labels) {
+		for _, i := range g.targets[r.RouteOpts.Receiver] {
+			if !i.canonical {
+				continue
+			}
+			scope := v2.CanonicalRoute{Route: r.ID(), GroupKey: dispatch.GroupKeyForAlert(m, r),
+				Receiver: r.RouteOpts.Receiver, Digest: i.digest, Path: i.callbackPath}
+			encoded, err := json.Marshal(scope)
+			size += len(encoded) + 1
+			if err != nil || len(routes) >= 100 || size > 16<<10 {
+				return proof
+			}
+			contains = contains || (r == sent.route && i.digest == sent.integration.digest)
+			routes = append(routes, scope)
+		}
+	}
+	if contains {
+		proof.Routes = routes
+	}
+	return proof
 }
 
 func (g *actionGraph) contacts(ctx context.Context, source *alert.Alert, p v2.EpisodeProjection, scope []alert.TargetScopeEntry) ([]plannedContact, error) {
@@ -699,7 +744,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				}
 				contacts[m] = c
 				if c.pass == nil {
-					requests = append(requests, v2.OrdinaryCandidate{Canonical: i.canonical, Member: m, Projection: c.p, Target: c.contact.DispatchTarget})
+					requests = append(requests, v2.OrdinaryCandidate{Canonical: i.canonical, Member: m, Projection: c.p, Target: c.contact.DispatchTarget, Provenance: g.callbackProvenance(m, c.contact)})
 				}
 			}
 			var admissions []v2.OrdinaryAdmission
@@ -1091,7 +1136,8 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 			continue
 		}
 		if c.operation != "" {
-			e, err := a.journal.Claim(ctx, c.operation, c.target.TargetKey)
+			claimCtx := v2.WithCallbackProvenance(ctx, g.callbackProvenance(members[x], c.contact))
+			e, err := a.journal.Claim(claimCtx, c.operation, c.target.TargetKey)
 			if err != nil {
 				return finish(notify.Unrecoverable(err, notify.DefaultReason))
 			}
@@ -1297,6 +1343,7 @@ func actionDestinations(conf *config.Config, receivers map[string][]notify.Integ
 					base := scheme + "://alertmanager-middleware:9400" + alert.NativeCallbackPath
 					if url == base || url == base+"?notifier_type=oscaradmin" {
 						target.canonical = true
+						target.callbackPath = alert.NativeCallbackPath + strings.TrimPrefix(url, base)
 						target.prepared = nil
 					}
 				}
