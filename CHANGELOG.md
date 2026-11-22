@@ -1,3 +1,8 @@
+## Unreleased — Terminal permit expiry during grouped delivery
+
+- Native Alertmanager rechecks each member's original source and wire before private admission. When a permit expires between admission chunks, the remaining eligible members can reach the configured recipient in their original order. The expired member settles with its original token.
+- Native source `cbde7c83` uses the existing version 2 private cohort contract. The paired OSCAR Alertmanager fixture `b11a4e19a` covers expiry inside the store transaction. The feature defaults off, requires no additional migration or configuration, and awaits runtime qualification.
+
 ## Unreleased — Ordinary terminal group admission
 
 - Native Alertmanager claims a tracked group’s firing and terminal members in bounded private requests. A clear keeps its deterministic identity and original receipt when the group exceeds 4,096 members. An eligible subset can enter after a concurrent receipt only when its rendered members and recipient still match.
