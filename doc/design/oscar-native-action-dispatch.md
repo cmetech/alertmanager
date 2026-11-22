@@ -37,9 +37,7 @@ recovered sources. A positive bit only selects the exact indexed journal
 lookup. A missing candidate can obtain a local pass for its exact provider
 pointer and live epoch. Source enrollment and direct entry compete under the
 same local map guard. An uncertain direct entry retains its local fence. A
-never-enrolled contact has no durable pre-entry row after process loss. The
-controller's outstanding crash and terminal-contact decisions are documented
-in the A4 implementation report.
+never-enrolled contact has no durable pre-entry row after process loss. A replacement owner retains ordinary native failover behavior for contacts made before identity enrollment. A later independently eligible contact can overlap a pre-enrollment contact whose result died with the owner. Cross-owner exclusion starts at durable enrollment.
 
 ## Graph and qualification limits
 
@@ -51,9 +49,22 @@ and non-webhook integrations still need a qualified final-entry boundary.
 Some SDKs and protocols perform additional operations inside a single notifier
 invocation.
 
-A2's existing reserve and entry claims require a firing episode. The checkpoint
-has a provisional source-verified terminal-observation path. A decision on the
-durable contract for terminal callbacks is required before CLI assembly.
+Tracked ordinary resolution uses the private `reserve-terminal` command after
+normal group eligibility, send-resolved filtering and webhook truncation.
+The journal derives the operation ID from the retained episode row, variant,
+terminal sequence and destination. Claim rechecks current terminal identity,
+the exact original source pointer and expiry, routing, suppression and the
+lease. An entered target keeps its receipt after re-fire. A canonical callback
+carries a stable delivery UUID and ordinary lifecycle semantics. An independent
+firing action cannot use a terminal claim. The claim does not advance a repeat
+or reserve firing coverage.
+
+The backend pages firing and retained terminal identities at takeover. A
+bounded native membership summary selects an exact indexed read for a possible
+terminal interval. Uncommissioned adapters leave ordinary routing, inhibition
+and notification readers on the existing native pipeline. An active reader
+rejects a reload to unsupported destinations. The full transport set and the
+inhibition publication barrier remain prerequisites for commissioning.
 
 Measure three separate workloads. A proven untracked direct destination should
 add no journal HTTP or SQL operation on the negative path. First canonical

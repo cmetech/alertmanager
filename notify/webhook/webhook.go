@@ -141,6 +141,9 @@ func (n *Notifier) nativeDeliveryRequest(ctx context.Context, receiver string, m
 		if logical != "firing" && logical != "resolved" {
 			return nil, errors.New("invalid native transport state")
 		}
+		if !enrolled && logical == "resolved" && (!source.Resolved() || !source.EndsAt.Equal(a.EndsAt)) {
+			return nil, errors.New("ordinary native expiry mismatch")
+		}
 		if enrolled {
 			if stamp != source.ManagedMember || stamp.Generation <= 0 || stamp.Episode == "" || stamp.Event == "" || stamp.Digest == "" {
 				return nil, errors.New("managed source membership mismatch")
@@ -196,6 +199,9 @@ func truncateAlerts(maxAlerts uint64, alerts []*alert.Alert) ([]*alert.Alert, ui
 // Notify implements the Notifier interface.
 func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.NotifyVerdict {
 	alerts, numTruncated := truncateAlerts(n.conf.MaxAlerts, alerts)
+	if entry := notify.CurrentProviderEntry(ctx); entry != nil {
+		numTruncated += entry.Truncated
+	}
 	data := notify.GetTemplateData(ctx, n.tmpl, alerts, n.logger)
 
 	groupKey, err := notify.ExtractGroupKey(ctx)

@@ -379,8 +379,12 @@ func (a *App) setup() error {
 		clusterPeer = peer
 	}
 
-	// The CLI keeps the action reader dormant until terminal contacts and native transport coverage are settled.
-	actions, _ := opts.ActionOwner.Dispatch.(*nativeActions)
+	// A dormant embedded adapter must not install observers or ordinary notification readers.
+	actionOwner := opts.ActionOwner
+	actions, candidate := actionOwner.Dispatch.(*nativeActions)
+	if candidate && (!actionOwner.Enabled || actions == nil || actions.version != 1) {
+		actions, actionOwner.Dispatch = nil, nil
+	}
 	apih, err := api.New(api.Options{
 		Alerts:                     alerts,
 		Silences:                   silences,
@@ -396,7 +400,7 @@ func (a *App) setup() error {
 		ConnectSendMaxBytes:        opts.ConnectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: opts.ConnectMaxRequestBodyBytes,
 		SilenceMutationKey:         opts.SilenceMutationKey,
-		ActionOwner:                opts.ActionOwner,
+		ActionOwner:                actionOwner,
 		ManagedOwnerScheme:         opts.ManagedOwnerScheme,
 		ManagedOwnerCA:             opts.ManagedOwnerCA, ManagedOwnerKeyFile: opts.ManagedOwnerKeyFile,
 		ConversionAdmissionKeys: opts.ConversionAdmissionKeys,

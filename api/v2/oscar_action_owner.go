@@ -350,9 +350,6 @@ func (o *nativeActionOwner) projectionKey(p EpisodeProjection) (string, error) {
 }
 
 func (o *nativeActionOwner) restoreEpisode(p EpisodeProjection) error {
-	if p.State != "firing" {
-		return unavailable
-	}
 	key, err := o.projectionKey(p)
 	if err != nil {
 		return err
@@ -476,12 +473,77 @@ func (o *nativeActionOwner) nextUpdate(prev EpisodeProjection, e actionEvent) (e
 	return u, nil
 }
 
+// terminalBit indexes the exact source interval in bounded memory. A collision only triggers a lookup.
+func terminalBit(key string, v alert.NativeVariant) (uint16, uint64) {
+	start, _ := time.Parse(time.RFC3339Nano, v.StartsAt)
+	return membershipBit("terminal/" + key + "/" + v.Fingerprint + "/" + start.UTC().Format(time.RFC3339Nano))
+}
+
+func (o *nativeActionOwner) rememberTerminal(p EpisodeProjection) error {
+	owner, err := o.projectionKey(p)
+	if err != nil || p.State != "resolved" {
+		return reconcile
+	}
+	bucket, bit := terminalBit(sourceKey(owner, p.NativeVariant.Fingerprint), p.NativeVariant)
+	o.mu.Lock()
+	o.membership[bucket] |= bit
+	o.mu.Unlock()
+	return nil
+}
+
+// terminalCandidate uses membership only to select an indexed read. Exact lifecycle and managed
+// identity decide whether the result can be restored. A firing lookalike cannot reopen it.
+func (o *nativeActionOwner) terminalCandidate(ctx context.Context, a *alert.Alert) (*EpisodeProjection, error) {
+	v, owner := variantOf(a), a.ManagedMember.Episode
+	bucket, bit := terminalBit(sourceKey(owner, v.Fingerprint), v)
+	o.mu.Lock()
+	possible := o.membership[bucket]&bit != 0
+	o.mu.Unlock()
+	if !possible {
+		return nil, nil
+	}
+	var key, generation any
+	if owner != "" {
+		key, generation = owner, a.ManagedMember.Generation
+	}
+	var rows []EpisodeProjection
+	if err := o.read(ctx, "recover", map[string]any{"projection": "terminal", "native_variant": v, "managed_key": key, "managed_generation": generation}, &rows); err != nil {
+		return nil, err
+	}
+	if rows == nil || len(rows) > 1 {
+		return nil, reconcile
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	p := rows[0]
+	k, err := o.projectionKey(p)
+	if err != nil || k != owner || !managedUUID.MatchString(p.ID) || p.State != "resolved" || !sameVariant(v, p.NativeVariant) ||
+		p.ManagedOwner != nil && p.ManagedOwner.Generation != a.ManagedMember.Generation ||
+		!a.Resolved() && !(a.ManagedReceiver && a.ManagedOperationKind == "clear") {
+		return nil, reconcile
+	}
+	return &p, nil
+}
+
 // hydrate loads only the current durable candidates for a source skipped by a bounded recovery scan.
 func (o *nativeActionOwner) hydrate(ctx context.Context, s *episodeSlot) error {
+	a := s.latest()
+	if a != nil && s.projection.ID == "" {
+		p, err := o.terminalCandidate(ctx, a)
+		if err != nil {
+			return err
+		}
+		if p != nil {
+			s.projection = *p
+			o.mu.Lock()
+			o.byID[p.EpisodeRef.EpisodeID] = s
+			o.mu.Unlock()
+		}
+	}
 	if !s.needsRestore {
 		return nil
 	}
-	a := s.latest()
 	if a == nil {
 		return unverified
 	}
@@ -745,6 +807,11 @@ func (o *nativeActionOwner) flush(ctx context.Context, s *episodeSlot) error {
 		s.local.Lock()
 		s.publication++
 		s.local.Unlock()
+		if p.State == "resolved" {
+			if err := o.rememberTerminal(p); err != nil {
+				return err
+			}
+		}
 		s.projection = p
 		s.needsPublish = true
 		s.next = nil
@@ -1312,7 +1379,7 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 
 // actionView returns effective routing labels without performing a journal read on a list endpoint.
 func (api *API) actionView(source *alert.Alert) *alert.Alert {
-	if o := api.actionOwner; o != nil {
+	if o := api.actionOwner; o != nil && o.dispatch != nil && o.dispatch.Version() == 1 {
 		if reader, ok := o.dispatch.(interface {
 			ReadView(*alert.Alert) *alert.Alert
 		}); ok {

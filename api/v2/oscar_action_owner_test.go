@@ -567,7 +567,7 @@ func TestOverflowGCAndDeferredRecoveryAtCapacity(t *testing.T) {
 	p := EpisodeProjection{ID: "11111111-1111-4111-8111-111111111111", episodeUpdate: episodeUpdate{EpisodeRef: EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: "22222222-1111-4111-8111-111111111111", Generation: 1, VariantRevision: 1}, LifecycleSeq: 1, NativeVariant: variantOf(source), State: "firing", SourceSeverity: "major", ActiveSince: source.StartsAt.UTC().Format(time.RFC3339Nano)}, Floor: "critical", SeverityRevision: 1}
 	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
 		if cmd == "recover" {
-			if args["projection"] == "episodes" {
+			if args["projection"] == "membership" {
 				rows := []EpisodeProjection{}
 				if args["after_id"] == nil {
 					rows = append(rows, p)
@@ -831,4 +831,115 @@ func TestOscarActionMembershipCandidateMissNeverEnrolls(t *testing.T) {
 	require.Equal(t, 1, reads)
 	o.slot(key, true)
 	require.False(t, pass.Enter(), "enrollment after a checked negative revokes its entry")
+}
+
+func TestOscarActionTerminalEntryRequiresOriginalObservation(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Second)}, now, false)
+	p := EpisodeProjection{episodeUpdate: episodeUpdate{State: "resolved", NativeVariant: variantOf(source), LifecycleSeq: 2}}
+	s := &episodeSlot{source: source}
+	terminal := &terminalObservation{LifecycleSeq: 2, NativeVariant: variantOf(source), SourceEndsAt: source.EndsAt}
+	require.NoError(t, s.contactCurrentLocked(p, source, terminal))
+	require.Error(t, s.contactCurrentLocked(p, source, nil))
+	replacement := *source
+	replacement.EndsAt = now.Add(time.Hour)
+	s.source = &replacement
+	require.Error(t, s.contactCurrentLocked(p, source, terminal))
+	require.Error(t, s.contactCurrentLocked(p, &replacement, terminal))
+	s.source = source
+	s.removed = true
+	require.Error(t, s.contactCurrentLocked(p, source, terminal))
+}
+
+func TestOscarActionRecoverTerminalUsesExactInterval(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Second)}, now, false)
+	ref := EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1}
+	p := EpisodeProjection{ID: "11111111-1111-4111-8111-111111111111", episodeUpdate: episodeUpdate{EpisodeRef: ref, NativeVariant: variantOf(a), State: "resolved", SourceSeverity: "major", ActiveSince: variantOf(a).StartsAt, LifecycleSeq: 2}}
+	lookups := 0
+	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+		require.Equal(t, "recover", cmd)
+		require.Equal(t, "terminal", args["projection"])
+		lookups++
+		*out.(*[]EpisodeProjection) = []EpisodeProjection{p}
+		return nil
+	}), nil)
+	require.NoError(t, o.rememberTerminal(p))
+	got, err := o.terminalCandidate(t.Context(), a)
+	require.NoError(t, err)
+	require.Equal(t, &p, got)
+	replacement := *a
+	replacement.EndsAt = now.Add(time.Hour)
+	_, err = o.terminalCandidate(t.Context(), &replacement)
+	require.Error(t, err)
+	replacement.StartsAt = now
+	// A conservative membership collision is permitted and correctly incurs a lookup.
+	key := sourceKey("", a.Fingerprint().String())
+	bucket, bit := terminalBit(key, variantOf(a))
+	for {
+		b, mask := terminalBit(key, variantOf(&replacement))
+		if b != bucket || mask != bit {
+			break
+		}
+		replacement.StartsAt = replacement.StartsAt.Add(time.Nanosecond)
+	}
+	got, err = o.terminalCandidate(t.Context(), &replacement)
+	require.NoError(t, err)
+	require.Nil(t, got)
+	require.Equal(t, 2, lookups)
+}
+
+func TestOscarActionTerminalClaimAndSignedMember(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-2 * time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
+	ref := EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1}
+	p := EpisodeProjection{ID: "11111111-1111-4111-8111-111111111111", episodeUpdate: episodeUpdate{EpisodeRef: ref, NativeVariant: variantOf(source), State: "resolved", LifecycleSeq: 2, SourceSeverity: "major", ActiveSince: variantOf(source).StartsAt}}
+	target := DispatchTarget{ReceiverID: "ops", Scope: []ScopeEntry{}, IntegrationDigest: strings.Repeat("b", 64), RepeatIntervalUS: 1000}
+	key, token := strings.Repeat("c", 64), strings.Repeat("a", 64)
+	id := "33333333-3333-4333-8333-333333333333"
+	expires := now.Add(time.Minute)
+	result := ActionResultV1{OperationID: id, EpisodeRef: ref, State: "accepted", PermitExpiresAt: &expires, Targets: []TargetResult{{Target: target, TargetKey: key, State: "pending"}}}
+	request := ordinaryRequest{Kind: "ordinary", OperationID: id, EpisodeRef: ref, Target: target, Terminal: &terminalObservation{p.LifecycleSeq, p.NativeVariant, source.EndsAt}}
+	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+		switch cmd {
+		case "reserve-terminal":
+			require.Equal(t, source.EndsAt.UTC(), args["source_ends_at"])
+			*out.(*ActionResultV1) = result
+		case "lookup":
+			*out.(**actionIntent) = &actionIntent{Request: mustRaw(t, request), Digest: key, Result: result}
+		case "claim-target":
+			return json.Unmarshal(mustRaw(t, map[string]any{"entry_token": token, "lease_expires_at": expires, "permit_expires_at": expires}), out)
+		case "settle-target":
+			require.Equal(t, token, args["entry_token"])
+			*out.(*ActionResultV1) = result
+		default:
+			t.Fatalf("unexpected %s", cmd)
+		}
+		return nil
+	}), singleActionDispatch{target: target})
+	o.lease = actionLease{Epoch: 1, ExpiresAt: expires}
+	o.recovered = true
+	slot := &episodeSlot{source: source, projection: p}
+	o.byKey[sourceKey("", p.NativeVariant.Fingerprint)], o.byID[ref.EpisodeID] = slot, slot
+	r, err := o.ReserveTerminal(t.Context(), source, p, target)
+	require.NoError(t, err)
+	entry, err := o.Claim(t.Context(), r.OperationID, key)
+	require.NoError(t, err)
+	require.True(t, entry.ForSource(source))
+	stamp, err := o.Delivery(t.Context(), source, target.ReceiverID, id, &entry)
+	require.NoError(t, err)
+	require.Equal(t, "resolved", stamp.State)
+	require.Nil(t, stamp.OperationID)
+	require.Equal(t, p.LifecycleSeq, stamp.LifecycleSeq)
+	_, err = o.Delivery(t.Context(), source, target.ReceiverID, id, nil)
+	require.Error(t, err)
+	next := *source
+	next.StartsAt, next.EndsAt = now, expires
+	o.observe("", &next, false)
+	require.False(t, entry.LocalValid())
+	_, err = o.Settle(t.Context(), entry, "confirmed", "original acceptance")
+	require.NoError(t, err)
 }

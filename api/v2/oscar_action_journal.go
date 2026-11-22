@@ -19,6 +19,7 @@ import (
 // its late receipt. Call Valid again immediately before native provider entry.
 type Entry struct {
 	OperationID, TargetKey, token string
+	source                        *alert.Alert
 	ref                           EpisodeRef
 	revision                      uint64
 	logicalID                     *string
@@ -28,6 +29,9 @@ type Entry struct {
 	ready                         func() bool
 }
 
+// ForSource binds the provider invocation to the precise pointer checked at claim.
+func (e Entry) ForSource(source *alert.Alert) bool { return source != nil && e.source == source }
+
 func (e Entry) Valid() bool { return (e.ready == nil || e.ready()) && e.LocalValid() }
 
 // LocalValid checks the lease, publication and source after all blocking preparation is complete.
@@ -36,7 +40,7 @@ func (e Entry) LocalValid() bool { return e.valid != nil && e.valid() && time.No
 // ActionJournal is the pipeline's A3 handoff. Until Bind returns and Version
 // reports 1 the A4 reader must fence tracked ordinary delivery and callback signing.
 type ActionJournal interface {
-	ObservationValid(*alert.Alert, EpisodeProjection) bool
+	ReserveTerminal(context.Context, *alert.Alert, EpisodeProjection, DispatchTarget) (ActionResultV1, error)
 	InspectOrdinary(context.Context, *alert.Alert) (*EpisodeProjection, *OrdinaryPass, error)
 	Lookup(context.Context, string) (ActionResultV1, error)
 	Delivery(context.Context, *alert.Alert, string, string, *Entry) (alert.NativeDeliveryV1, error)
@@ -64,12 +68,12 @@ func (o *nativeActionOwner) Delivery(ctx context.Context, source *alert.Alert, r
 	}
 	d := alert.NativeDeliveryV1{Version: 1, EpisodeRef: p.EpisodeRef, NativeVariant: p.NativeVariant, LifecycleSeq: p.LifecycleSeq, State: p.State, ActiveSince: p.ActiveSince, SourceSeverity: p.SourceSeverity, EffectiveSeverity: p.EffectiveSeverity(), DeliveryID: id, TargetScope: []ScopeEntry{}}
 	if entry != nil {
-		if !entry.Valid() || entry.ref != p.EpisodeRef || entry.revision != p.SeverityRevision || entry.target.ReceiverID != receiver {
+		if !entry.ForSource(source) || !entry.Valid() || entry.ref != p.EpisodeRef || entry.revision != p.SeverityRevision || entry.target.ReceiverID != receiver {
 			return d, reconcile
 		}
 		d.OperationID = entry.logicalID
 		d.TargetScope = entry.target.Scope
-	} else if p.Floor != "" && p.State == "firing" {
+	} else if p.State == "resolved" || p.Floor != "" {
 		return d, reconcile
 	}
 	return d, d.Validate(receiver)
@@ -133,12 +137,75 @@ func (o *nativeActionOwner) ReserveOrdinary(ctx context.Context, id string, ref 
 	return r, s.current(p, source, true)
 }
 
+// A terminal observation never grants firing, policy or ticket authority.
+type terminalObservation struct {
+	LifecycleSeq  uint64              `json:"lifecycle_seq"`
+	NativeVariant alert.NativeVariant `json:"native_variant"`
+	SourceEndsAt  time.Time           `json:"source_ends_at"`
+}
+
+func (s *episodeSlot) contactCurrentLocked(p EpisodeProjection, source *alert.Alert, terminal *terminalObservation) error {
+	if err := s.currentLocked(p, source, terminal == nil); err != nil {
+		return err
+	}
+	if terminal != nil && (s.removed || p.State != "resolved" || p.LifecycleSeq != terminal.LifecycleSeq ||
+		!sameVariant(p.NativeVariant, terminal.NativeVariant) || !source.EndsAt.Equal(terminal.SourceEndsAt) ||
+		(!source.Resolved() && !(source.ManagedReceiver && source.ManagedOperationKind == "clear"))) {
+		return mismatch
+	}
+	return nil
+}
+
+func (s *episodeSlot) contactCurrent(p EpisodeProjection, source *alert.Alert, terminal *terminalObservation) error {
+	s.local.Lock()
+	defer s.local.Unlock()
+	return s.contactCurrentLocked(p, source, terminal)
+}
+
+// ReserveTerminal binds a due ordinary clear to one exact source and receiver.
+// Retrying the command recovers the same backend-derived operation and cannot renew its permit.
+func (o *nativeActionOwner) ReserveTerminal(ctx context.Context, source *alert.Alert, p EpisodeProjection, target DispatchTarget) (ActionResultV1, error) {
+	ctx = o.withEpoch(ctx)
+	var r ActionResultV1
+	if source == nil || !o.ready() || len(target.Scope) != 0 {
+		return r, unavailable
+	}
+	s, err := o.episode(p.EpisodeRef)
+	if err != nil {
+		return r, err
+	}
+	s.turn.Lock()
+	defer s.turn.Unlock()
+	if err = o.flush(ctx, s); err != nil {
+		return r, err
+	}
+	if s.projection.EpisodeRef != p.EpisodeRef || s.projection.SeverityRevision != p.SeverityRevision {
+		return r, mismatch
+	}
+	terminal := &terminalObservation{p.LifecycleSeq, p.NativeVariant, source.EndsAt}
+	if err = s.contactCurrent(s.projection, source, terminal); err != nil {
+		return r, err
+	}
+	if err = o.verifySource(ctx, source, "resolved"); err != nil {
+		return r, err
+	}
+	args := map[string]any{"ref": p.EpisodeRef, "expected_revision": p.SeverityRevision, "lifecycle_seq": p.LifecycleSeq, "native_variant": p.NativeVariant, "source_ends_at": source.EndsAt.UTC(), "target": target}
+	if err = o.write(ctx, "reserve-terminal", args, &r); err != nil {
+		return r, err
+	}
+	if !managedUUID.MatchString(r.OperationID) || r.EpisodeRef != p.EpisodeRef || r.SeverityRevision != p.SeverityRevision || len(r.Targets) != 1 || !reflect.DeepEqual(r.Targets[0].Target, target) {
+		return ActionResultV1{}, reconcile
+	}
+	return r, s.contactCurrent(s.projection, source, terminal)
+}
+
 type ordinaryRequest struct {
-	Kind             string         `json:"kind"`
-	OperationID      string         `json:"operation_id"`
-	EpisodeRef       EpisodeRef     `json:"episode_ref"`
-	Target           DispatchTarget `json:"target"`
-	SeverityRevision uint64         `json:"severity_revision"`
+	Terminal         *terminalObservation `json:"terminal,omitempty"`
+	Kind             string               `json:"kind"`
+	OperationID      string               `json:"operation_id"`
+	EpisodeRef       EpisodeRef           `json:"episode_ref"`
+	Target           DispatchTarget       `json:"target"`
+	SeverityRevision uint64               `json:"severity_revision"`
 }
 
 func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, error) {
@@ -163,6 +230,9 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	if err = json.Unmarshal(i.Request, &ordinary); err != nil {
 		return Entry{}, reconcile
 	}
+	if ordinary.Terminal != nil && (ordinary.Kind != "ordinary" || len(ordinary.Target.Scope) != 0 || ordinary.OperationID != id || ordinary.EpisodeRef != r.EpisodeRef || ordinary.SeverityRevision != r.SeverityRevision || !reflect.DeepEqual(ordinary.Target, r.Targets[idx].Target)) {
+		return Entry{}, reconcile
+	}
 	if ordinary.Kind == "ordinary" {
 		req = ActionRequestV1{Kind: "ordinary", EpisodeRef: r.EpisodeRef, TargetScope: ordinary.Target.Scope}
 	} else if !decodeAction(i.Request, &req) || !validAction(req) {
@@ -182,7 +252,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	if p.EpisodeRef != r.EpisodeRef || p.SeverityRevision != r.SeverityRevision {
 		return Entry{}, mismatch
 	}
-	if err = s.current(p, source, true); err != nil {
+	if err = s.contactCurrent(p, source, ordinary.Terminal); err != nil {
 		return Entry{}, err
 	}
 	if err = o.verifySource(ctx, source, p.State); err != nil {
@@ -198,7 +268,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	if r.PermitExpiresAt == nil || !time.Now().Before(o.localDeadline(*r.PermitExpiresAt)) {
 		return Entry{}, actionError{409, "NATIVE_PERMIT_EXPIRED"}
 	}
-	if err = s.current(p, source, true); err != nil {
+	if err = s.contactCurrent(p, source, ordinary.Terminal); err != nil {
 		return Entry{}, err
 	}
 	var entry struct {
@@ -235,12 +305,12 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 		}
 		logical = &i.LogicalActionID
 	}
-	e := Entry{OperationID: id, TargetKey: key, token: entry.Token, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, ready: o.ready, valid: func() bool {
+	e := Entry{OperationID: id, TargetKey: key, token: entry.Token, source: source, ref: r.EpisodeRef, revision: r.SeverityRevision, logicalID: logical, target: r.Targets[idx].Target, expires: until, ready: o.ready, valid: func() bool {
 		o.mu.Lock()
 		defer o.mu.Unlock()
 		s.local.Lock()
 		defer s.local.Unlock()
-		return o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && s.publication == generation && s.currentLocked(p, source, true) == nil
+		return o.recovered && o.lease.Epoch == epoch && o.lease.ExpiresAt.After(time.Now()) && s.publication == generation && s.contactCurrentLocked(p, source, ordinary.Terminal) == nil
 	}}
 	if !e.Valid() {
 		_, err = o.Settle(ctx, e, "no_effect", "INVALIDATED_BEFORE_PROVIDER_ENTRY")
@@ -310,6 +380,18 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 			tracked = true
 		}
 	}
+	if !tracked {
+		p, err := o.terminalCandidate(ctx, source)
+		if err != nil {
+			return nil, nil, err
+		}
+		if p != nil {
+			if err := o.restoreEpisode(*p); err != nil {
+				return nil, nil, err
+			}
+			tracked = true
+		}
+	}
 	if tracked {
 		p, err := o.projectSource(ctx, source, false)
 		return &p, nil, err
@@ -344,15 +426,4 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 func membershipBit(key string) (uint16, uint64) {
 	sum := sha256.Sum256([]byte(key))
 	return binary.BigEndian.Uint16(sum[:2]), uint64(1) << (sum[2] & 63)
-}
-
-// ObservationValid checks local lifecycle and lease state for a signed terminal observation.
-func (o *nativeActionOwner) ObservationValid(source *alert.Alert, p EpisodeProjection) bool {
-	s, err := o.episode(p.EpisodeRef)
-	if err != nil || !o.ready() {
-		return false
-	}
-	s.turn.Lock()
-	defer s.turn.Unlock()
-	return !s.uncertain && s.projection.EpisodeRef == p.EpisodeRef && s.projection.LifecycleSeq == p.LifecycleSeq && s.projection.SeverityRevision == p.SeverityRevision && s.current(s.projection, source, false) == nil
 }

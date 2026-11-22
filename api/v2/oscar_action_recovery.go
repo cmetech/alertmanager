@@ -46,6 +46,19 @@ func (o *nativeActionOwner) recoverWork(ctx context.Context, id string, seen map
 		}
 	}
 	r := i.Result
+	var ordinary ordinaryRequest
+	if err = json.Unmarshal(i.Request, &ordinary); err != nil {
+		return reconcile
+	}
+	if ordinary.Terminal != nil {
+		// Only a due ordinary group holding the provider pointer can drive this contact.
+		// Close stale pending reservations without waking, renewing or replaying entered work.
+		if slices.ContainsFunc(r.Targets, func(t TargetResult) bool { return t.State == "pending" }) {
+			var out ActionResultV1
+			return o.write(ctx, "reconcile-invalidated", map[string]any{"operation_id": id}, &out)
+		}
+		return nil
+	}
 	s, err := o.episode(r.EpisodeRef)
 	if err != nil {
 		o.mu.Lock()
@@ -78,10 +91,6 @@ func (o *nativeActionOwner) recoverWork(ctx context.Context, id string, seen map
 		return o.write(ctx, "reconcile-invalidated", map[string]any{"operation_id": id}, &ignored)
 	}
 	var req ActionRequestV1
-	var ordinary ordinaryRequest
-	if err = json.Unmarshal(i.Request, &ordinary); err != nil {
-		return reconcile
-	}
 	explicit := ordinary.Kind != "ordinary"
 	if explicit && (!decodeAction(i.Request, &req) || !validAction(req)) {
 		return reconcile
@@ -206,7 +215,7 @@ func (o *nativeActionOwner) reconcileLocked(ctx context.Context, s *episodeSlot,
 func (o *nativeActionOwner) recoverEpisodes(ctx context.Context) error {
 	after := ""
 	for {
-		p := map[string]any{"projection": "episodes", "limit": 100}
+		p := map[string]any{"projection": "membership", "limit": 100}
 		if after != "" {
 			p["after_id"] = after
 		}
@@ -237,7 +246,13 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context) error {
 			if !managedUUID.MatchString(row.ID) || row.ID <= after {
 				return reconcile
 			}
-			if err := o.restoreEpisode(row); err != nil {
+			var err error
+			if row.State == "resolved" {
+				err = o.rememberTerminal(row)
+			} else {
+				err = o.restoreEpisode(row)
+			}
+			if err != nil {
 				return err
 			}
 			after = row.ID

@@ -15,6 +15,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -158,10 +159,13 @@ func (r *reloader) reload(conf *config.Config) error {
 	// errors.
 	var actionTargets map[string][]actionIntegration
 	var supported bool
-	if r.actions != nil {
+	if r.actions != nil && r.actions.canInstall() {
 		actionTargets, supported, err = actionDestinations(conf, receivers)
 		if err != nil {
 			return err
+		}
+		if !supported && r.actions.snapshot() != nil {
+			return errors.New("active native action graph cannot switch to unsupported receivers")
 		}
 	}
 	if err := r.tracingMgr.ApplyConfig(conf.TracingConfig); err != nil {
@@ -212,7 +216,7 @@ func (r *reloader) reload(conf *config.Config) error {
 
 	var stage notify.Stage = pipeline
 	var graph *actionGraph
-	if actions := r.actions; actions != nil {
+	if actions := r.actions; supported {
 		ctx, cancel := context.WithCancel(context.Background())
 		graph = &actionGraph{supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
 		newInhibitor.Project = actions.readView

@@ -14,6 +14,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -73,6 +74,8 @@ func TestReloaderSuccessfulNativeDeliveryAppearsAsEstimatedTiming(t *testing.T) 
 	}))
 	t.Cleanup(webhook.Close)
 	r := newTestReloader(t)
+	// Even an embedded caller supplying the dormant adapter retains the ordinary pipeline.
+	r.actions = newNativeActions(nil, nil, r.logger)
 	t.Cleanup(func() { _ = r.stop() })
 	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1ms\n  group_interval: 1h\n  repeat_interval: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: %s\n", webhook.URL))
 	require.NoError(t, err)
@@ -80,6 +83,9 @@ func TestReloaderSuccessfulNativeDeliveryAppearsAsEstimatedTiming(t *testing.T) 
 	a := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "LinkDown"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
 	require.NoError(t, r.alerts.Put(t.Context(), a))
 	require.NoError(t, r.reload(cfg))
+	require.Nil(t, r.actions.snapshot())
+	require.Nil(t, r.dispatcher.Load().Project)
+	require.Nil(t, r.inhibitor.Load().Project)
 	select {
 	case <-webhookCalled:
 	case <-time.After(5 * time.Second):
@@ -267,6 +273,9 @@ func TestOscarActionFloorRebuildsGroupsAndInhibitorOnReload(t *testing.T) {
 	cfg, err := config.Load("route:\n  receiver: base\n  group_wait: 1h\n  routes:\n  - receiver: escalated\n    matchers: ['severity=critical']\nreceivers:\n- name: base\n- name: escalated\ninhibit_rules:\n- source_matchers: ['severity=critical']\n  target_matchers: ['severity=minor']\n  equal: [cluster]\n")
 	require.NoError(t, err)
 	r.actions = newNativeActions(func(_, _ string, read func(*alert.Alert)) { read(current) }, nil, r.logger)
+	// Exercise projected readers directly in this fixture while the shipped version is dormant.
+	r.actions.version = 1
+	require.NoError(t, r.actions.Bind(struct{ v2.ActionJournal }{}))
 	require.NoError(t, r.reload(cfg))
 	var p v2.EpisodeProjection
 	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"lifecycle_seq":1,"active_since":%q,"state":"firing","source_severity":"major","floor":"critical","severity_revision":1}`, current.Fingerprint().String(), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))), &p))
@@ -283,4 +292,48 @@ func TestOscarActionFloorRebuildsGroupsAndInhibitorOnReload(t *testing.T) {
 		require.Equal(t, model.LabelValue("major"), current.Labels["severity"])
 		require.True(t, r.inhibitor.Load().Mutes(t.Context(), labelset.FromModel(model.LabelSet{"cluster": "x", "severity": "minor"})))
 	}
+}
+
+type terminalFixtureJournal struct {
+	v2.ActionJournal
+	states  []string
+	sources []*alert.Alert
+}
+
+func (j *terminalFixtureJournal) ReserveTerminal(_ context.Context, s *alert.Alert, p v2.EpisodeProjection, t v2.DispatchTarget) (v2.ActionResultV1, error) {
+	state := j.states[len(j.sources)]
+	j.sources = append(j.sources, s)
+	return v2.ActionResultV1{EpisodeRef: p.EpisodeRef, Targets: []v2.TargetResult{{Target: t, State: state}}}, nil
+}
+
+func TestOscarActionTerminalConfirmationAndUnknownStayOutOfProviderReplay(t *testing.T) {
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	cfg, err := config.Load("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: http://example.invalid/notify\n")
+	require.NoError(t, err)
+	j := &terminalFixtureJournal{states: []string{"confirmed", "unknown", "confirmed"}}
+	r.actions = newNativeActions(nil, nil, r.logger)
+	r.actions.version = 1
+	require.NoError(t, r.actions.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	g := r.actions.snapshot()
+	now := time.Now().UTC()
+	var members []*alert.Alert
+	var contacts []ordinaryContact
+	for _, host := range []string{"a", "b"} {
+		s := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "severity": "major", "host": model.LabelValue(host)}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
+		var p v2.EpisodeProjection
+		require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":"22222222-2222-4222-8222-222222222222","generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"lifecycle_seq":2,"state":"resolved","source_severity":"major"}`, s.Fingerprint().String(), s.StartsAt.Format(time.RFC3339Nano))), &p))
+		members = append(members, s)
+		contacts = append(contacts, ordinaryContact{p: p, contact: plannedContact{DispatchTarget: v2.DispatchTarget{ReceiverID: "team"}, integration: g.targets["team"][0]}})
+	}
+	route := g.routes.Match(members[0].Labels)[0]
+	ctx := notify.WithGroupKey(t.Context(), dispatch.GroupKeyForAlert(members[0], route))
+	// A nil provider traps an accidental call. Both receipts have already crossed the entry boundary.
+	i := notify.NewIntegration(nil, nil, "webhook", 0, "team")
+	v := r.actions.invoke(ctx, g, &i, members, contacts)
+	require.ErrorIs(t, v.Err(), actionHeld)
+	require.Equal(t, members, j.sources)
+	v = r.actions.invoke(ctx, g, &i, members[:1], contacts[:1])
+	require.NoError(t, v.Err())
 }

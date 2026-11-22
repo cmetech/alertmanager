@@ -37,9 +37,10 @@ func (s SelectedAction) matches(receiver, integration string, index int) bool {
 
 // ProviderEntry carries one final local entry gate and an optional signed canonical batch.
 type ProviderEntry struct {
-	Begin   func() bool
-	Members []alert.NativeDeliveryMember
-	Key     []byte
+	Truncated uint64 // Original webhook members already excluded before terminal contact reservation.
+	Begin     func() bool
+	Members   []alert.NativeDeliveryMember
+	Key       []byte
 }
 
 type providerEntryKey struct{}

@@ -26,7 +26,7 @@ import (
 	"github.com/prometheus/alertmanager/silence"
 )
 
-// A firing-only protocol cannot advertise v1 while terminal coverage and restoration are unresolved.
+// Remain dormant until the transport and recovery readers qualify together.
 const nativeDispatchVersion = 0
 
 var actionHeld = errors.New("ACTION_RECONCILIATION_REQUIRED")
@@ -35,6 +35,7 @@ type actionIntegration struct {
 	name, digest string
 	index        int
 	canonical    bool
+	maxAlerts    uint64
 }
 type actionGraph struct {
 	supported  bool
@@ -53,6 +54,7 @@ type publishedMember struct {
 	member *alert.Alert
 }
 type nativeActions struct {
+	version  int
 	mu       sync.RWMutex
 	graph    *actionGraph
 	journal  v2.ActionJournal
@@ -65,7 +67,7 @@ type nativeActions struct {
 }
 
 func newNativeActions(read func(string, string, func(*alert.Alert)), key []byte, logger *slog.Logger) *nativeActions {
-	return &nativeActions{read: read, key: key, logger: logger, sources: make(map[model.Fingerprint]publishedMember), episodes: make(map[string]publishedMember), pending: make(map[string]bool)}
+	return &nativeActions{version: nativeDispatchVersion, read: read, key: key, logger: logger, sources: make(map[model.Fingerprint]publishedMember), episodes: make(map[string]publishedMember), pending: make(map[string]bool)}
 }
 func (a *nativeActions) Bind(j v2.ActionJournal) error {
 	a.mu.Lock()
@@ -73,11 +75,16 @@ func (a *nativeActions) Bind(j v2.ActionJournal) error {
 	a.journal = j
 	return nil
 }
+func (a *nativeActions) canInstall() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.version == 1 && a.journal != nil
+}
 func (a *nativeActions) Version() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if a.journal != nil && a.graph != nil && a.graph.pipeline != nil && a.graph.supported {
-		return nativeDispatchVersion
+		return a.version
 	}
 	return 0
 }
@@ -375,7 +382,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			held = err
 			continue
 		}
-		if p != nil && p.State == "firing" {
+		if p != nil {
 			member, err := effectiveMember(s, *p)
 			if err != nil || !member.Labels.Equal(m.Labels) {
 				held = actionHeld
@@ -412,10 +419,15 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			break
 		}
 	}
-	if due(ordinary) {
+	if len(ordinary) > 0 {
+		subsetDue, groupDue := due(ordinary), due(members)
 		for _, m := range ordinary {
 			s := m.ProviderSource()
 			c := contacts[s]
+			terminal := c.p.State == "resolved" || s.Resolved() || s.ManagedReceiver && s.ManagedOperationKind == "clear"
+			if terminal && !groupDue || !terminal && !subsetDue {
+				continue
+			}
 			if i.canonical && c.pass != nil {
 				p, err := a.journal.Project(ctx, s)
 				if err != nil {
@@ -445,7 +457,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			result.Members = append(result.Members, m)
 		}
 	}
-	result.WriteGroup = len(result.Members) > 0 || len(tracked) == len(members)
+	result.WriteGroup = held == nil && (len(result.Members) > 0 || len(tracked) == len(members))
 	result.Held = held
 	result.Members = append(result.Members, tracked...)
 	if len(result.Members) == 0 {
@@ -479,7 +491,70 @@ func (a *nativeActions) reserve(ctx context.Context, p v2.EpisodeProjection, t p
 	}
 	return ordinaryContact{operation: id, target: r.Targets[0], contact: t, p: p}, nil
 }
+
+// terminalContact resolves an ordinary closure only after RetryStage has applied send_resolved.
+func (a *nativeActions) terminalContact(ctx context.Context, g *actionGraph, m *alert.Alert, c ordinaryContact) (ordinaryContact, error) {
+	possible, err := g.contacts(ctx, m.ProviderSource(), c.p, nil)
+	if err != nil {
+		return c, err
+	}
+	idx := slices.IndexFunc(possible, func(t plannedContact) bool {
+		return t.ReceiverID == c.contact.ReceiverID && t.IntegrationDigest == c.contact.integration.digest && currentGroup(ctx, m, t.route)
+	})
+	if idx < 0 {
+		return c, actionHeld
+	}
+	c.contact = possible[idx]
+	r, err := a.journal.ReserveTerminal(ctx, m.ProviderSource(), c.p, c.contact.DispatchTarget)
+	if err != nil {
+		return c, err
+	}
+	if len(r.Targets) != 1 || !reflect.DeepEqual(r.Targets[0].Target, c.contact.DispatchTarget) {
+		return c, actionHeld
+	}
+	c.operation, c.target = r.OperationID, r.Targets[0]
+	switch c.target.State {
+	case "pending", "confirmed":
+		return c, nil
+	default:
+		return c, actionHeld
+	}
+}
+
 func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.Integration, members []*alert.Alert, contacts []ordinaryContact) notify.NotifyVerdict {
+	var held error
+	var truncated uint64
+	if slices.ContainsFunc(contacts, func(c ordinaryContact) bool { return c.p.State == "resolved" && c.operation == "" }) {
+		// Freeze the native webhook's actual prefix before eliding an already-confirmed terminal member.
+		// A response for the prefix supplies no acceptance evidence for a truncated source.
+		if limit := contacts[0].contact.integration.maxAlerts; i.Name() == "webhook" && limit != 0 && uint64(len(members)) > limit {
+			truncated = uint64(len(members)) - limit
+			members, contacts = members[:limit], contacts[:limit]
+		}
+		send := make([]*alert.Alert, 0, len(members))
+		pending := make([]ordinaryContact, 0, len(contacts))
+		for x, c := range contacts {
+			if c.p.State == "resolved" && c.operation == "" {
+				var err error
+				c, err = a.terminalContact(ctx, g, members[x], c)
+				if err != nil {
+					held = errors.Join(held, err)
+					continue
+				}
+				if c.target.State == "confirmed" {
+					continue
+				}
+			}
+			send, pending = append(send, members[x]), append(pending, c)
+		}
+		members, contacts = send, pending
+		if len(members) == 0 {
+			if held != nil {
+				return notify.Unrecoverable(held, notify.DefaultReason)
+			}
+			return notify.Success()
+		}
+	}
 	var claimed []v2.Entry
 	var passes []*v2.OrdinaryPass
 	entered := false
@@ -504,7 +579,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		return v
 	}
 	fail := func(err error) notify.NotifyVerdict { return finish(notify.Unrecoverable(err, notify.DefaultReason)) }
-	bound := &notify.ProviderEntry{}
+	bound := &notify.ProviderEntry{Truncated: truncated}
 	for x, c := range contacts {
 		s := members[x].ProviderSource()
 		var entry *v2.Entry
@@ -514,13 +589,17 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 				return fail(err)
 			}
 			claimed = append(claimed, e)
+			if !e.ForSource(s) {
+				return fail(actionHeld)
+			}
 			entry = &e
 		}
 		if c.contact.integration.canonical {
-			id := uuid.NewString()
-			if entry != nil {
-				id = uuid.NewSHA1(uuid.MustParse(c.operation), []byte(c.target.TargetKey)).String()
+			operation, err := uuid.Parse(c.operation)
+			if entry == nil || err != nil {
+				return fail(actionHeld)
 			}
+			id := uuid.NewSHA1(operation, []byte(c.target.TargetKey)).String()
 			stamp, err := a.journal.Delivery(ctx, s, c.contact.ReceiverID, id, entry)
 			if err != nil {
 				return fail(err)
@@ -540,7 +619,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 					return false
 				}
 				passes = append(passes, c.pass)
-			} else if c.operation == "" && !a.journal.ObservationValid(s, c.p) {
+			} else if c.operation == "" {
 				return false
 			}
 			if c.operation != "" {
@@ -575,7 +654,11 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 	if !entered && v.Err() == nil {
 		return fail(actionHeld)
 	}
-	return finish(v)
+	v = finish(v)
+	if held != nil && v.Err() == nil {
+		return notify.Unrecoverable(held, notify.DefaultReason)
+	}
+	return v
 }
 
 func actionDestinations(conf *config.Config, receivers map[string][]notify.Integration) (map[string][]actionIntegration, bool, error) {
@@ -594,6 +677,7 @@ func actionDestinations(conf *config.Config, receivers map[string][]notify.Integ
 			target := actionIntegration{name: i.Name(), index: i.Index(), digest: ds[i.Index()]}
 			if i.Name() == "webhook" {
 				webhook := r.WebhookConfigs[i.Index()]
+				target.maxAlerts = webhook.MaxAlerts
 				url := string(webhook.URL)
 				if webhook.URLFile != "" || strings.Contains(url, "{{") {
 					allSupported = false
