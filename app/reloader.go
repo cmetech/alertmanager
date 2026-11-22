@@ -160,14 +160,14 @@ func (r *reloader) reload(conf *config.Config) error {
 	// errors.
 	var actionTargets map[string][]actionIntegration
 	var supported bool
-	var recipientKey []byte
+	var recipientKey func() []byte
 	if r.actions != nil && r.actions.canInstall() {
 		actionTargets, supported, err = actionDestinations(conf, receivers)
 		if err != nil {
 			return err
 		}
 		recipientKey = r.actions.bindingKey()
-		if len(recipientKey) < 32 {
+		if recipientKey == nil {
 			for _, targets := range actionTargets {
 				for _, target := range targets {
 					if target.prepared != nil {

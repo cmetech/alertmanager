@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -41,6 +42,7 @@ func TestOscarActionPreparedHTTP(t *testing.T) {
 	defer sink.Close()
 	cfg := commoncfg.DefaultHTTPClientConfig
 	cfg.Authorization = &commoncfg.Authorization{Type: "Bearer", Credentials: "test-secret"}
+	cfg.HTTPHeaders = &commoncfg.Headers{Headers: map[string]commoncfg.Header{"Idempotency-Key": {Values: []string{"fixture"}}}}
 	client, err := NewClientWithTracing(cfg, "test")
 	require.NoError(t, err)
 	entry := &ProviderEntry{Begin: func() bool { return permits.Add(1) <= 2 }}
@@ -49,11 +51,26 @@ func TestOscarActionPreparedHTTP(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 	Drain(resp)
-	_, err = PostText(WithMutationStep(ctx, 1), client, sink.URL+"/lost", nil)
+	var acquisitions atomic.Int32
+	lostCtx := httptrace.WithClientTrace(WithMutationStep(ctx, 1), &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { acquisitions.Add(1) }})
+	_, err = PostText(lostCtx, client, sink.URL+"/lost", nil)
 	require.Error(t, err)
 	_, err = PostJSON(WithMutationStep(ctx, 2), client, sink.URL+"/denied", strings.NewReader("{}"))
 	require.Error(t, err)
 	require.EqualValues(t, 2, calls.Load())
+	require.GreaterOrEqual(t, acquisitions.Load(), int32(2))
+	warmCtx := WithProviderEntry(t.Context(), &ProviderEntry{Begin: func() bool { return true }})
+	warm, err := PostText(warmCtx, client, sink.URL+"/warm", nil)
+	require.NoError(t, err)
+	Drain(warm)
+	entry = &ProviderEntry{Begin: func() bool { return true }}
+	ctx = WithProviderEntry(t.Context(), entry)
+	acquisitions.Store(0)
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { acquisitions.Add(1) }})
+	_, err = PostText(ctx, client, sink.URL+"/lost", strings.NewReader("normally rewindable"))
+	require.Error(t, err)
+	require.EqualValues(t, 1, acquisitions.Load())
+	require.EqualValues(t, 4, calls.Load())
 }
 
 func TestOscarActionRejectAfterCredentialPreparation(t *testing.T) {

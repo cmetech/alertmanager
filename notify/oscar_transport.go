@@ -19,6 +19,9 @@ var errProviderEntry = errors.New("native provider entry unavailable")
 
 type mutationKey struct{}
 
+// Telegram credentials are embedded in the URL path and cannot be recorded by HTTP tracing.
+type privateSDKURL struct{}
+
 // providerTransport preserves the configured ordinary client. Guarded HTTP/1
 // requests have an exclusive connection from GotConn until completion. This
 // allows rejecting a mutation after auth, proxy and TLS setup by closing that
@@ -52,7 +55,7 @@ func (t *providerTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		return rt.RoundTrip(req)
 	}
-	if CurrentProviderEntry(req.Context()) != nil && t.raw != nil {
+	if (CurrentProviderEntry(req.Context()) != nil || req.Context().Value(privateSDKURL{}) != nil) && t.raw != nil {
 		return t.raw.RoundTrip(req)
 	}
 	return t.ordinary.RoundTrip(req)
@@ -116,13 +119,14 @@ type SDKTransport struct {
 }
 
 func (s *SDKTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	ctx, cancel := context.WithCancel(s.Context)
+	ctx, cancel := context.WithCancel(context.WithValue(s.Context, privateSDKURL{}, true))
 	stop := context.AfterFunc(req.Context(), cancel)
 	closeContext := func() { stop(); cancel() }
 	res, err := s.Do(req.WithContext(ctx))
 	if err != nil {
 		closeContext()
-		return nil, err
+		// The outer SDK client also wraps this error with its token-bearing URL.
+		return nil, RedactURL(err)
 	}
 	res.Body = &providerResponse{ReadCloser: res.Body, cancel: closeContext}
 	return res, nil

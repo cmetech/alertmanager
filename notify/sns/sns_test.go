@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -330,4 +332,30 @@ func TestOscarActionSNSDoesNotReplayPublish(t *testing.T) {
 			require.Equal(t, 1, entries)
 		})
 	}
+}
+
+func TestOscarActionSNSHeaderChangedDuringValidation(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer server.Close()
+	file := t.TempDir() + "/tenant"
+	require.NoError(t, os.WriteFile(file, []byte("first"), 0o600))
+	cfg := commoncfg.DefaultHTTPClientConfig
+	cfg.HTTPHeaders = &commoncfg.Headers{Headers: map[string]commoncfg.Header{"X-Tenant": {Files: []string{file}}}}
+	c := &SNSConfig{APIUrl: server.URL, TopicARN: "arn:aws:sns:us-east-1:123456789012:example", Message: "alarm", Sigv4: sigv4.SigV4Config{Region: "us-east-1", AccessKey: "test", SecretKey: "secret"}, HTTPConfig: &cfg}
+	n, err := New(c, test.CreateTmpl(t), logger)
+	require.NoError(t, err)
+	i := notify.NewIntegration(n, c, "sns", 0, "team")
+	ctx := notify.WithGroupKey(t.Context(), "group")
+	key := []byte(strings.Repeat("a", 32))
+	digest, err := i.PreparedDigest(ctx, key, "config", nil)
+	require.NoError(t, err)
+	entry := &notify.ProviderEntry{Destination: func(fields ...string) bool { return digest == notify.DestinationDigest(key, "config", fields...) }, Begin: func() bool {
+		require.NoError(t, os.WriteFile(file, []byte("second"), 0o600))
+		got, err := i.PreparedDigest(ctx, key, "config", nil)
+		return err == nil && got == digest
+	}}
+	require.Error(t, n.Notify(notify.WithProviderEntry(ctx, entry)).Err())
+	require.Zero(t, calls.Load())
 }

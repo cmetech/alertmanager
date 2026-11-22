@@ -14,10 +14,12 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
@@ -33,6 +36,8 @@ import (
 	"go.yaml.in/yaml/v2"
 
 	amcommoncfg "github.com/prometheus/alertmanager/config/common"
+	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/featurecontrol"
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/notify"
@@ -387,7 +392,7 @@ func TestTelegramNotifyFailureReason(t *testing.T) {
 // TestTelegramNotifyRedactURL verifies that notify.RedactURL is applied to the
 // error returned by client.Send, so the bot token is never exposed in logs.
 func TestTelegramNotifyRedactURL(t *testing.T) {
-	token := "secret"
+	token := "987654:capability-off-private-token"
 
 	t.Run("transport error redacts URL", func(t *testing.T) {
 		// Point at a closed server so telebot returns a *url.Error with the full URL.
@@ -417,6 +422,16 @@ func TestTelegramNotifyRedactURL(t *testing.T) {
 		require.NotContains(t, verdict.Err().Error(), token, "bot token leaked in transport error")
 		// The URL should be redacted.
 		require.Contains(t, verdict.Err().Error(), "<redacted>")
+		var logs bytes.Buffer
+		i := notify.NewIntegration(notifier, notifier.conf, "telegram", 0, "team")
+		stage := notify.NewRetryStage(i, "team", notify.NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), eventrecorder.NopRecorder())
+		retryCtx, stop := context.WithTimeout(notify.WithFiringAlerts(ctx, []uint64{1}), 250*time.Millisecond)
+		defer stop()
+		_, _, err = stage.Exec(retryCtx, slog.New(slog.NewTextHandler(&logs, nil)), alert.New(model.Alert{Labels: model.LabelSet{"alertname": "test"}}, time.Time{}, false))
+		require.ErrorContains(t, err, "<redacted>")
+		require.NotContains(t, err.Error(), token)
+		require.Contains(t, logs.String(), "Notify failed")
+		require.NotContains(t, logs.String(), token)
 	})
 
 	t.Run("Telegram API error passes through without token", func(t *testing.T) {

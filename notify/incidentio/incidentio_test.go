@@ -22,6 +22,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -660,4 +662,46 @@ func TestIncidentIOMetadataTemplateError(t *testing.T) {
 	require.Error(t, verdict.Err())
 	require.Contains(t, verdict.Err().Error(), "failed to render metadata templates")
 	require.False(t, verdict.ShouldRetry(), "should not retry on template rendering errors")
+}
+
+func TestPreparedIncidentContentUsesOnlyRetainedMembers(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"host": "A"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(-time.Second)}, now, false)
+	b := alert.New(model.Alert{Labels: model.LabelSet{"host": "B"}, Annotations: model.LabelSet{"body": model.LabelValue(strings.Repeat("x", maxPayloadSize))}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
+	received := make(chan Message, 1)
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var actual Message
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&actual))
+		received <- actual
+	}))
+	defer sink.Close()
+	u, err := url.Parse(sink.URL)
+	require.NoError(t, err)
+	n, err := New(&IncidentioConfig{URL: &amcommoncfg.URL{URL: u}, HTTPConfig: &commoncfg.DefaultHTTPClientConfig, AlertSourceToken: "test", Metadata: map[string]string{"hosts": "{{ range .Alerts }}{{ .Labels.host }}{{ end }}"}}, test.CreateTmpl(t), promslog.NewNopLogger())
+	require.NoError(t, err)
+	base := notify.WithRouteLabelRenderer(notify.WithGroupKey(t.Context(), "group"), func(ms ...*alert.Alert) model.LabelSet {
+		var hosts string
+		for _, m := range ms {
+			hosts += string(m.Labels["host"])
+		}
+		return model.LabelSet{"summary": model.LabelValue(hosts)}
+	})
+	ctx, retained, err := n.PrepareContent(base, []*alert.Alert{a, b}, 3)
+	require.NoError(t, err)
+	require.Equal(t, []*alert.Alert{a}, retained)
+	var msg Message
+	require.NoError(t, json.Unmarshal(ctx.Value(contentKey{}).(preparedContent).body, &msg))
+	require.Equal(t, "resolved", msg.Status)
+	require.Equal(t, "A", msg.Metadata["hosts"])
+	require.Equal(t, "A", msg.CommonLabels["host"])
+	require.EqualValues(t, 4, msg.TruncatedAlerts)
+	require.Equal(t, "A", msg.RouteLabels["summary"])
+	valid := map[*alert.Alert]bool{a: true, b: false}
+	var selected []*alert.Alert
+	entry := &notify.ProviderEntry{Select: func(ms []*alert.Alert) { selected = ms }, Begin: func() bool {
+		return len(selected) > 0 && !slices.ContainsFunc(selected, func(m *alert.Alert) bool { return !valid[m] })
+	}}
+	require.NoError(t, n.Notify(notify.WithProviderEntry(ctx, entry), retained...).Err())
+	require.Equal(t, msg, <-received)
 }

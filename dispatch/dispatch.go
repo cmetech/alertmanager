@@ -937,6 +937,9 @@ func (ag *aggrGroup) run(nf notifyFunc) {
 				// Render route labels against the batch of alerts that we are
 				// about to notify about.
 				ctx = notify.WithRouteLabels(ctx, ag.renderRouteLabels(alerts...))
+				if len(ag.opts.Labels) > 0 {
+					ctx = notify.WithRouteLabelRenderer(ctx, ag.renderRouteLabels)
+				}
 
 				success := nf(ctx, alerts...)
 				if !success {
@@ -1093,5 +1096,8 @@ func (d *Dispatcher) SelectedContext(ctx context.Context, r *Route, member *aler
 	ctx = notify.WithGroupMatchers(ctx, r.Matchers)
 	ctx = notify.WithNow(ctx, time.Now())
 	ag := aggrGroup{opts: &r.RouteOpts, labels: labels, tmpl: d.tmpl, logger: d.logger}
+	if len(opts.Labels) > 0 {
+		ctx = notify.WithRouteLabelRenderer(ctx, ag.renderRouteLabels)
+	}
 	return notify.WithRouteLabels(ctx, ag.renderRouteLabels(member))
 }

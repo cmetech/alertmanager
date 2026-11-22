@@ -19,7 +19,24 @@ import (
 )
 
 // RecipientKey provides the authority-derived key for opaque recipient bindings.
-func (o *nativeActionOwner) RecipientKey() []byte { return slices.Clone(o.recipientKey) }
+func (o *nativeActionOwner) RecipientKey() []byte {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.recipientKey)
+}
+
+type persistedTargetKey struct{}
+
+// WithPersistedTarget limits revalidation to one previously admitted destination.
+func WithPersistedTarget(ctx context.Context, t DispatchTarget) context.Context {
+	return context.WithValue(ctx, persistedTargetKey{}, t)
+}
+
+// PersistedTarget identifies an existing journal target for independent revalidation.
+func PersistedTarget(ctx context.Context) (DispatchTarget, bool) {
+	t, ok := ctx.Value(persistedTargetKey{}).(DispatchTarget)
+	return t, ok
+}
 
 // Entry is an opaque journal-issued provider permit. Its issuing journal retains settlement authority.
 type Entry interface {
@@ -68,6 +85,7 @@ func (e claimedEntry) LocalValid() bool {
 // ActionJournal is the pipeline's A3 handoff. Until Bind returns and Version
 // reports 1 the A4 reader must fence tracked ordinary delivery and callback signing.
 type ActionJournal interface {
+	InspectContact(context.Context, *alert.Alert, EpisodeProjection, DispatchTarget) (string, error)
 	ReserveTerminal(context.Context, *alert.Alert, EpisodeProjection, DispatchTarget) (ActionResultV1, error)
 	InspectOrdinary(context.Context, *alert.Alert) (*EpisodeProjection, *OrdinaryPass, error)
 	Lookup(context.Context, string) (ActionResultV1, error)
@@ -206,6 +224,25 @@ func (s *episodeSlot) contactCurrent(p EpisodeProjection, source *alert.Alert, t
 	return s.contactCurrentLocked(p, source, terminal)
 }
 
+// InspectContact reads existing coverage or a deterministic terminal target without reserving it.
+func (o *nativeActionOwner) InspectContact(ctx context.Context, m *alert.Alert, p EpisodeProjection, target DispatchTarget) (string, error) {
+	if !o.ready() || m == nil {
+		return "", unavailable
+	}
+	args := contactObservation(m, p, target)
+	args["state"] = p.State
+	var state string
+	if err := o.write(o.withEpoch(ctx), "inspect-contact", args, &state); err != nil {
+		return "", err
+	}
+	return state, nil
+}
+
+func contactObservation(m *alert.Alert, p EpisodeProjection, target DispatchTarget) map[string]any {
+	s := m.ProviderSource()
+	return map[string]any{"ref": p.EpisodeRef, "expected_revision": p.SeverityRevision, "lifecycle_seq": p.LifecycleSeq, "native_variant": p.NativeVariant, "source_ends_at": s.EndsAt.UTC(), "source_digest": terminalSourceDigest(s), "wire_resolved": m.Resolved(), "target": target}
+}
+
 // ReserveTerminal binds a due ordinary clear to one exact source and receiver.
 // Retrying the command recovers the same backend-derived operation and cannot renew its permit.
 func (o *nativeActionOwner) ReserveTerminal(ctx context.Context, member *alert.Alert, p EpisodeProjection, target DispatchTarget) (ActionResultV1, error) {
@@ -234,7 +271,7 @@ func (o *nativeActionOwner) ReserveTerminal(ctx context.Context, member *alert.A
 	if err = o.verifySource(ctx, source, "resolved"); err != nil {
 		return r, err
 	}
-	args := map[string]any{"ref": p.EpisodeRef, "expected_revision": p.SeverityRevision, "lifecycle_seq": p.LifecycleSeq, "native_variant": p.NativeVariant, "source_ends_at": source.EndsAt.UTC(), "source_digest": terminal.SourceDigest, "wire_resolved": terminal.WireResolved, "target": target}
+	args := contactObservation(member, p, target)
 	if err = o.write(ctx, "reserve-terminal", args, &r); err != nil {
 		return r, err
 	}
@@ -306,7 +343,7 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	if err = o.verifySource(ctx, source, p.State); err != nil {
 		return nil, err
 	}
-	candidates, reason, err := o.dispatch.Plan(ctx, source, p, req)
+	candidates, reason, err := o.dispatch.Plan(WithPersistedTarget(ctx, r.Targets[idx].Target), source, p, req)
 	if err != nil {
 		return nil, err
 	}

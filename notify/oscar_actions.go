@@ -12,6 +12,8 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/prometheus/common/model"
+
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
 )
@@ -184,4 +186,29 @@ func MarkContentIncomplete(ctx context.Context, incomplete bool) {
 			store.Delete(incompleteContent)
 		}
 	}
+}
+
+// PrepareContent freezes any provider-specific encoded member subset before reservation.
+func (i *Integration) PrepareContent(ctx context.Context, members []*alert.Alert, truncated uint64) (context.Context, []*alert.Alert, error) {
+	if n, ok := i.notifier.(interface {
+		PrepareContent(context.Context, []*alert.Alert, uint64) (context.Context, []*alert.Alert, error)
+	}); ok {
+		return n.PrepareContent(ctx, members, truncated)
+	}
+	return ctx, members, nil
+}
+
+type routeRendererKey struct{}
+
+// WithRouteLabelRenderer retains the dispatcher's configured route label templates for a reduced cohort.
+func WithRouteLabelRenderer(ctx context.Context, render func(...*alert.Alert) model.LabelSet) context.Context {
+	return context.WithValue(ctx, routeRendererKey{}, render)
+}
+
+// ForMembers renders route labels against the members that will supply the provider payload.
+func ForMembers(ctx context.Context, members []*alert.Alert) context.Context {
+	if render, ok := ctx.Value(routeRendererKey{}).(func(...*alert.Alert) model.LabelSet); ok {
+		return WithRouteLabels(ctx, render(members...))
+	}
+	return ctx
 }

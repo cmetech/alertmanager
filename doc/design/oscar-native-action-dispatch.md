@@ -56,22 +56,28 @@ with the ordinary pipeline.
 
 Prepared destinations include actual template/file addresses and provider
 routing fields. For dynamic identities the journal stores a length-delimited
-HMAC digest derived from the integration configuration, the existing native
-store credential and the authority ID. The same authority, credential,
-configuration and addressing fields reproduce the binding after restart.
-Canonical callback signing uses its independent callback key. Dynamic
-webhooks cannot acquire canonical signing rights. The direct-only graph can
-derive its recipient key without a callback credential.
+HMAC digest of the integration configuration and length-delimited candidate
+fields. The existing private authority transaction stores a stable random
+recipient key. A compatible native owner obtains it in its authenticated lease.
+Renewal or replacement using rotated authentication keeps the same prepared
+target keys, pending and unknown ownership, and repeat deadlines. The original
+entry token can settle its original row. Canonical signing retains its separate
+callback credential. A direct-only graph requires no callback credential.
 
-Store credential rotation changes these digests. Dispatch compares retained
-target identities with current routing and only enters matching pending
-targets. The original entry token can still settle its original target.
-An independently admitted contact can receive a new target key after
-rotation. Existing repeat deadlines also belong to the old key. Before rotating
-this credential, quiesce deliveries, reconcile outstanding pending and unknown
-contacts and account for live repeat deadlines. Operators must enforce this
-sequence. The native journal has no cross-key migration or automatic rotation
-barrier.
+The paired native reader and store require recipient-binding protocol version 1
+and the updated authority-column migration. A legacy NULL authority key with
+retained work holds delivery. Initialize a previously used namespace only with
+its exact prior derived key or after independently verified reconciliation.
+The normal migration adds a nullable column and preserves all existing rows.
+
+For group-dependent recipients the ordinary reader inspects already-tracked
+candidates under their current route, variant and lifecycle. It removes
+covered/held members, rerenders the remaining group's route labels and address,
+and checks the final cohort before its reservation CAS. Each inspection is
+indexed and the reader reuses results for an unchanged member and digest
+within the same flush. After 16 reductions it holds for another evaluation.
+Previously admitted selected targets revalidate independently if a sibling's
+recipient file becomes unavailable.
 
 On guarded HTTP mutations the native client retains configured authentication,
 CA, proxy and pooled connections. A separate HTTP/1 pool gives each active
@@ -92,8 +98,11 @@ Selected FIFO deduplication uses the logical action and target while preserving
 the native message group. Slack, OpsGenie and Jira authorize each distinct write
 and retain an earlier possible effect if a later write fails. Jira can resolve
 with zero effects when the group has no matching issue. Incident.io records
-the actual encoded member prefix, with tail progress in the ordinary
-notification log. Provider transport acceptance and downstream OSCAR ticket
+the exact encoded member prefix. It renders status, common fields, route labels
+and metadata from that prefix before terminal reservation. The ordinary group
+log retains accepted members, and a pending resolved tail holds dispatcher
+cleanup through the next flush. Jira resolved no-send completes the ordinary
+group lifecycle while leaving contact coverage untouched. Provider transport acceptance and downstream OSCAR ticket
 settlement have distinct receipts.
 
 Tracked ordinary resolution uses the private `reserve-terminal` command after

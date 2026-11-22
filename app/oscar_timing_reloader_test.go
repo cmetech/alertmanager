@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,12 +318,24 @@ type terminalFixtureJournal struct {
 	projections                        map[*alert.Alert]v2.EpisodeProjection
 	covered                            string
 	coverageChecks                     int
+	confirmed                          map[string]bool
 	first                              bool
 	state                              string
 	reserved, claimed, settled, events []string
 }
 
 func (*terminalFixtureJournal) RecipientKey() []byte { return []byte(strings.Repeat("r", 32)) }
+func (j *terminalFixtureJournal) InspectContact(_ context.Context, _ *alert.Alert, p v2.EpisodeProjection, _ v2.DispatchTarget) (string, error) {
+	if p.State == "resolved" && j.confirmed[p.EpisodeRef.EpisodeID] {
+		return "completed", nil
+	}
+	if p.EpisodeRef.EpisodeID == j.covered {
+		j.coverageChecks++
+		return "covered", nil
+	}
+	return "due", nil
+}
+
 func (j *terminalFixtureJournal) InspectOrdinary(_ context.Context, s *alert.Alert) (*v2.EpisodeProjection, *v2.OrdinaryPass, error) {
 	if j.first {
 		return nil, &v2.OrdinaryPass{}, nil
@@ -380,6 +393,16 @@ func (j *terminalFixtureJournal) Delivery(_ context.Context, s *alert.Alert, _, 
 
 func (j *terminalFixtureJournal) Settle(_ context.Context, e v2.Entry, outcome, _ string) (v2.ActionResultV1, error) {
 	j.settled = append(j.settled, outcome)
+	if outcome == "confirmed" {
+		for source, p := range j.projections {
+			if e.ForMember(source) {
+				if j.confirmed == nil {
+					j.confirmed = map[string]bool{}
+				}
+				j.confirmed[p.EpisodeRef.EpisodeID] = true
+			}
+		}
+	}
 	return v2.ActionResultV1{}, nil
 }
 
@@ -389,12 +412,13 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 		canonical, sendResolved, stale, managed, first bool
 		limit                                          int
 		want                                           string
-		wantErr, emptyLog                              bool
+		wantErr, emptyLog, dynamic                     bool
 	}{
 		{name: "F first", order: "FR", state: "pending", sendResolved: true, limit: 1, want: "F"},
 		{name: "R first", order: "RF", state: "pending", sendResolved: true, limit: 1, want: "R"},
 		{name: "send-resolved filter before limit", order: "RF", state: "pending", limit: 1, want: "F"},
 		{name: "stale prefix cannot admit F", order: "RF", state: "pending", limit: 1, sendResolved: true, stale: true, wantErr: true},
+		{name: "group-dependent address beside covered A", order: "AB", state: "pending", sendResolved: true, want: "B", dynamic: true},
 		{name: "direct acceptance beside covered A", order: "AB", state: "pending", sendResolved: true, want: "B"},
 		{name: "first direct acceptance beside covered A", order: "AB", state: "pending", sendResolved: true, want: "B", emptyLog: true},
 		{name: "direct stale firing copy", order: "R", state: "pending", sendResolved: true, stale: true, wantErr: true},
@@ -420,6 +444,9 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 					http.Error(w, err.Error(), 400)
 					return
 				}
+				if tc.dynamic {
+					require.Equal(t, "/B", req.URL.Path)
+				}
 				calls <- capture{msg, raw, req.Header.Clone()}
 			}))
 			t.Cleanup(sink.Close)
@@ -429,6 +456,9 @@ func TestOscarActionTerminalNativePipeline(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "callback")
 			require.NoError(t, os.WriteFile(file, key, 0o600))
 			url, options := sink.URL, ""
+			if tc.dynamic {
+				url += "/{{ (index .Alerts 0).Labels.host }}"
+			}
 			if tc.canonical {
 				url = "http://alertmanager-middleware:9400" + alert.NativeCallbackPath
 				options = fmt.Sprintf("    http_config:\n      follow_redirects: false\n      authorization:\n        type: Bearer\n        credentials_file: %s\n", file)
@@ -796,7 +826,7 @@ func TestOscarActionSelectedOpsgenieLaterMutationFenced(t *testing.T) {
 	require.Len(t, contacts, 1)
 	c := contacts[0]
 	sel := notify.SelectedAction{Source: a, Receiver: "team", Integration: "opsgenie", Invoke: func(ctx context.Context, i *notify.Integration, m *alert.Alert) notify.NotifyVerdict {
-		v, _ := actions.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: "A", Target: c.DispatchTarget}, contact: c, p: p}}, 0)
+		v, _, _ := actions.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: "A", Target: c.DispatchTarget}, contact: c, p: p}}, 0)
 		return v
 	}}
 	_, _, err = g.pipeline.Exec(notify.WithSelectedAction(ctx, sel), r.logger, a.NotificationCopy(now))
@@ -836,7 +866,7 @@ func TestOscarActionURLFileChangedDuringFinalClaimCheck(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, contacts, 1)
 	c := contacts[0]
-	v, _ := actions.invoke(ctx, g, c.integration.prepared, []*alert.Alert{a.NotificationCopy(now)}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: "A", Target: c.DispatchTarget}, contact: c, p: p}}, 0)
+	v, _, _ := actions.invoke(ctx, g, c.integration.prepared, []*alert.Alert{a.NotificationCopy(now)}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: "A", Target: c.DispatchTarget}, contact: c, p: p}}, 0)
 	require.Error(t, v.Err())
 	require.Empty(t, calls)
 	require.Equal(t, []string{"no_effect"}, j.settled)
@@ -871,11 +901,210 @@ func TestOscarActionTelegramDiagnosticPreservesPublishedFloor(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, targets, 1)
 	c := targets[0]
-	v, delivered := actions.invoke(ctx, g, c.integration.prepared, []*alert.Alert{view.NotificationCopy(now)}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: p.EpisodeRef.EpisodeID, Target: c.DispatchTarget}, contact: c, p: p}}, 0)
+	v, delivered, _ := actions.invoke(ctx, g, c.integration.prepared, []*alert.Alert{view.NotificationCopy(now)}, []ordinaryContact{{operation: "operation", target: v2.TargetResult{TargetKey: p.EpisodeRef.EpisodeID, Target: c.DispatchTarget}, contact: c, p: p}}, 0)
 	require.Error(t, v.Err())
 	require.Equal(t, notify.EncodingErrorReason, v.Reason())
 	require.Empty(t, delivered)
 	require.Empty(t, calls)
 	require.Equal(t, []string{"no_effect"}, j.settled)
 	require.Equal(t, model.LabelValue("critical"), actions.ReadView(s).Labels["severity"])
+}
+
+func transportProjection(t *testing.T, s *alert.Alert, id, state string) v2.EpisodeProjection {
+	t.Helper()
+	var p v2.EpisodeProjection
+	start := s.StartsAt.UTC().Format(time.RFC3339Nano)
+	require.NoError(t, json.Unmarshal([]byte(fmt.Sprintf(`{"episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111111","episode_id":%q,"generation":1,"variant_revision":1},"native_variant":{"fingerprint":%q,"starts_at":%q},"active_since":%q,"state":%q,"source_severity":"major","lifecycle_seq":2}`, id, s.Fingerprint().String(), start, start, state)), &p))
+	return p
+}
+
+func TestOscarActionPersistedTargetRevalidatesIndependently(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "url")
+	require.NoError(t, os.WriteFile(file, []byte("http://example.invalid/dynamic"), 0o600))
+	var calls atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer sink.Close()
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\nreceivers:\n- name: team\n  webhook_configs:\n  - url_file: %s\n  - url: %s\n", file, sink.URL))
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	a := newNativeActions(nil, nil, r.logger)
+	a.version = 1
+	r.actions = a
+	now := time.Now()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	p := transportProjection(t, source, "22222222-2222-4222-8222-222222222222", "firing")
+	j := &terminalFixtureJournal{projections: map[*alert.Alert]v2.EpisodeProjection{source: p}}
+	require.NoError(t, a.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	req := v2.ActionRequestV1{}
+	targets, _, err := a.Plan(t.Context(), source, p, req)
+	require.NoError(t, err)
+	require.Len(t, targets, 2)
+	require.NoError(t, os.Remove(file))
+	_, _, err = a.Plan(t.Context(), source, p, req)
+	require.Error(t, err)
+	valid, _, err := a.Plan(v2.WithPersistedTarget(t.Context(), targets[1]), source, p, req)
+	require.NoError(t, err)
+	require.Equal(t, targets[1:], valid)
+	held, _, err := a.Plan(v2.WithPersistedTarget(t.Context(), targets[0]), source, p, req)
+	require.NoError(t, err)
+	require.Empty(t, held)
+	g := a.snapshot()
+	contacts, err := g.contacts(v2.WithPersistedTarget(t.Context(), targets[1]), source, p, nil)
+	require.NoError(t, err)
+	require.Len(t, contacts, 1)
+	c := contacts[0]
+	ctx := g.dispatcher.SelectedContext(t.Context(), c.route, source)
+	sel := notify.SelectedAction{Source: source, Receiver: "team", Integration: "webhook", Index: 1, Invoke: func(ctx context.Context, i *notify.Integration, m *alert.Alert) notify.NotifyVerdict {
+		v, _, _ := a.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: "op", target: v2.TargetResult{TargetKey: p.EpisodeRef.EpisodeID, Target: c.DispatchTarget}, contact: c, p: p}}, 0)
+		return v
+	}}
+	_, _, err = g.pipeline.Exec(notify.WithSelectedAction(ctx, sel), r.logger, source.NotificationCopy(now))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, calls.Load())
+	require.Equal(t, []string{"confirmed"}, j.settled)
+}
+
+func TestOscarActionIncidentResolvedTailThroughDispatcher(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		t.Run(fmt.Sprint(tracked), func(t *testing.T) {
+			seen := make(chan string, 6)
+			sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var data struct {
+					Alerts []struct{ Labels map[string]string }
+				}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&data))
+				require.Len(t, data.Alerts, 1)
+				seen <- data.Alerts[0].Labels["host"]
+			}))
+			defer sink.Close()
+			cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 2s\n  group_interval: 500ms\n  repeat_interval: 1h\nreceivers:\n- name: team\n  incidentio_configs:\n  - url: %s\n    send_resolved: true\n    alert_source_token: test\n", sink.URL))
+			require.NoError(t, err)
+			r := newTestReloader(t)
+			t.Cleanup(func() { _ = r.stop() })
+			a := newNativeActions(nil, nil, r.logger)
+			a.version = 1
+			r.actions = a
+			j := &terminalFixtureJournal{state: "pending", projections: map[*alert.Alert]v2.EpisodeProjection{}}
+			require.NoError(t, a.Bind(j))
+			now := time.Now()
+			var members []*alert.Alert
+			var hashes []uint64
+			for x, host := range []string{"A", "B"} {
+				s := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(host), "severity": "major", "alertname": "Alarm"}, Annotations: model.LabelSet{"body": model.LabelValue(host + strings.Repeat("x", 300*1024))}, StartsAt: now.Add(-time.Second), EndsAt: now.Add(-100 * time.Millisecond)}, now, false)
+				require.NoError(t, r.alerts.Put(t.Context(), s))
+				s, err = r.alerts.Get(s.Fingerprint())
+				require.NoError(t, err)
+				members = append(members, s)
+				hashes = append(hashes, notify.HashAlert(s))
+				if tracked {
+					j.projections[s] = transportProjection(t, s, fmt.Sprintf("22222222-2222-4222-8222-%012d", x+1), "resolved")
+				}
+			}
+			recv := &nflogpb.Receiver{GroupName: "team", Integration: "incidentio"}
+			key := dispatch.GroupKeyForAlert(members[0], dispatch.NewRoute(cfg.Route, nil))
+			require.NoError(t, r.notificationLog.Log(recv, key, hashes, nil, nil, nil, time.Hour))
+			require.NoError(t, r.reload(cfg))
+			var hosts []string
+			for len(hosts) < 2 {
+				select {
+				case h := <-seen:
+					hosts = append(hosts, h)
+				case <-time.After(8 * time.Second):
+					t.Fatal("resolved tail lost", hosts)
+				}
+			}
+			require.ElementsMatch(t, []string{"A", "B"}, hosts)
+			require.Eventually(t, func() bool {
+				groups, _, err := r.groups(t.Context(), func(*dispatch.Route) bool { return true }, func(*alert.Alert, time.Time) (alert.AlertStatus, bool) { return alert.AlertStatus{}, true })
+				entries, e := r.notificationLog.Query(nflog.QGroupKey(key), nflog.QReceiver(recv))
+				return err == nil && len(groups) == 0 && e == nil && len(entries) == 1 && len(entries[0].ResolvedAlerts) == 2
+			}, 5*time.Second, 20*time.Millisecond)
+			require.NoError(t, r.stop())
+			if tracked {
+				require.Len(t, j.claimed, 2)
+				require.Equal(t, []string{"confirmed", "confirmed"}, j.settled)
+			}
+			require.Empty(t, seen)
+		})
+	}
+}
+
+func TestOscarActionJiraResolvedNoSendAllowsRefire(t *testing.T) {
+	t.Parallel()
+	var writes atomic.Int32
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "search") {
+			_, _ = io.WriteString(w, `{"issues":[]}`)
+			return
+		}
+		writes.Add(1)
+		_, _ = io.WriteString(w, `{"key":"OPS-1"}`)
+	}))
+	defer sink.Close()
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_interval: 1h\n  repeat_interval: 2h\nreceivers:\n- name: team\n  jira_configs:\n  - api_url: %s\n    send_resolved: true\n    project: OPS\n    issue_type: Incident\n", sink.URL))
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	a := newNativeActions(nil, nil, r.logger)
+	a.version = 1
+	r.actions = a
+	j := &terminalFixtureJournal{}
+	require.NoError(t, a.Bind(j))
+	require.NoError(t, r.reload(cfg))
+	g := a.snapshot()
+	now := time.Now()
+	for x, end := range []time.Time{now.Add(time.Hour), now.Add(-time.Second), now.Add(time.Hour)} {
+		s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Minute), EndsAt: end}, now, false)
+		ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, s)
+		ctx = notify.WithOrdinaryReader(ctx, func(c context.Context, r, k string, idx int, ms []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
+			return a.prepare(c, g, r, k, idx, ms, due)
+		})
+		_, _, err = g.pipeline.Exec(ctx, r.logger, s.NotificationCopy(now))
+		require.NoError(t, err)
+		require.EqualValues(t, []int{1, 1, 2}[x], writes.Load())
+	}
+}
+
+func TestOscarActionDirectExpiryBetweenMutations(t *testing.T) {
+	t.Parallel()
+	var writes atomic.Int32
+	var expires time.Time
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writes.Add(1)
+		<-time.After(time.Until(expires) + time.Millisecond)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer sink.Close()
+	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\nreceivers:\n- name: team\n  opsgenie_configs:\n  - api_url: %s\n    api_key: key\n    update_alerts: true\n", sink.URL))
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	a := newNativeActions(nil, nil, r.logger)
+	a.version = 1
+	r.actions = a
+	require.NoError(t, a.Bind(&terminalFixtureJournal{}))
+	require.NoError(t, r.reload(cfg))
+	g := a.snapshot()
+	now := time.Now()
+	expires = now.Add(500 * time.Millisecond)
+	s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Minute), EndsAt: expires}, now, false)
+	ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, s)
+	m := s.NotificationCopy(now)
+	possible, err := g.matchContacts(ctx, s, m, []*alert.Alert{m}, nil)
+	require.NoError(t, err)
+	require.Len(t, possible, 1)
+	c := possible[0]
+	var conclusive bool
+	finished := 0
+	pass := &v2.OrdinaryPass{Enter: func() bool { return true }, Valid: func() bool { return true }, Finish: func(ok bool) { finished++; conclusive = ok }}
+	verdict, accepted, _ := a.invoke(ctx, g, c.integration.prepared, []*alert.Alert{m}, []ordinaryContact{{pass: pass, contact: c}}, 0)
+	require.Error(t, verdict.Err())
+	require.Empty(t, accepted)
+	require.EqualValues(t, 1, writes.Load())
+	require.Equal(t, 1, finished)
+	require.False(t, conclusive)
 }

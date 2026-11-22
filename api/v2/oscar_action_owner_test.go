@@ -221,7 +221,7 @@ func TestOscarActionReadinessNeedsVersionAndRejectsConflictingLease(t *testing.T
 		if foreign {
 			return unavailable
 		}
-		return json.Unmarshal(mustRaw(t, actionLease{Protocol: protocol, RecoverySelectors: selectors, TerminalObservations: 2, OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
+		return json.Unmarshal(mustRaw(t, actionLease{Protocol: protocol, RecoverySelectors: selectors, TerminalObservations: 2, RecipientBinding: 1, RecipientKey: strings.Repeat("ab", 32), OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
 	})
 	o = newNativeActionOwner(defaultActionAuthority, rpc, nil)
 	require.ErrorIs(t, o.leaseTick(t.Context()), unavailable)
@@ -1118,11 +1118,31 @@ func TestOscarActionBootEpochSwapAfterRestoringFiringSlot(t *testing.T) {
 	require.Equal(t, p.LifecycleSeq, slot.projection.LifecycleSeq)
 }
 
-func TestOscarActionRecipientKeyRotation(t *testing.T) {
+func TestOscarActionRecipientKeySurvivesOwnerReplacement(t *testing.T) {
 	t.Parallel()
-	first := recipientBindingKey("store-one", "authority-a")
-	require.Len(t, first, 32)
-	require.Equal(t, first, recipientBindingKey("store-one", "authority-a"))
-	require.NotEqual(t, first, recipientBindingKey("store-two", "authority-a"))
-	require.NotEqual(t, first, recipientBindingKey("store-one", "authority-b"))
+	key := strings.Repeat("a1", 32)
+	binding := 1
+	var prior []byte
+	for _, credential := range []string{"original", "rotated"} {
+		var o *nativeActionOwner
+		rpc := actionRPCFunc(func(_ context.Context, _ string, args map[string]any, out any) error {
+			require.Equal(t, 1, args["recipient_binding"])
+			return json.Unmarshal(mustRaw(t, actionLease{Protocol: "native-action-store-v1", RecoverySelectors: 1, TerminalObservations: 2, RecipientBinding: binding, RecipientKey: key, OwnerID: o.owner, AuthorityID: o.authority, Epoch: 1, ExpiresAt: time.Now().Add(30 * time.Second), RenewSeconds: 10}), out)
+		})
+		o = newNativeActionOwner(defaultActionAuthority, rpc, nil)
+		require.NoError(t, o.leaseTick(t.Context()))
+		if credential == "original" {
+			prior = o.RecipientKey()
+			continue
+		}
+		require.Equal(t, prior, o.RecipientKey())
+		for _, tc := range []struct {
+			marker int
+			key    string
+		}{{0, key}, {1, ""}, {1, strings.Repeat("bd", 32)}} {
+			binding, key = tc.marker, tc.key
+			require.Error(t, o.leaseTick(t.Context()))
+			require.False(t, o.lease.ExpiresAt.After(time.Now()))
+		}
+	}
 }

@@ -6,8 +6,6 @@ package v2
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,6 +132,8 @@ type actionIntent struct {
 	Result                 ActionResultV1  `json:"result"`
 }
 type actionLease struct {
+	RecipientBinding     int       `json:"recipient_binding"`
+	RecipientKey         string    `json:"recipient_key"`
 	TerminalObservations int       `json:"terminal_observations"`
 	Protocol             string    `json:"protocol"`
 	RecoverySelectors    int       `json:"recovery_selectors"`
@@ -1375,7 +1375,6 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig) error {
 		return errors.New("invalid native action namespace")
 	}
 	o := newNativeActionOwner(c.AuthorityID, actionClient{client}, c.Dispatch)
-	o.recipientKey = recipientBindingKey(client.token, c.AuthorityID)
 	api.actionOwner = o
 	o.callbackReady = func() bool { return api.callbacksReadyFor(client, true) }
 	ready := o.ready
@@ -1416,10 +1415,4 @@ func (api *API) actionView(source *alert.Alert) *alert.Alert {
 		}
 	}
 	return source
-}
-
-func recipientBindingKey(storeCredential, authority string) []byte {
-	mac := hmac.New(sha256.New, []byte(storeCredential))
-	mac.Write([]byte("oscar-native-recipient-key-v1/" + authority))
-	return mac.Sum(nil)
 }

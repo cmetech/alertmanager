@@ -42,7 +42,7 @@ type actionIntegration struct {
 }
 type actionGraph struct {
 	supported  bool
-	key        []byte
+	key        func() []byte
 	log        notify.NotificationLog
 	routes     *dispatch.Route
 	targets    map[string][]actionIntegration
@@ -60,7 +60,7 @@ type publishedMember struct {
 }
 type nativeActions struct {
 	scheme, caFile string
-	recipientKey   []byte
+	recipientKey   func() []byte
 	version        int
 	mu             sync.RWMutex
 	graph          *actionGraph
@@ -83,12 +83,12 @@ func (a *nativeActions) Bind(j v2.ActionJournal) error {
 	a.journal = j
 	a.recipientKey = nil
 	if owner, ok := j.(interface{ RecipientKey() []byte }); ok {
-		a.recipientKey = owner.RecipientKey()
+		a.recipientKey = owner.RecipientKey
 	}
 	return nil
 }
 
-func (a *nativeActions) bindingKey() []byte {
+func (a *nativeActions) bindingKey() func() []byte {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.recipientKey
@@ -269,7 +269,11 @@ func (g *actionGraph) destination(ctx context.Context, i actionIntegration, rout
 	if i.prepared == nil {
 		return i.digest, nil
 	}
-	if len(g.key) < 32 {
+	if g.key == nil {
+		return "", actionHeld
+	}
+	key := g.key()
+	if len(key) != 32 {
 		return "", actionHeld
 	}
 	var members []*alert.Alert
@@ -290,7 +294,7 @@ func (g *actionGraph) destination(ctx context.Context, i actionIntegration, rout
 		}
 		ctx = notify.WithNflogStore(ctx, store)
 	}
-	digest, err := i.prepared.PreparedDigest(ctx, g.key, i.digest, members)
+	digest, err := i.prepared.PreparedDigest(ctx, key, i.digest, members)
 	if batch != nil && err == nil {
 		batch.digest = digest
 	}
@@ -337,6 +341,7 @@ func (g *actionGraph) matchContacts(ctx context.Context, source, member *alert.A
 		}
 	}
 	var contacts []plannedContact
+	persisted, revalidating := v2.PersistedTarget(ctx)
 	seen := map[string]bool{}
 	for _, route := range g.routes.Match(member.Labels) {
 		opts := route.RouteOpts
@@ -345,6 +350,9 @@ func (g *actionGraph) matchContacts(ctx context.Context, source, member *alert.A
 			return nil, err
 		}
 		if len(active)+len(muted) > 0 {
+			continue
+		}
+		if revalidating && opts.Receiver != persisted.ReceiverID {
 			continue
 		}
 		for _, i := range g.targets[opts.Receiver] {
@@ -356,6 +364,9 @@ func (g *actionGraph) matchContacts(ctx context.Context, source, member *alert.A
 				continue
 			}
 			digest, err := g.destination(ctx, i, route, member)
+			if revalidating && (err != nil || digest != persisted.IntegrationDigest) {
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -433,9 +444,13 @@ func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id 
 		if t.State != "pending" || t.SuccessorID != nil {
 			continue
 		}
-		contacts, err := g.contacts(ctx, source, pub.p, t.Target.Scope)
+		contacts, err := g.contacts(v2.WithPersistedTarget(ctx, t.Target), source, pub.p, t.Target.Scope)
 		if err != nil {
-			return err
+			result = errors.Join(result, err)
+			continue
+		}
+		if len(contacts) == 0 {
+			result = errors.Join(result, actionHeld)
 		}
 		for _, c := range contacts {
 			if !reflect.DeepEqual(c.DispatchTarget, t.Target) {
@@ -446,7 +461,7 @@ func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id 
 			s := notify.SelectedAction{
 				Source: source, Receiver: c.ReceiverID, Integration: c.integration.name, Index: c.integration.index,
 				Invoke: func(ctx context.Context, i *notify.Integration, m *alert.Alert) notify.NotifyVerdict {
-					v, _ := a.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: id, target: t, contact: c, p: pub.p}}, 0)
+					v, _, _ := a.invoke(ctx, g, i, []*alert.Alert{m}, []ordinaryContact{{operation: id, target: t, contact: c, p: pub.p}}, 0)
 					return v
 				},
 			}
@@ -545,20 +560,47 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			truncated = uint64(len(sent)) - limit
 			sent = sent[:limit]
 		}
-		ctx = context.WithValue(ctx, batchDestinationKey{}, &batchDestination{config: i.digest, members: sent})
-		var pending, accepted []*alert.Alert
+		var pending, accepted, candidates []*alert.Alert
 		var entries []ordinaryContact
 		var ordinaryAcceptance bool
 		resumePrefix := resume && slices.ContainsFunc(sent, func(m *alert.Alert) bool { return !ack(m) })
 		for _, m := range sent {
-			c, eligible := contacts[m]
-			if !eligible {
+			if _, ok := contacts[m]; !ok {
 				continue
 			}
-			if resumePrefix && ack(m) && c.pass != nil {
+			if resumePrefix && ack(m) && contacts[m].pass != nil {
 				accepted = append(accepted, m)
 				continue
 			}
+			candidates = append(candidates, m)
+		}
+		if i.prepared != nil && len(candidates) > 1 && slices.ContainsFunc(candidates, func(m *alert.Alert) bool { return contacts[m].pass == nil }) {
+			var completed []*alert.Alert
+			var cohortErr error
+			candidates, completed, cohortErr = a.inspectCohort(ctx, g, i, contacts, candidates)
+			held = errors.Join(held, cohortErr)
+			accepted = append(accepted, completed...)
+			ordinaryAcceptance = len(completed) > 0
+		}
+		contentIncomplete := false
+		if len(candidates) > 0 {
+			var retained []*alert.Alert
+			var err error
+			ctx, retained, err = integration.PrepareContent(ctx, candidates, truncated)
+			if err != nil {
+				return notify.Unrecoverable(err, notify.EncodingErrorReason)
+			}
+			contentIncomplete = len(retained) != len(candidates)
+			if contentIncomplete && slices.ContainsFunc(candidates[len(retained):], func(m *alert.Alert) bool { return m.Resolved() }) {
+				// SetNotifies persists accepted members before reporting the hold.
+				// Dispatcher keeps the original resolved alerts for the next flush.
+				held = errors.Join(held, actionHeld)
+			}
+			candidates = retained
+		}
+		ctx = context.WithValue(notify.ForMembers(ctx, candidates), batchDestinationKey{}, &batchDestination{config: i.digest, members: candidates})
+		for _, m := range candidates {
+			c := contacts[m]
 			c, err := a.ordinaryContact(ctx, g, m, c)
 			if err != nil {
 				if err.Error() != "NATIVE_SUPPRESSED" {
@@ -567,6 +609,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				continue
 			}
 			if c.target.State == "no_effect" {
+				// A previous native no-send completed the resolved group lifecycle.
+				accepted = append(accepted, m)
+				ordinaryAcceptance = true
 				continue
 			}
 			accepted = append(accepted, m)
@@ -578,13 +623,18 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			entries = append(entries, c)
 		}
 		if len(pending) > 0 {
-			v, delivered := a.invoke(ctx, g, integration, pending, entries, truncated)
+			if i.prepared != nil && len(pending) != len(candidates) {
+				// A reserve CAS raced with inspection. Keep the original pending
+				// targets and rerender eligibility on the next native flush.
+				return notify.Unrecoverable(actionHeld, notify.DefaultReason)
+			}
+			v, delivered, noSend := a.invoke(ctx, g, integration, pending, entries, truncated)
 			if i.name == "incidentio" && v.Err() == nil && len(delivered) > 0 {
-				incomplete := len(delivered) != len(pending)
+				incomplete := contentIncomplete || len(delivered) != len(pending)
 				notify.MarkContentIncomplete(ctx, incomplete)
 				ordinaryAcceptance = ordinaryAcceptance || incomplete
 			}
-			if len(delivered) != len(pending) {
+			if !noSend && len(delivered) != len(pending) {
 				omitted := make(map[*alert.Alert]bool, len(pending))
 				for _, m := range pending {
 					omitted[m] = true
@@ -614,6 +664,60 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	return result, nil
 }
 
+// inspectCohort removes ineligible members monotonically. Re-evaluate the
+// remaining group's rendered destination before creating any reservation.
+func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i actionIntegration, contacts map[*alert.Alert]ordinaryContact, members []*alert.Alert) ([]*alert.Alert, []*alert.Alert, error) {
+	type observation struct {
+		member *alert.Alert
+		digest string
+	}
+	cache := make(map[observation]string)
+	var completed []*alert.Alert
+	var held error
+	for range 16 {
+		probe := context.WithValue(notify.ForMembers(ctx, members), batchDestinationKey{}, &batchDestination{config: i.digest, members: members})
+		due := make([]*alert.Alert, 0, len(members))
+		for _, m := range members {
+			c := contacts[m]
+			c, err := a.planOrdinary(probe, g, m, c)
+			if err != nil {
+				held = errors.Join(held, err)
+				continue
+			}
+			if c.pass != nil {
+				due = append(due, m)
+				contacts[m] = c
+				continue
+			}
+			key := observation{m, c.contact.IntegrationDigest}
+			state, ok := cache[key]
+			if !ok {
+				state, err = a.journal.InspectContact(probe, m, c.p, c.contact.DispatchTarget)
+				if err != nil {
+					held = errors.Join(held, err)
+					continue
+				}
+				cache[key] = state
+			}
+			switch state {
+			case "due":
+				due = append(due, m)
+				contacts[m] = c
+			case "completed":
+				completed = append(completed, m)
+			case "covered":
+			default:
+				held = errors.Join(held, actionHeld)
+			}
+		}
+		if len(due) == len(members) || len(due) == 0 {
+			return due, completed, held
+		}
+		members = due
+	}
+	return nil, completed, errors.Join(held, actionHeld)
+}
+
 func currentGroup(ctx context.Context, m *alert.Alert, r *dispatch.Route) bool {
 	key, _ := notify.GroupKey(ctx)
 	return dispatch.GroupKeyForAlert(m, r) == key
@@ -631,8 +735,8 @@ func (a *nativeActions) reserve(ctx context.Context, p v2.EpisodeProjection, t p
 	return ordinaryContact{operation: id, target: r.Targets[0], contact: t, p: p}, nil
 }
 
-// ordinaryContact reserves only members selected by native send_resolved filtering and truncation.
-func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *alert.Alert, c ordinaryContact) (ordinaryContact, error) {
+// planOrdinary matches an exact outgoing cohort without reserving its contacts.
+func (a *nativeActions) planOrdinary(ctx context.Context, g *actionGraph, m *alert.Alert, c ordinaryContact) (ordinaryContact, error) {
 	s := m.ProviderSource()
 	if c.pass != nil {
 		if !c.contact.integration.canonical {
@@ -672,6 +776,19 @@ func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *
 		return c, actionHeld
 	}
 	c.contact = possible[idx]
+	return c, nil
+}
+
+// ordinaryContact reserves only the final post-filter, encoded cohort.
+func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *alert.Alert, c ordinaryContact) (ordinaryContact, error) {
+	previous := c.contact
+	c, err := a.planOrdinary(ctx, g, m, c)
+	if previous.route != nil && !reflect.DeepEqual(previous.DispatchTarget, c.contact.DispatchTarget) {
+		return c, actionHeld
+	}
+	if err != nil || c.pass != nil {
+		return c, err
+	}
 	if c.p.State == "firing" {
 		return a.reserve(ctx, c.p, c.contact)
 	}
@@ -699,7 +816,7 @@ func (a *nativeActions) ordinaryContact(ctx context.Context, g *actionGraph, m *
 	}
 }
 
-func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.Integration, members []*alert.Alert, contacts []ordinaryContact, truncated uint64) (notify.NotifyVerdict, []*alert.Alert) {
+func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.Integration, members []*alert.Alert, contacts []ordinaryContact, truncated uint64) (notify.NotifyVerdict, []*alert.Alert, bool) {
 	claimed := make([]v2.Entry, len(members))
 	active := make(map[*alert.Alert]bool, len(members))
 	selectMembers := func(subset []*alert.Alert) {
@@ -712,7 +829,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 	acquired := make([]bool, len(members))
 	entered := make([]bool, len(members))
 	bound := &notify.ProviderEntry{Truncated: truncated, Select: selectMembers}
-	finish := func(v notify.NotifyVerdict) (notify.NotifyVerdict, []*alert.Alert) {
+	finish := func(v notify.NotifyVerdict) (notify.NotifyVerdict, []*alert.Alert, bool) {
 		late, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		var accepted []*alert.Alert
@@ -742,7 +859,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		if settlement != nil {
 			v = notify.Unrecoverable(settlement, notify.DefaultReason)
 		}
-		return v, accepted
+		return v, accepted, bound.NoSend && v.Err() == nil
 	}
 	for x, c := range contacts {
 		s := members[x].ProviderSource()
@@ -778,13 +895,20 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 	}
 
 	first := contacts[0].contact
+	var key []byte
+	if g.key != nil {
+		key = g.key()
+	}
+	if first.integration.prepared != nil && len(key) != 32 {
+		return finish(notify.Unrecoverable(actionHeld, notify.DefaultReason))
+	}
 	bound.AddressID = func(fields ...string) string {
-		return notify.DestinationDigest(g.key, first.integration.digest, fields...)
+		return notify.DestinationDigest(key, first.integration.digest, fields...)
 	}
 	var prepared bool
 	bound.Destination = func(fields ...string) bool {
 		if first.integration.prepared != nil {
-			digest := notify.DestinationDigest(g.key, first.integration.digest, fields...)
+			digest := notify.DestinationDigest(key, first.integration.digest, fields...)
 			for _, c := range contacts {
 				if c.contact.IntegrationDigest != digest {
 					return false
@@ -823,7 +947,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		// Re-render this exact invocation once after the last blocking authority
 		// check. All routing, suppression and local permit checks follow it.
 		batch := &batchDestination{config: first.integration.digest, members: members}
-		checkCtx := context.WithValue(ctx, batchDestinationKey{}, batch)
+		checkCtx := context.WithValue(notify.ForMembers(ctx, members), batchDestinationKey{}, batch)
 		digest, err := g.destination(checkCtx, first.integration, first.route, members[0])
 		if err != nil || digest != first.IntegrationDigest {
 			return false
@@ -866,6 +990,13 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 					return false
 				}
 			} else if claimed[x] == nil || !claimed[x].LocalValid() {
+				return false
+			}
+		}
+		now := time.Now()
+		for x, c := range contacts {
+			m := members[x]
+			if active[m] && c.pass != nil && (m.ResolvedAt(now) != m.ProviderSource().ResolvedAt(now) || m.ResolvedAt(now) && !m.TerminalWireValid()) {
 				return false
 			}
 		}

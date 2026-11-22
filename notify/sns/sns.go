@@ -196,7 +196,13 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 			})
 		}
 		fields := []string{aws.ToString(resolved.BaseEndpoint), resolved.Region, fmt.Sprint(resolved.EndpointOptions.UseDualStackEndpoint), fmt.Sprint(resolved.EndpointOptions.UseFIPSEndpoint), principal, aws.ToString(publishInput.TopicArn), aws.ToString(publishInput.TargetArn), aws.ToString(publishInput.PhoneNumber)}
-		if !notify.PreparedDestination(ctx, fields...) {
+		var matches bool
+		if native, ok := resolved.HTTPClient.(*http.Client); ok {
+			matches = notify.PreparedHTTPDestination(ctx, native, fields...)
+		} else {
+			matches = notify.PreparedDestination(ctx, fields...)
+		}
+		if !matches {
 			return notify.Unrecoverable(notify.ErrDestination, notify.ConfigErrorReason)
 		}
 		options = append(options, func(o *sns.Options) {

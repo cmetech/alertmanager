@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	commoncfg "github.com/prometheus/common/config"
@@ -155,17 +156,45 @@ func (n *Notifier) encodeMessage(msg *Message) (bytes.Buffer, error) {
 	return buf, nil
 }
 
-// Notify implements the Notifier interface.
-func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.NotifyVerdict {
-	alerts, numTruncated := truncateAlerts(n.conf.MaxAlerts, alerts)
-	if e := notify.CurrentProviderEntry(ctx); e != nil {
-		numTruncated += e.Truncated
+type contentKey struct{}
+
+type preparedContent struct {
+	body    []byte
+	members []*alert.Alert
+}
+
+// PrepareContent freezes the exact encoded group before journal reservations.
+func (n *Notifier) PrepareContent(ctx context.Context, members []*alert.Alert, truncated uint64) (context.Context, []*alert.Alert, error) {
+	msg, err := n.message(notify.ForMembers(ctx, members), members, truncated)
+	if err != nil {
+		return ctx, nil, err
 	}
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if len(body)+1 > maxPayloadSize && len(members) > 1 {
+		truncated += uint64(len(members) - 1)
+		members = members[:1]
+		msg, err = n.message(notify.ForMembers(ctx, members), members, truncated)
+		if err != nil {
+			return ctx, nil, err
+		}
+		body, err = json.Marshal(msg)
+		if err != nil {
+			return ctx, nil, err
+		}
+	}
+	content := preparedContent{append(body, '\n'), slices.Clone(members)}
+	return context.WithValue(ctx, contentKey{}, content), members, nil
+}
+
+func (n *Notifier) message(ctx context.Context, alerts []*alert.Alert, numTruncated uint64) (*Message, error) {
 	data := notify.GetTemplateData(ctx, n.tmpl, alerts, n.logger)
 
 	groupKey, err := notify.ExtractGroupKey(ctx)
 	if err != nil {
-		return notify.Unrecoverable(err, notify.DefaultReason)
+		return nil, err
 	}
 
 	n.logger.Debug("incident.io notification", "groupKey", groupKey)
@@ -180,7 +209,7 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		for k, v := range n.conf.Metadata {
 			metadata[k] = tmpl(v)
 			if tmplErr != nil {
-				return notify.Unrecoverable(fmt.Errorf("failed to render metadata templates: %w", tmplErr), notify.DefaultReason)
+				return nil, fmt.Errorf("failed to render metadata templates: %w", tmplErr)
 			}
 		}
 	}
@@ -192,11 +221,12 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 		TruncatedAlerts: numTruncated,
 		Metadata:        metadata,
 	}
+	return msg, nil
+}
 
-	buf, err := n.encodeMessage(msg)
-	if err != nil {
-		return notify.Unrecoverable(err, notify.DefaultReason)
-	}
+// Notify implements the Notifier interface.
+func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.NotifyVerdict {
+	alerts, numTruncated := truncateAlerts(n.conf.MaxAlerts, alerts)
 
 	var url string
 	if n.conf.URL != nil {
@@ -212,8 +242,32 @@ func (n *Notifier) Notify(ctx context.Context, alerts ...*alert.Alert) notify.No
 	if !notify.PreparedHTTPDestination(ctx, n.client, url, n.sourceToken) {
 		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
 	}
-	if e := notify.CurrentProviderEntry(ctx); e != nil && e.Select != nil {
-		e.Select(alerts[:len(msg.Alerts)])
+	var buf bytes.Buffer
+	if e := notify.CurrentProviderEntry(ctx); e != nil {
+		content, ok := ctx.Value(contentKey{}).(preparedContent)
+		if !ok {
+			prepared, _, err := n.PrepareContent(ctx, alerts, numTruncated+e.Truncated)
+			if err != nil {
+				return notify.Unrecoverable(err, notify.EncodingErrorReason)
+			}
+			content = prepared.Value(contentKey{}).(preparedContent)
+		} else if !slices.Equal(alerts, content.members) {
+			return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+		}
+		if e.Select != nil {
+			e.Select(content.members)
+		}
+		buf = *bytes.NewBuffer(content.body)
+	} else {
+		msg, err := n.message(ctx, alerts, numTruncated)
+		if err != nil {
+			return notify.Unrecoverable(err, notify.DefaultReason)
+		}
+		body, err := n.encodeMessage(msg)
+		if err != nil {
+			return notify.Unrecoverable(err, notify.DefaultReason)
+		}
+		buf = body
 	}
 	if n.conf.Timeout > 0 {
 		ctxWithTimeout, cancel := context.WithTimeoutCause(ctx, n.conf.Timeout, fmt.Errorf("configured incident.io timeout reached (%s)", n.conf.Timeout))

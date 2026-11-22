@@ -4,7 +4,9 @@
 package v2
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -212,6 +214,7 @@ func (o *nativeActionOwner) reconcileLocked(ctx context.Context, s *episodeSlot,
 	}
 	return "", false, localErr
 }
+
 func (l actionLease) currentEpoch(epoch uint64) bool {
 	return epoch != 0 && l.Epoch == epoch && l.ExpiresAt.After(time.Now())
 }
@@ -340,6 +343,7 @@ func (o *nativeActionOwner) recoverEpisodes(ctx context.Context, epoch uint64) (
 	}
 	return nil
 }
+
 func (o *nativeActionOwner) operationPage(ctx context.Context, after string) ([]ActionResultV1, error) {
 	p := map[string]any{"projection": "operations", "limit": 32}
 	if after != "" {
@@ -360,31 +364,39 @@ func (o *nativeActionOwner) operationPage(ctx context.Context, after string) ([]
 	}
 	return rows, nil
 }
+
 func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	o.mu.Lock()
 	old := o.lease
 	o.mu.Unlock()
 	if old.Epoch == 0 || !old.ExpiresAt.After(time.Now()) {
 		var l actionLease
-		if err := o.read(ctx, "acquire-authority", map[string]any{"owner_id": o.owner}, &l); err != nil {
+		if err := o.read(ctx, "acquire-authority", map[string]any{"owner_id": o.owner, "recipient_binding": 1}, &l); err != nil {
 			return err
 		}
 		if !o.validLease(l) {
-			return unavailable
+			return o.rejectLease()
 		}
 		old = l
 	}
 	start := time.Now()
 	var l actionLease
-	err := o.read(ctx, "renew-authority", map[string]any{"owner_id": o.owner, "epoch": old.Epoch}, &l)
+	err := o.read(ctx, "renew-authority", map[string]any{"owner_id": o.owner, "epoch": old.Epoch, "recipient_binding": 1}, &l)
 	if err != nil {
 		return err
 	}
-	if !o.validLease(l) || l.Epoch != old.Epoch {
-		return unavailable
+	if !o.validLease(l) || l.Epoch != old.Epoch || l.RecipientKey != old.RecipientKey {
+		return o.rejectLease()
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	key, _ := hex.DecodeString(l.RecipientKey)
+	if o.recipientKey != nil && !bytes.Equal(o.recipientKey, key) {
+		o.lease.ExpiresAt = time.Time{}
+		o.recovered = false
+		return unavailable
+	}
+	o.recipientKey = key
 	if o.lease.Epoch != l.Epoch {
 		o.recovered = false
 		clear(o.membership[:])
@@ -401,8 +413,17 @@ func (o *nativeActionOwner) leaseTick(ctx context.Context) error {
 	o.lease = l
 	return nil
 }
+
+func (o *nativeActionOwner) rejectLease() error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.lease.ExpiresAt = time.Time{}
+	o.recovered = false
+	return unavailable
+}
+
 func (o *nativeActionOwner) validLease(l actionLease) bool {
-	return l.Protocol == "native-action-store-v1" && l.RecoverySelectors == 1 && l.TerminalObservations == 2 && l.AuthorityID == o.authority && l.OwnerID == o.owner && l.Epoch > 0 && l.RenewSeconds == 10 && !l.ExpiresAt.IsZero()
+	return l.RecipientBinding == 1 && managedHash.MatchString(l.RecipientKey) && l.Protocol == "native-action-store-v1" && l.RecoverySelectors == 1 && l.TerminalObservations == 2 && l.AuthorityID == o.authority && l.OwnerID == o.owner && l.Epoch > 0 && l.RenewSeconds == 10 && !l.ExpiresAt.IsZero()
 }
 
 // Drain observed changes even when an episode has no explicit operation or delivery pending.
