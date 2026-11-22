@@ -1,3 +1,8 @@
+## Unreleased — Native action recovery and group entry
+
+- Alertmanager checks the earliest active source or claim expiry at the provider transition. Rehydrated slots reread the durable row, read-side inhibition uses the original provider identity, and unsupported first-enrollment severities release capacity for supported alerts.
+- Tracked full-scope firing groups use the private `ordinary_cohort: 1` store commands. First and repeat notifications retain the native group and each admitted member's receipt. Canonical graphs also require B2's `native_delivery_receipts: 1`. Pair native source `a8951628` with OSCAR Alertmanager source `d93ac2365`. The feature defaults off. This change introduces no configuration or schema migration. Runtime qualification remains pending.
+
 ## Unreleased — Native action recovery and commissioning
 
 - Alertmanager installs the dispatch adapter when the existing native action flag is enabled. Recovered severity drives routing, inhibition, templates and native reads. Possible inhibitors hold their matching dependents while the owner verifies current resident identity.
