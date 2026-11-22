@@ -1,5 +1,7 @@
 ## Unreleased — Tracked terminal contact checkpoint
 
+- Native webhook batches with an unverifiable input and a configured alert limit wait for the next group evaluation. Partial ordinary success records an accepted direct sibling in the notification log while preserving existing coverage deadlines. Paged takeover discards progress after a lease change and refreshes resident projections that an intervening owner may have closed. Implementation `044d263b`. This native-only correction uses the existing private journal and configuration. Operator qualification is pending.
+
 - Terminal contacts validate the outgoing copy, exact source evidence and managed promotion before provider entry. Ordinary grouped delivery keeps member order and reserves only the native post-filter webhook prefix. Proposed canonical configuration must pass commissioning before replacing the prior graph.
 - Native takeover resumes indexed membership pages within the same epoch. This reader requires the new private lease marker and the paired OSCAR terminal index upgrade. Existing releases remain disabled pending transport, inhibition and operator qualification. Implementation `b5b18c84`.
 
