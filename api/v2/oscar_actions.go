@@ -261,10 +261,15 @@ func actionDigest(req ActionRequestV1) (string, error) {
 	if err = d.Decode(&obj); err != nil {
 		return "", err
 	}
+	return canonicalActionDigest(obj)
+}
+
+// Both action requests and full-scope ordinary target keys use compact UTF-8 JSON.
+func canonicalActionDigest(value any) (string, error) {
 	var buf bytes.Buffer
 	e := json.NewEncoder(&buf)
 	e.SetEscapeHTML(false)
-	if err = e.Encode(obj); err != nil {
+	if err := e.Encode(value); err != nil {
 		return "", err
 	}
 	// Go sorts map keys but escapes these two Unicode runes even with HTML escaping off.

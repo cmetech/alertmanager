@@ -3,14 +3,14 @@
 The existing disabled-by-default OSCAR action option installs the native reader
 through the normal app factory. A compatible private authority lease, recovered
 membership and a published configuration generation are prerequisites for
-version 1. A graph containing any canonical callback additionally requires
-`ordinary_cohort: 1` and `native_delivery_receipts: 1` in the authenticated acquire/renew response.
+version 1. The authenticated acquire/renew response must carry
+`ordinary_cohort: 2`. Canonical callbacks also require `native_delivery_receipts: 1`.
 B2 owns the receipt assertion and must implement durable signed receipt recovery before
 advertising it. The current backend omits it. Direct-only graphs use their own
 route and store proof. B1/B2 commissioning and operator qualification are pending.
 
 The owner finishes enrollment and physical receiver planning before claiming a
-tracked firing group. The store admits up to 64 full-scope ordinary contacts per
+tracked ordinary group, including firing and resolved siblings. The store admits up to 64 full-scope ordinary contacts per
 private command using the existing coverage, operation and target rows. Inspection
 and admission also fit each complete encoded request into 256 KiB, including
 the authority envelope, target names and JSON escaping. Each
@@ -176,7 +176,8 @@ cleanup through the next flush. Jira resolved no-send completes the ordinary
 group lifecycle while leaving contact coverage untouched. Provider transport acceptance and downstream OSCAR ticket
 settlement have distinct receipts.
 
-Tracked ordinary resolution uses the private `reserve-terminal` command after
+Tracked ordinary resolution uses private cohort admission or the individual
+`reserve-terminal` command after
 normal group eligibility, send-resolved filtering and webhook truncation.
 The journal derives the operation ID from the retained episode row, variant,
 terminal sequence and destination. Claim rechecks current terminal identity,
@@ -188,6 +189,17 @@ An entered target keeps its receipt after re-fire. A canonical callback
 carries a stable delivery UUID and ordinary lifecycle semantics. An independent
 firing action cannot use a terminal claim. The claim does not advance a repeat
 or reserve firing coverage.
+
+The paired reader and store derive the same terminal UUIDv5 from the individual
+reservation fields. A cohort inspection or admission can find an earlier
+individual receipt. Confirmed delivery and a conclusive native provider no-send
+complete the terminal member. An unknown or already-entered target stays held.
+When a prepared group shrinks during admission, eligible siblings can enter in
+their original order if the new rendering retains every admitted member and
+matches its frozen recipient. A changed recipient or failed entry fence settles
+the original token with no-effect evidence. A token-claimed terminal at that
+same recipient remains held for reconciliation. A later flush evaluates a
+distinct rendered recipient under its own deterministic identity.
 
 At takeover the native owner pages firing projections and distinct retained
 source keys. Each recovery turn pins its lease epoch. The first turn of a new epoch marks resident projections uncertain before recording any page cursor. A firing slot omitted after another owner closed it must refresh its exact journal row. Page cursors resume after transient failures within their epoch. Each turn

@@ -1659,14 +1659,14 @@ func TestOscarActionReceiptLeaseCompatibilityIsAffirmative(t *testing.T) {
 		value string
 		ready bool
 	}{{"1", true}, {"", false}, {"null", false}, {"true", false}, {`"1"`, false}, {"2", false}, {"1", true}} {
-		o.lease.OrdinaryCohort = json.RawMessage("1")
+		o.lease.OrdinaryCohort = json.RawMessage("2")
 		o.lease.NativeDeliveryReceipts = json.RawMessage(tc.value)
 		o.publishLeaseLocked()
 		epoch, ready := o.RecoveryState()
 		require.Equal(t, uint64(3), epoch)
 		require.Equal(t, tc.ready, ready)
 	}
-	for _, value := range []string{"", "null", "true", `"1"`, "2"} {
+	for _, value := range []string{"", "null", "true", `"2"`, "1", "3"} {
 		o.lease.OrdinaryCohort = json.RawMessage(value)
 		o.publishLeaseLocked()
 		epoch, signed := o.RecoveryState()
@@ -1674,7 +1674,7 @@ func TestOscarActionReceiptLeaseCompatibilityIsAffirmative(t *testing.T) {
 		require.False(t, signed)
 		require.False(t, o.CohortSupported())
 	}
-	o.lease.OrdinaryCohort = json.RawMessage("1")
+	o.lease.OrdinaryCohort = json.RawMessage("2")
 	o.lease.NativeDeliveryReceipts = nil
 	o.publishLeaseLocked()
 	require.True(t, o.CohortSupported(), "direct cohort support is independent of OSCAR delivery receipt consumption")
@@ -1789,7 +1789,9 @@ func TestOscarOrdinaryCohortLostRepliesUseOnlyOriginalIDsAndTokens(t *testing.T)
 			dispatch := &cohortFixtureDispatch{target: target}
 			dispatch.stamp.Store(true)
 			var submitted, lost []string
-			token, key := strings.Repeat("b", 64), strings.Repeat("c", 64)
+			token := strings.Repeat("b", 64)
+			key, err := canonicalActionDigest([]any{target.ReceiverID, target.IntegrationDigest, []string{}})
+			require.NoError(t, err)
 			lookups, settles := 0, 0
 			now := time.Now()
 			o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, p map[string]any, out any) error {
@@ -1841,13 +1843,16 @@ func TestOscarOrdinaryCohortLostRepliesUseOnlyOriginalIDsAndTokens(t *testing.T)
 				return nil
 			}), dispatch)
 			o.recovered = true
-			o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Minute), NativeDeliveryReceipts: json.RawMessage("1"), OrdinaryCohort: json.RawMessage("1")}
+			o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Minute), NativeDeliveryReceipts: json.RawMessage("1"), OrdinaryCohort: json.RawMessage("2")}
 			o.publishLeaseLocked()
 			var candidates []OrdinaryCandidate
 			for n := range ordinaryChunk + 1 {
 				source := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(fmt.Sprint(n)), "severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 				id := fmt.Sprintf("00000000-0000-4000-8000-%012d", n+1)
 				p := EpisodeProjection{ID: id, episodeUpdate: episodeUpdate{EpisodeRef: EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: id, Generation: 1, VariantRevision: 1}, NativeVariant: variantOf(source), ActiveSince: now.UTC().Format(time.RFC3339Nano), State: "firing", LifecycleSeq: 1, SourceSeverity: "major"}}
+				if n%2 == 0 {
+					source.EndsAt, p.State, p.LifecycleSeq = now, "resolved", 2
+				}
 				candidates = append(candidates, OrdinaryCandidate{Canonical: true, Member: source.NotificationCopy(now), Projection: p, Target: target})
 			}
 			out := o.AdmitCohort(t.Context(), candidates)
@@ -1858,6 +1863,12 @@ func TestOscarOrdinaryCohortLostRepliesUseOnlyOriginalIDsAndTokens(t *testing.T)
 				require.Nil(t, r.Entry)
 			}
 			require.NoError(t, out[ordinaryChunk].Err)
+			require.Equal(t, "resolved", out[ordinaryChunk].Delivery.State)
+			for n, c := range candidates {
+				if c.Projection.State == "resolved" {
+					require.Equal(t, terminalOperationID(c.Projection, key), submitted[n])
+				}
+			}
 			o.recovered = false
 			o.publishLeaseLocked()
 			require.NoError(t, o.SettleCohort(t.Context(), []OrdinaryReceipt{{out[ordinaryChunk].Entry, "confirmed", "accepted"}}))
@@ -1875,6 +1886,8 @@ func TestOrdinaryCohortBoundsExactPrivateBodyBeforeSending(t *testing.T) {
 	for _, name := range []string{strings.Repeat("x", 4096), strings.Repeat("<", 4096), strings.Repeat("x", actionBodyLimit)} {
 		t.Run(fmt.Sprint(len(name), name[0]), func(t *testing.T) {
 			destination := DispatchTarget{ReceiverID: name, IntegrationDigest: strings.Repeat("a", 64), Scope: []ScopeEntry{}, RepeatIntervalUS: 1000}
+			key, err := canonicalActionDigest([]any{name, destination.IntegrationDigest, []string{}})
+			require.NoError(t, err)
 			dispatch := &cohortFixtureDispatch{target: destination}
 			dispatch.stamp.Store(true)
 			now := time.Now()
@@ -1895,7 +1908,7 @@ func TestOrdinaryCohortBoundsExactPrivateBodyBeforeSending(t *testing.T) {
 					case "inspect-cohort":
 					case "admit-cohort":
 						reserved = append(reserved, r.ID)
-						rows[n] = cohortResult{ID: r.ID, State: "entered", Key: strings.Repeat("b", 64), Token: strings.Repeat("c", 64), Target: r.Target, Lease: now.Add(30 * time.Second), Permit: now.Add(30 * time.Second)}
+						rows[n] = cohortResult{ID: r.ID, State: "entered", Key: key, Token: strings.Repeat("c", 64), Target: r.Target, Lease: now.Add(30 * time.Second), Permit: now.Add(30 * time.Second)}
 					default:
 						t.Fatalf("unexpected %s", cmd)
 					}
@@ -1904,13 +1917,16 @@ func TestOrdinaryCohortBoundsExactPrivateBodyBeforeSending(t *testing.T) {
 				return nil
 			}), dispatch)
 			o.recovered = true
-			o.lease = actionLease{Epoch: 128, ExpiresAt: now.Add(time.Minute), OrdinaryCohort: json.RawMessage("1")}
+			o.lease = actionLease{Epoch: 128, ExpiresAt: now.Add(time.Minute), OrdinaryCohort: json.RawMessage("2")}
 			o.publishLeaseLocked()
 			var members []OrdinaryCandidate
 			for n := range ordinaryChunk {
 				src := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major", "host": model.LabelValue(fmt.Sprint(n))}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 				id := fmt.Sprintf("00000000-0000-4000-8000-%012d", n+1)
 				p := EpisodeProjection{ID: id, episodeUpdate: episodeUpdate{EpisodeRef: EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: id, Generation: 1, VariantRevision: 1}, NativeVariant: variantOf(src), ActiveSince: now.UTC().Format(time.RFC3339Nano), State: "firing", SourceSeverity: "major", LifecycleSeq: 1}}
+				if n%2 == 0 {
+					src.EndsAt, p.State, p.LifecycleSeq = now, "resolved", 2
+				}
 				members = append(members, OrdinaryCandidate{Member: src, Target: destination, Projection: p})
 			}
 			states := o.InspectCohort(t.Context(), members)
@@ -1934,4 +1950,83 @@ func TestOrdinaryCohortBoundsExactPrivateBodyBeforeSending(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOscarTerminalCohortOriginalWireAndManagedProof(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "cleared"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour)}, now, false)
+	source.ManagedReceiver, source.ManagedOperationKind = true, "clear"
+	source.ManagedMember = alert.ManagedMembership{Episode: strings.Repeat("a", 64), Event: uuid.NewString(), Generation: 2, Digest: strings.Repeat("b", 64)}
+	m := source.ManagedMember
+	ref := EpisodeRef{AuthorityID: defaultActionAuthority, EpisodeID: uuid.NewString(), Generation: 1, VariantRevision: 1}
+	p := EpisodeProjection{ID: "11111111-1111-4111-8111-111111111111", episodeUpdate: episodeUpdate{
+		EpisodeRef: ref, ActiveSince: variantOf(source).StartsAt, NativeVariant: variantOf(source), State: "resolved", SourceSeverity: "cleared", LifecycleSeq: 2, ManagedOwner: &sourceOwner{m.Episode, m.Generation},
+	}}
+	// Compact Python JSON includes the literal separator rune and preserves the
+	// literal backslash sequence. UUIDv5 uses the episode row, not the public episode.
+	target := DispatchTarget{ReceiverID: "ops<&\u2028\\u2029>", IntegrationDigest: strings.Repeat("a", 64), Scope: []ScopeEntry{}, RepeatIntervalUS: 1000}
+	const targetKey = "46ed006f39eb8cbdc6a48fdb8b8d6aca4d9d23956450351887500a1c07ce308d"
+	const original = "1ac992d7-5393-5645-8126-c87e03eb6b2c"
+	token := strings.Repeat("c", 64)
+	dispatch := &cohortFixtureDispatch{target: target}
+	dispatch.stamp.Store(true)
+	claims, settlements := 0, 0
+	o := newNativeActionOwner(defaultActionAuthority, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+		switch cmd {
+		case "admit-cohort":
+			claims++
+			r := args["members"].([]cohortRequest)[0]
+			require.Equal(t, original, r.ID)
+			require.Equal(t, terminalSourceDigest(source), r.Terminal.SourceDigest)
+			require.Equal(t, source.EndsAt, r.Terminal.SourceEndsAt)
+			require.False(t, r.Terminal.WireResolved)
+			*out.(*[]cohortResult) = []cohortResult{{ID: original, Key: targetKey, Target: target, Token: token, State: "entered", Lease: now.Add(time.Minute), Permit: now.Add(30 * time.Second)}}
+		case "settle-cohort":
+			settlements++
+			r := args["members"].([]map[string]any)[0]
+			require.Equal(t, original, r["operation_id"])
+			require.Equal(t, targetKey, r["target_key"])
+			require.Equal(t, token, r["entry_token"])
+			*out.(*[]string) = []string{original}
+		default:
+			t.Fatalf("unexpected command %s", cmd)
+		}
+		return nil
+	}), dispatch)
+	o.recovered = true
+	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Minute), OrdinaryCohort: json.RawMessage("2")}
+	o.publishLeaseLocked()
+	promoted := &ownerSlot{Generation: m.Generation, Projection: snapshot(source), Operation: mustRaw(t, map[string]string{"kind": "clear", "event_id": m.Event, "source_digest": m.Digest})}
+	closed := now.UnixMilli()
+	state := ownerState{Key: m.Episode, State: "exact_closed", Phase: "reserved", Generation: m.Generation, Closed: &closed, Pending: promoted}
+	o.verifyManaged = func(_ context.Context, s *alert.Alert, logical string) error {
+		return actionMemberProof(state, s, logical)
+	}
+	wire := source.NotificationCopy(now)
+	c := OrdinaryCandidate{Member: wire, Projection: p, Target: target}
+	run := func() OrdinaryAdmission { return o.AdmitCohort(t.Context(), []OrdinaryCandidate{c})[0] }
+	require.Error(t, run().Err)
+	require.Zero(t, claims)
+	state.Current, state.Pending, state.Phase = promoted, nil, "applied"
+	wrong := *wire
+	wrong.EndsAt = now.Add(-time.Minute)
+	c.Member = &wrong
+	require.Error(t, run().Err)
+	require.Zero(t, claims)
+	c.Member = wire
+	admitted := run()
+	require.NoError(t, admitted.Err)
+	require.True(t, admitted.Entry.ForMember(wire))
+	require.False(t, admitted.Entry.ForMember(&wrong))
+	require.Equal(t, "resolved", admitted.Delivery.State)
+	require.Nil(t, admitted.Delivery.OperationID)
+	require.True(t, admitted.Entry.LocalValid())
+	o.lease.Epoch++
+	o.publishLeaseLocked()
+	require.False(t, admitted.Entry.LocalValid())
+	dispatch.stamp.Store(false)
+	require.NoError(t, o.SettleCohort(t.Context(), []OrdinaryReceipt{{admitted.Entry, "no_effect", "FENCED_BEFORE_PROVIDER_ENTRY"}}))
+	require.Equal(t, 1, claims)
+	require.Equal(t, 1, settlements)
 }

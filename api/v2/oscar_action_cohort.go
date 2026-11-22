@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"sync/atomic"
@@ -17,7 +18,7 @@ import (
 	"github.com/prometheus/alertmanager/alert"
 )
 
-// OrdinaryCohortJournal admits only full-scope, firing contacts at one physical receiver integration.
+// OrdinaryCohortJournal admits full-scope ordinary firing and terminal contacts at one physical receiver integration.
 type OrdinaryCohortJournal interface {
 	AdmitCohort(context.Context, []OrdinaryCandidate) []OrdinaryAdmission
 	SettleCohort(context.Context, []OrdinaryReceipt) error
@@ -37,6 +38,7 @@ type OrdinaryAdmission struct {
 	Delivery  alert.NativeDeliveryV1
 	TargetKey string
 	Covered   bool
+	Completed bool
 	Err       error
 }
 type OrdinaryReceipt struct {
@@ -54,7 +56,14 @@ type cohortRequest struct {
 	Target    DispatchTarget      `json:"target"`
 	Revision  uint64              `json:"expected_revision"`
 	Lifecycle uint64              `json:"lifecycle_seq"`
+	Terminal  *cohortTerminal     `json:"terminal,omitempty"`
 }
+type cohortTerminal struct {
+	SourceEndsAt time.Time `json:"source_ends_at"`
+	SourceDigest string    `json:"source_digest"`
+	WireResolved bool      `json:"wire_resolved"`
+}
+
 type cohortResult struct {
 	ID       string         `json:"operation_id"`
 	State    string         `json:"state"`
@@ -112,6 +121,42 @@ type cohortPublication interface {
 	FreezeEpisode(*alert.Alert, EpisodeProjection) *atomic.Bool
 }
 
+// Terminal requests must address the same UUIDv5 as the individual store path.
+// The store independently derives this ID and verifies the complete frozen digest.
+func (c OrdinaryCandidate) request() (cohortRequest, bool) {
+	p, m := c.Projection, c.Member
+	if m == nil || !managedUUID.MatchString(p.ID) || len(c.Target.Scope) != 0 || !sameResident(p, m.ProviderSource()) {
+		return cohortRequest{}, false
+	}
+	r := cohortRequest{Row: p.ID, Ref: p.EpisodeRef, Variant: p.NativeVariant, Target: c.Target, Revision: p.SeverityRevision, Lifecycle: p.LifecycleSeq}
+	switch p.State {
+	case "firing":
+		if m.Resolved() {
+			return r, false
+		}
+		r.ID = uuid.NewString()
+	case "resolved":
+		source := m.ProviderSource()
+		wireResolved := m.Resolved()
+		if !terminalWireMatches(m, wireResolved) {
+			return r, false
+		}
+		key, err := canonicalActionDigest([]any{c.Target.ReceiverID, c.Target.IntegrationDigest, []string{}})
+		if err != nil {
+			return r, false
+		}
+		r.ID = terminalOperationID(p, key)
+		r.Terminal = &cohortTerminal{source.EndsAt.UTC(), terminalSourceDigest(source), wireResolved}
+	default:
+		return r, false
+	}
+	return r, true
+}
+
+func terminalOperationID(p EpisodeProjection, key string) string {
+	return uuid.NewSHA1(uuid.MustParse(p.ID), []byte(fmt.Sprintf("terminal/%d/%d/%s", p.EpisodeRef.VariantRevision, p.LifecycleSeq, key))).String()
+}
+
 func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []OrdinaryCandidate) []OrdinaryAdmission {
 	ctx = o.withEpoch(ctx)
 	out := make([]OrdinaryAdmission, len(candidates))
@@ -123,13 +168,11 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 	// Finish every potentially slow managed proof and plan before the first permit.
 	for i, c := range candidates {
 		out[i].Err = reconcile
-		if !ok || c.Member == nil || c.Member.Resolved() || c.Projection.State != "firing" || len(c.Target.Scope) != 0 {
+		r, valid := c.request()
+		if !ok || !valid {
 			continue
 		}
 		p, source := c.Projection, c.Member.ProviderSource()
-		if !sameResident(p, source) || !managedUUID.MatchString(p.ID) {
-			continue
-		}
 		stamp := pub.FreezeEpisode(source, p)
 		if stamp == nil || o.verifySource(ctx, source, p.State) != nil {
 			continue
@@ -138,7 +181,7 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 		if err != nil || reason != "" || !slices.ContainsFunc(targets, func(t DispatchTarget) bool { return reflect.DeepEqual(t, c.Target) }) {
 			continue
 		}
-		requests = append(requests, cohortRequest{uuid.NewString(), p.ID, p.EpisodeRef, p.NativeVariant, c.Target, p.SeverityRevision, p.LifecycleSeq})
+		requests = append(requests, r)
 		positions = append(positions, i)
 		stamps = append(stamps, stamp)
 	}
@@ -186,8 +229,11 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 			}
 			index := positions[start+n]
 			c := candidates[index]
-			if row.State == "covered" && err == nil && len(rows) == len(chunk) {
-				out[index] = OrdinaryAdmission{Covered: true}
+			terminal := chunk[n].Terminal
+			if err == nil && len(rows) == len(chunk) && (terminal == nil && row.State == "covered" || terminal != nil && row.State == "completed") {
+				if terminal == nil || stamps[start+n].Load() && o.live(ctx) && o.CohortSupported() && terminalWireMatches(c.Member, terminal.WireResolved) {
+					out[index] = OrdinaryAdmission{Covered: row.State == "covered", Completed: row.State == "completed"}
+				}
 				continue
 			}
 			if row.State != "entered" || !managedHash.MatchString(row.Token) || !managedHash.MatchString(row.Key) {
@@ -203,9 +249,12 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 				live, receipts := o.RecoveryState()
 				return live == epoch && (!c.Canonical || receipts) && o.CohortSupported() && stamp.Load()
 			}}
+			if terminal != nil {
+				e.terminal = &terminalObservation{terminal.WireResolved, terminal.SourceDigest, p.LifecycleSeq, p.NativeVariant, terminal.SourceEndsAt}
+			}
 			id := uuid.NewSHA1(uuid.MustParse(row.ID), []byte(row.Key)).String()
 			d := alert.NativeDeliveryV1{Version: 1, EpisodeRef: p.EpisodeRef, NativeVariant: p.NativeVariant, LifecycleSeq: p.LifecycleSeq, State: p.State, ActiveSince: p.ActiveSince, SourceSeverity: p.SourceSeverity, EffectiveSeverity: p.EffectiveSeverity(), DeliveryID: id, TargetScope: c.Target.Scope}
-			if err != nil || len(rows) != len(chunk) || !e.ForMember(c.Member) || !e.LocalValid() || !reflect.DeepEqual(row.Target, c.Target) || c.Canonical && d.Validate(c.Target.ReceiverID) != nil {
+			if err != nil || len(rows) != len(chunk) || terminal != nil && row.ID != terminalOperationID(p, row.Key) || !e.ForMember(c.Member) || !e.LocalValid() || !reflect.DeepEqual(row.Target, c.Target) || c.Canonical && d.Validate(c.Target.ReceiverID) != nil {
 				refused = append(refused, OrdinaryReceipt{e, "no_effect", "INVALIDATED_BEFORE_PROVIDER_ENTRY"})
 				continue
 			}
@@ -223,9 +272,27 @@ func (o *nativeActionOwner) InspectCohort(ctx context.Context, members []Ordinar
 	states := make([]string, len(members))
 	epoch, _ := PublicationToken(ctx)
 	requests := make([]cohortRequest, 0, len(members))
-	for _, c := range members {
-		p := c.Projection
-		requests = append(requests, cohortRequest{uuid.NewString(), p.ID, p.EpisodeRef, p.NativeVariant, c.Target, p.SeverityRevision, p.LifecycleSeq})
+	var positions []int
+	var stamps []*atomic.Bool
+	pub, _ := o.dispatch.(cohortPublication)
+	for i, c := range members {
+		r, ok := c.request()
+		if !ok {
+			continue
+		}
+		var stamp *atomic.Bool
+		if r.Terminal != nil {
+			if pub == nil {
+				continue
+			}
+			stamp = pub.FreezeEpisode(c.Member.ProviderSource(), c.Projection)
+			if stamp == nil {
+				continue
+			}
+		}
+		stamps = append(stamps, stamp)
+		requests = append(requests, r)
+		positions = append(positions, i)
 	}
 	for _, part := range o.cohortChunks(epoch, requests) {
 		if part.err != nil {
@@ -241,7 +308,15 @@ func (o *nativeActionOwner) InspectCohort(ctx context.Context, members []Ordinar
 		}
 		for n, row := range rows {
 			if row.ID == chunk[n].ID {
-				states[part.begin+n] = row.State
+				if row.State == "completed" && chunk[n].Terminal == nil || row.State == "covered" && chunk[n].Terminal != nil {
+					continue
+				}
+				index := positions[part.begin+n]
+				m := members[index].Member
+				if term := chunk[n].Terminal; term != nil && (!stamps[part.begin+n].Load() || !o.live(ctx) || !o.CohortSupported() || !terminalWireMatches(m, term.WireResolved)) {
+					continue
+				}
+				states[index] = row.State
 			}
 		}
 	}

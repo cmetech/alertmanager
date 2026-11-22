@@ -1616,3 +1616,149 @@ func TestOscarActionPublishedFiringClosesOnDueWireBeforeGC(t *testing.T) {
 		})
 	}
 }
+
+type mixedCohortFixture struct {
+	terminalFixtureJournal
+	states   map[string]string
+	issued   map[v2.Entry]v2.OrdinaryCandidate
+	receipts []v2.OrdinaryReceipt
+}
+
+func (*mixedCohortFixture) CohortReady() bool     { return true }
+func (*mixedCohortFixture) CohortSupported() bool { return true }
+func (j *mixedCohortFixture) InspectCohort(_ context.Context, members []v2.OrdinaryCandidate) []string {
+	states := make([]string, len(members))
+	for i, m := range members {
+		states[i] = j.states[string(m.Member.Labels["host"])]
+	}
+	return states
+}
+func (j *mixedCohortFixture) AdmitCohort(_ context.Context, members []v2.OrdinaryCandidate) []v2.OrdinaryAdmission {
+	rows := make([]v2.OrdinaryAdmission, len(members))
+	for i, m := range members {
+		host := string(m.Member.Labels["host"])
+		switch host {
+		case "race":
+			j.states[host] = "held" // This terminal token is now owned by an unknown contact.
+			rows[i].Err = actionHeld
+		default:
+			e := &fixturePermit{m.Member.ProviderSource()}
+			j.issued[e] = m
+			rows[i] = v2.OrdinaryAdmission{Entry: e, TargetKey: host}
+		}
+	}
+	return rows
+}
+func (j *mixedCohortFixture) SettleCohort(_ context.Context, rows []v2.OrdinaryReceipt) error {
+	for _, r := range rows {
+		m, ok := j.issued[r.Entry]
+		if !ok {
+			return errors.New("wrong original entry")
+		}
+		state := "held"
+		if r.Outcome == "confirmed" {
+			if m.Projection.State == "firing" {
+				state = "covered"
+			} else {
+				state = "completed"
+			}
+		}
+		j.states[string(m.Member.Labels["host"])] = state
+	}
+	j.receipts = append(j.receipts, rows...)
+	return nil
+}
+
+func TestOscarTerminalCohortPreparedSubsetAfterAdmissionRace(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("destination-changed-%t", changed), func(t *testing.T) {
+			bodies := make(chan webhook.Message, 2)
+			sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				var body webhook.Message
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				bodies <- body
+			}))
+			t.Cleanup(sink.Close)
+			r := newTestReloader(t)
+			t.Cleanup(func() { _ = r.stop() })
+			address := sink.URL
+			if changed {
+				address += "/{{ (index .Alerts 0).Labels.host }}"
+			}
+			var configured string
+			if changed {
+				configured = fmt.Sprintf("url: %q", address)
+			} else {
+				file := filepath.Join(t.TempDir(), "receiver")
+				require.NoError(t, os.WriteFile(file, []byte(address), 0600))
+				configured = "url_file: " + file
+			}
+			cfg, err := config.Load("route:\n  receiver: team\n  group_by: [alertname]\n  group_wait: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - " + configured + "\n    send_resolved: true\n")
+			require.NoError(t, err)
+			j := &mixedCohortFixture{
+				terminalFixtureJournal: terminalFixtureJournal{projections: map[*alert.Alert]v2.EpisodeProjection{}},
+				states:                 map[string]string{"complete": "completed", "covered": "covered", "race": "due", "clear": "due", "active": "due"},
+				issued:                 map[v2.Entry]v2.OrdinaryCandidate{},
+			}
+			a := newNativeActions(nil, nil, r.logger)
+			r.actions = a
+			require.NoError(t, a.Bind(j))
+			require.NoError(t, r.reload(cfg))
+			g := a.snapshot()
+			integration := g.targets["team"][0].prepared
+			require.NotNil(t, integration)
+			now := time.Now()
+			var members []*alert.Alert
+			for n, host := range []string{"complete", "covered", "race", "clear", "active"} {
+				end := now.Add(-time.Second)
+				if host == "covered" || host == "active" {
+					end = now.Add(time.Hour)
+				}
+				source := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "Disk", "host": model.LabelValue(host), "severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: end}, now, false)
+				p := restoredFixture(t, source)
+				p.Floor = ""
+				p.ID = fmt.Sprintf("22222222-2222-4222-8222-%012d", n+1)
+				p.EpisodeRef.EpisodeID = p.ID
+				if source.Resolved() {
+					p.State = "resolved"
+					p.LifecycleSeq++
+				}
+				j.projections[source] = p
+				members = append(members, source.NotificationCopy(now))
+			}
+			ctx := g.dispatcher.SelectedContext(t.Context(), g.routes, members[0])
+			batch, err := a.prepare(ctx, g, "team", "webhook", 0, members, func([]*alert.Alert) bool { return true })
+			require.NoError(t, err)
+			v := batch.Invoke(ctx, integration, batch.Members)
+			require.Len(t, j.receipts, 2)
+			if changed {
+				require.Error(t, v.Err())
+				require.Empty(t, bodies)
+				for _, receipt := range j.receipts {
+					require.Equal(t, "no_effect", receipt.Outcome)
+					require.Equal(t, "FENCED_BEFORE_PROVIDER_ENTRY", receipt.Evidence)
+				}
+				return
+			}
+			require.NoError(t, v.Err())
+			require.Len(t, bodies, 1)
+			body := <-bodies
+			require.Len(t, body.Alerts, 2)
+			require.Equal(t, "clear", body.Alerts[0].Labels["host"])
+			require.Equal(t, "resolved", body.Alerts[0].Status)
+			require.Equal(t, "active", body.Alerts[1].Labels["host"])
+			require.Equal(t, "firing", body.Alerts[1].Status)
+			logged, held := batch.LogMembers()
+			require.Error(t, held)
+			require.ElementsMatch(t, []*alert.Alert{members[0], members[3], members[4]}, logged)
+			batch, err = a.prepare(ctx, g, "team", "webhook", 0, members, func([]*alert.Alert) bool { return true })
+			require.NoError(t, err)
+			_ = batch.Invoke(ctx, integration, batch.Members)
+			require.Empty(t, bodies)
+			require.Len(t, j.receipts, 2, "completed and unknown terminal identities do not re-enter")
+		})
+	}
+}

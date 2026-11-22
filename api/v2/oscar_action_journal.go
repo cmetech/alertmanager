@@ -79,7 +79,7 @@ func (e claimedEntry) ForMember(m *alert.Alert) bool {
 		return false
 	}
 	if e.terminal != nil {
-		return m.TerminalWireValid() && m.Resolved() == e.terminal.WireResolved
+		return terminalWireMatches(m, e.terminal.WireResolved)
 	}
 	return !m.Resolved() && string(m.Labels["severity"]) == e.severity
 }
@@ -234,6 +234,11 @@ func terminalSourceDigest(s *alert.Alert) string {
 	raw, _ := json.Marshal(evidence)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// A promoted clear can be frozen firing only while its original timeout is live.
+func terminalWireMatches(member *alert.Alert, resolved bool) bool {
+	return member.TerminalWireValid() && member.Resolved() == resolved && member.ProviderSource().Resolved() == resolved
 }
 
 type terminalObservation struct {

@@ -121,6 +121,9 @@ func (a *nativeActions) Version() int {
 	defer a.mu.RUnlock()
 	if a.recovery != nil && a.graph != nil && a.graph.pipeline != nil && a.graph.supported && a.graph.published {
 		epoch, receipts := a.recovery.RecoveryState()
+		if cohort, ok := a.journal.(v2.OrdinaryCohortJournal); ok && !cohort.CohortSupported() {
+			return 0
+		}
 		if epoch == 0 || epoch != a.graph.epoch || a.graph.canonical && !receipts {
 			return 0
 		}
@@ -683,24 +686,20 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		ctx = context.WithValue(notify.ForMembers(ctx, candidates), batchDestinationKey{}, &batchDestination{config: i.digest, members: candidates})
 		cohort, canBatch := a.journal.(v2.OrdinaryCohortJournal)
 		var requests []v2.OrdinaryCandidate
-		if canBatch && (i.canonical && g.callbackCommissioned() || !i.canonical && len(candidates) > 1) {
+		planTogether := canBatch && (i.canonical && g.callbackCommissioned() || !i.canonical && len(candidates) > 1)
+		if planTogether {
 			// Finish enrollment/routing for the complete physical group before
-			// asking the authority for any finite firing permit.
+			// asking the authority for any finite entry permit.
 			for _, m := range candidates {
-				if !i.canonical && contacts[m].p.State != "firing" {
-					continue
-				}
 				c, err := a.planOrdinary(ctx, g, m, contacts[m])
 				if err != nil {
 					hold(m, err)
 					delete(contacts, m)
 					continue
 				}
-				if c.p.State == "firing" && c.pass == nil {
-					contacts[m] = c
+				contacts[m] = c
+				if c.pass == nil {
 					requests = append(requests, v2.OrdinaryCandidate{Canonical: i.canonical, Member: m, Projection: c.p, Target: c.contact.DispatchTarget})
-				} else {
-					contacts[m] = c
 				}
 			}
 			var admissions []v2.OrdinaryAdmission
@@ -709,12 +708,16 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			}
 			for n, request := range requests {
 				m := request.Member
-				if n >= len(admissions) || admissions[n].Err != nil || !admissions[n].Covered && admissions[n].Entry == nil {
+				if n >= len(admissions) || admissions[n].Err != nil || !admissions[n].Covered && !admissions[n].Completed && admissions[n].Entry == nil {
 					hold(m, actionHeld)
 					delete(contacts, m)
 					continue
 				}
-				if admissions[n].Covered {
+				if admissions[n].Completed {
+					accepted = append(accepted, m)
+					ordinaryAcceptance = true
+				}
+				if admissions[n].Covered || admissions[n].Completed {
 					delete(contacts, m)
 					continue
 				}
@@ -730,7 +733,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				continue
 			}
 			var err error
-			if c.admission == nil {
+			if c.admission == nil && (!planTogether || c.pass == nil) {
 				c, err = a.ordinaryContact(ctx, g, m, c)
 			}
 			if err != nil {
@@ -755,18 +758,35 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		}
 		if len(pending) > 0 {
 			if i.prepared != nil && len(pending) != len(candidates) {
-				// A reserve CAS raced with inspection. Keep the original pending
-				// targets and rerender eligibility on the next native flush.
-				var receipts []v2.OrdinaryReceipt
-				for _, c := range entries {
-					if c.admission != nil {
-						receipts = append(receipts, v2.OrdinaryReceipt{Entry: c.admission.Entry, Outcome: "no_effect", Evidence: "FENCED_BEFORE_PROVIDER_ENTRY"})
+				// A final CAS can observe completion or uncertainty after inspection.
+				// Render the remaining, already admitted members in native order.
+				// Only the exact same frozen receiver can use these terminal entries.
+				var subsetOK bool
+				if slices.ContainsFunc(requests, func(c v2.OrdinaryCandidate) bool { return c.Projection.State == "resolved" }) {
+					probe := context.WithValue(notify.ForMembers(ctx, pending), batchDestinationKey{}, &batchDestination{config: i.digest, members: pending})
+					probe, retained, err := integration.PrepareContent(probe, pending, truncated)
+					if err == nil && slices.Equal(retained, pending) {
+						digest, err := g.destination(probe, i, entries[0].contact.route, pending[0])
+						if err == nil && !slices.ContainsFunc(entries, func(c ordinaryContact) bool { return c.contact.IntegrationDigest != digest }) {
+							ctx, subsetOK = probe, true
+						}
 					}
 				}
-				if len(receipts) > 0 {
-					_ = cohort.SettleCohort(ctx, receipts)
+				if !subsetOK {
+					var receipts []v2.OrdinaryReceipt
+					for _, c := range entries {
+						if c.admission != nil {
+							receipts = append(receipts, v2.OrdinaryReceipt{Entry: c.admission.Entry, Outcome: "no_effect", Evidence: "FENCED_BEFORE_PROVIDER_ENTRY"})
+						}
+					}
+					if len(receipts) > 0 {
+						_ = cohort.SettleCohort(ctx, receipts)
+					}
+					return notify.Unrecoverable(actionHeld, notify.DefaultReason)
 				}
-				return notify.Unrecoverable(actionHeld, notify.DefaultReason)
+			}
+			if i.prepared == nil && len(pending) != len(candidates) {
+				ctx = notify.ForMembers(ctx, pending)
 			}
 			v, delivered, noSend := a.invoke(ctx, g, integration, pending, entries, truncated)
 			providerProgress = len(delivered) > 0 || noSend
@@ -835,7 +855,7 @@ func (a *nativeActions) inspectCohort(ctx context.Context, g *actionGraph, i act
 			}
 			planned = append(planned, m)
 			contacts[m] = c
-			if _, cached := cache[observation{m, c.contact.IntegrationDigest}]; batched && !cached && c.p.State == "firing" && c.pass == nil {
+			if _, cached := cache[observation{m, c.contact.IntegrationDigest}]; batched && !cached && c.pass == nil {
 				requests = append(requests, v2.OrdinaryCandidate{Canonical: i.canonical, Member: m, Projection: c.p, Target: c.contact.DispatchTarget})
 			}
 		}
@@ -1200,6 +1220,10 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 				until, current := claimed[x].EntryFence()
 				if until.IsZero() || current == nil || c.p.State == "firing" && s.ResolvedAt(now) {
 					return false
+				}
+				if c.p.State == "resolved" && m.EndsAt.IsZero() {
+					// A promoted clear frozen firing on the wire must still be inside its original timeout.
+					fence.limit(s.EndsAt)
 				}
 				fence.limit(until)
 				fence.witnesses = append(fence.witnesses, current)

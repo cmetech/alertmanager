@@ -52,7 +52,7 @@ func (o *nativeActionOwner) publishLeaseLocked() {
 		o.publicLease.Store(nil)
 		return
 	}
-	o.publicLease.Store(&recoveredLease{o.lease.Epoch, o.lease.ExpiresAt, bytes.Equal(bytes.TrimSpace(o.lease.NativeDeliveryReceipts), []byte("1")), bytes.Equal(bytes.TrimSpace(o.lease.OrdinaryCohort), []byte("1"))})
+	o.publicLease.Store(&recoveredLease{o.lease.Epoch, o.lease.ExpiresAt, bytes.Equal(bytes.TrimSpace(o.lease.NativeDeliveryReceipts), []byte("1")), bytes.Equal(bytes.TrimSpace(o.lease.OrdinaryCohort), []byte("2"))})
 }
 
 // RecoveryState is a local lock-free read, including when called under the

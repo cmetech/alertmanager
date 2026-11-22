@@ -397,7 +397,7 @@ func silenceFixtureCohort(t *testing.T, a *App, registry *prometheus.Registry, l
 		// Another N silenced members therefore includes a complete turn.
 		baseline := count()
 		require.GreaterOrEqual(t, baseline, float64(0))
-		require.Eventually(t, func() bool { return count() >= baseline+float64(len(want)) }, 2*time.Minute, 100*time.Millisecond)
+		require.Eventually(t, func() bool { return count() >= baseline+float64(len(want)) }, 5*time.Minute, 100*time.Millisecond)
 		mutate(http.MethodDelete, "/api/v2/silence/"+sil.ID, "")
 	}
 }
@@ -405,6 +405,15 @@ func silenceFixtureCohort(t *testing.T, a *App, registry *prometheus.Registry, l
 // Run normal setup (including provider replay, owner maintenance, graph dispatch,
 // signed webhook encoding and settlement). Only TCP dialing goes to the fixture.
 func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
+	exerciseCommissionedProvider(t, false)
+}
+
+func TestOscarActionLargeTerminalGroupThroughAppAndProvider(t *testing.T) {
+	exerciseCommissionedProvider(t, true)
+}
+
+func exerciseCommissionedProvider(t *testing.T, terminalGroup bool) {
+	t.Helper()
 	callbackKey := []byte(strings.Repeat("c", 32))
 	storeKey := strings.Repeat("j", 32)
 	var enabled, large atomic.Bool
@@ -414,6 +423,7 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 		entered    time.Time
 		path       string
 		signed     bool
+		status     string
 		hosts      []string
 		deliveries []string
 	}
@@ -422,10 +432,12 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	var mu sync.Mutex
 	var leaseExpiry time.Time
 	rows := map[string]map[string]any{}
+	byID := map[string]map[string]any{}
 	tokens := map[string]string{}
 	claims := map[string]string{}
 	type fixtureContact struct {
 		scope, targetKey, delivery, receiver string
+		terminal                             bool
 		repeat                               time.Duration
 	}
 	contacts := map[string]fixtureContact{}
@@ -433,7 +445,10 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	nextEligible := map[string]time.Time{}
 	confirmed := map[string]time.Time{}
 	longCommands := map[string]int{}
-	var longSettled int
+	var longSettled, terminalSettled, terminalCommands int
+	var terminalWrites atomic.Int32
+	var terminalEnd time.Time // protected by mu
+	terminalReceipts := map[string]string{}
 	var earlyCovered atomic.Int32
 	var admissions atomic.Int32
 	authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -450,7 +465,7 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			item := observation{entered: arrived, path: r.URL.Path, signed: r.Header.Get("X-Oscar-Native-Signature") != ""}
+			item := observation{entered: arrived, path: r.URL.Path, status: msg.Status, signed: r.Header.Get("X-Oscar-Native-Signature") != ""}
 			for _, a := range msg.Alerts {
 				item.hosts = append(item.hosts, a.Labels["host"])
 			}
@@ -462,10 +477,18 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 					return
 				}
 				mu.Lock()
+				if item.status == "resolved" && len(item.hosts) > 0 && strings.HasPrefix(item.hosts[0], "bulk-") {
+					terminalWrites.Add(1)
+				}
 				for n, claim := range msg.NativeDeliveries {
 					id := claim.Delivery.DeliveryID
 					if claim.Index != n || claims[id] != msg.Alerts[n].Fingerprint || claim.Delivery.NativeVariant.Fingerprint != msg.Alerts[n].Fingerprint {
 						t.Errorf("unclaimed webhook body member %d", n)
+					}
+					if terminalGroup && msg.Alerts[n].Status == "resolved" {
+						if claim.Delivery.State != "resolved" || claim.Delivery.LifecycleSeq != 2 || claim.Delivery.OperationID != nil || !msg.Alerts[n].EndsAt.Equal(terminalEnd) {
+							t.Error("terminal callback has different lifecycle or wire evidence")
+						}
 					}
 					item.deliveries = append(item.deliveries, id)
 				}
@@ -490,16 +513,17 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
+		command := filepath.Base(r.URL.Path)
 		if large.Load() {
 			time.Sleep(8 * time.Millisecond)
 		}
 		mu.Lock()
 		defer mu.Unlock()
 		var response any
-		switch filepath.Base(r.URL.Path) {
+		switch command {
 		case "acquire-authority", "renew-authority":
 			leaseExpiry = time.Now().UTC().Add(30 * time.Second)
-			lease := map[string]any{"protocol": "native-action-store-v1", "terminal_observations": 2, "recovery_selectors": 1, "ordinary_cohort": 1, "recipient_binding": 2, "recipient_key": strings.Repeat("a", 64), "authority_id": cmd["authority_id"], "owner_id": cmd["owner_id"], "epoch": 1, "expires_at": leaseExpiry, "renew_seconds": 10}
+			lease := map[string]any{"protocol": "native-action-store-v1", "terminal_observations": 2, "recovery_selectors": 1, "ordinary_cohort": 2, "recipient_binding": 2, "recipient_key": strings.Repeat("a", 64), "authority_id": cmd["authority_id"], "owner_id": cmd["owner_id"], "epoch": 1, "expires_at": leaseExpiry, "renew_seconds": 10}
 			if enabled.Load() {
 				lease["native_delivery_receipts"] = 1
 			} else {
@@ -509,7 +533,16 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 		case "recover":
 			response = []any{}
 			if cmd["projection"] == "source" {
-				if p := rows[fmt.Sprint(cmd["fingerprint"])]; p != nil {
+				if p := rows[fmt.Sprint(cmd["fingerprint"])]; p != nil && p["state"] == "firing" {
+					response = []any{p}
+				}
+			}
+			if cmd["projection"] == "episode" {
+				response = byID[fmt.Sprint(cmd["episode_id"])]
+			}
+			if cmd["projection"] == "terminal" {
+				variant := cmd["native_variant"].(map[string]any)
+				if p := rows[fmt.Sprint(variant["fingerprint"])]; p != nil && p["state"] == "resolved" && p["native_variant"].(map[string]any)["starts_at"] == variant["starts_at"] {
 					response = []any{p}
 				}
 			}
@@ -518,9 +551,9 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			fp := p["native_variant"].(map[string]any)["fingerprint"].(string)
 			p["id"] = p["episode_ref"].(map[string]any)["episode_id"]
 			rows[fp] = p
+			byID[p["id"].(string)] = p
 			response = p
 		case "inspect-cohort", "admit-cohort":
-			command := filepath.Base(r.URL.Path)
 			var issued bool
 			var results []any
 			for n, value := range cmd["members"].([]any) {
@@ -534,9 +567,25 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 				fields, _ := json.Marshal([]any{receiver, target["integration_digest"], []any{}})
 				key := fmt.Sprintf("%x", sha256.Sum256(fields))
 				scope := m["row_id"].(string) + "/" + key
+				term, terminal := m["terminal"].(map[string]any)
+				if terminal {
+					p := rows[m["native_variant"].(map[string]any)["fingerprint"].(string)]
+					wantID := uuid.NewSHA1(uuid.MustParse(m["row_id"].(string)), []byte("terminal/1/2/"+key)).String()
+					if id != wantID || p == nil || p["state"] != "resolved" || p["lifecycle_seq"] != m["lifecycle_seq"] || term["wire_resolved"] != true || term["source_ends_at"] != terminalEnd.UTC().Format(time.RFC3339Nano) || len(fmt.Sprint(term["source_digest"])) != 64 {
+						t.Error("terminal admission lost original identity or observation")
+						w.WriteHeader(409)
+						return
+					}
+					scope = "terminal/" + id
+					if n == 0 && command == "admit-cohort" {
+						terminalCommands++
+					}
+				}
 				reply := map[string]any{"operation_id": id}
 				results = append(results, reply)
 				switch {
+				case terminal && terminalReceipts[id] == "confirmed":
+					reply["state"] = "completed"
 				case pending[scope] != "":
 					reply["state"] = "held"
 				case time.Now().Before(nextEligible[scope]):
@@ -551,7 +600,7 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 					token := strings.ReplaceAll(id, "-", "") + strings.Repeat("0", 32)
 					delivery := uuid.NewSHA1(uuid.MustParse(id), []byte(key)).String()
 					pending[scope], tokens[id] = id, token
-					contacts[id] = fixtureContact{scope, key, delivery, receiver, time.Duration(target["repeat_interval_us"].(float64)) * time.Microsecond}
+					contacts[id] = fixtureContact{scope, key, delivery, receiver, terminal, time.Duration(target["repeat_interval_us"].(float64)) * time.Microsecond}
 					claims[delivery] = m["native_variant"].(map[string]any)["fingerprint"].(string)
 					reply["state"], reply["entry_token"], reply["target_key"], reply["target"] = "entered", token, key, target
 					reply["permit_expires_at"], reply["lease_expires_at"] = time.Now().Add(30*time.Second), leaseExpiry
@@ -574,7 +623,12 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 				}
 				ids = append(ids, id)
 				outcome := m["receipt"].(map[string]any)["outcome"].(string)
-				if outcome == "confirmed" {
+				if c.terminal {
+					terminalReceipts[id] = outcome
+					if outcome == "confirmed" {
+						terminalSettled++
+					}
+				} else if outcome == "confirmed" {
 					deadline := time.Now().Add(c.repeat)
 					confirmed[c.delivery], nextEligible[c.scope] = deadline, deadline
 					if c.receiver == longName {
@@ -613,6 +667,10 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	}
 	opts := testOptions(t)
 	opts.DispatchStartDelay = 0
+	if terminalGroup {
+		opts.AlertGCInterval = time.Hour
+		opts.DispatchMaintenanceInterval = time.Second
+	}
 	opts.ConversionCallbackKey = callbackKey
 	opts.SilenceMutationKey = []byte(strings.Repeat("s", 32))
 	write := func(name, value string) string {
@@ -714,6 +772,12 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	bigConfig = strings.Replace(bigConfig, "group_wait: 50ms", "group_wait: 5s", 1)
 	bigConfig = strings.Replace(bigConfig, "group_interval: 200ms", "group_interval: 90s", 1)
 	bigConfig = strings.Replace(bigConfig, "repeat_interval: 2s", "repeat_interval: 1h\n  routes:\n  - receiver: team\n    matchers: ['batch=large']\n    repeat_interval: 180s", 1)
+	if terminalGroup {
+		// Allow the original lifecycle CAS and any slot rehydration to finish
+		// at 8ms per private request before the timed admissions begin.
+		bigConfig = strings.Replace(bigConfig, "group_interval: 90s", "group_interval: 3m", 1)
+		bigConfig = strings.Replace(bigConfig, "repeat_interval: 180s", "repeat_interval: 1h", 1)
+	}
 	require.NoError(t, os.WriteFile(opts.ConfigFile, []byte(bigConfig), 0600))
 	require.NoError(t, instance.Reload())
 	require.Eventually(t, func() bool { return capability(instance) }, 5*time.Second, 20*time.Millisecond)
@@ -755,16 +819,42 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 	require.Eventually(t, func() bool { return siblingTiming() != "" }, 3*time.Second, 25*time.Millisecond)
 	before := siblingTiming()
 	releaseBulk := silenceFixtureCohort(t, instance, registry, "batch", "large")
+	groupCount := func() int {
+		families, err := registry.Gather()
+		if err == nil {
+			for _, family := range families {
+				if family.GetName() == "alertmanager_dispatcher_aggregation_groups" && len(family.Metric) == 1 {
+					return int(family.Metric[0].GetGauge().GetValue())
+				}
+			}
+		}
+		return -1
+	}
+	baselineGroups := groupCount()
 	bulkStart := time.Now()
+	mu.Lock()
+	terminalEnd = bulkStart.Add(10 * time.Minute)
+	expiry := terminalEnd
+	mu.Unlock()
 	for n := range bulk {
 		bulk[n] = member(bulkStart, fmt.Sprintf("bulk-%05d", n), "large", n < 64)
+		if terminalGroup {
+			bulk[n].EndsAt = expiry
+		}
 	}
 	require.NoError(t, provider.Put(t.Context(), bulk...))
 	releaseBulk("team", bulk)
 	priorDeadlines := map[string]time.Time{}
 	previous := map[string]bool{}
 	for turn := 0; turn < 2; turn++ {
-		timeout := time.After(300 * time.Second)
+		wait := 300 * time.Second
+		if terminalGroup && turn == 0 {
+			wait = 7 * time.Minute
+		}
+		if terminalGroup && turn == 1 {
+			wait = time.Until(expiry) + 8*time.Minute
+		}
+		timeout := time.After(wait)
 		var physical observation
 		for len(physical.hosts) == 0 {
 			select {
@@ -777,6 +867,12 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			}
 		}
 		require.True(t, physical.signed)
+		if terminalGroup && turn == 1 {
+			require.Equal(t, "resolved", physical.status)
+			require.False(t, physical.entered.Before(expiry))
+		} else {
+			require.Equal(t, "firing", physical.status)
+		}
 		for host, due := range priorDeadlines {
 			require.False(t, physical.entered.Before(due), "early repeat for %s", host)
 		}
@@ -791,6 +887,39 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 		for _, m := range bulk {
 			require.True(t, seen[string(m.Labels["host"])])
 		}
+		if terminalGroup && turn == 1 {
+			ordered := slices.Clone(bulk)
+			slices.SortFunc(ordered, func(a, b *alert.Alert) int {
+				if a.Labels.Before(b.Labels) {
+					return -1
+				}
+				if b.Labels.Before(a.Labels) {
+					return 1
+				}
+				return 0
+			})
+			for n, src := range ordered {
+				require.Equal(t, string(src.Labels["host"]), physical.hosts[n])
+				resident, err := provider.Get(src.Fingerprint())
+				require.NoError(t, err)
+				require.Same(t, src, resident, "native expiry preceded provider GC")
+			}
+			require.Eventually(t, func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return terminalSettled == len(bulk)
+			}, 15*time.Second, 50*time.Millisecond)
+			mu.Lock()
+			receipts, commands := len(terminalReceipts), terminalCommands
+			mu.Unlock()
+			require.Equal(t, len(bulk), receipts)
+			require.Equal(t, (len(bulk)+63)/64, commands)
+			require.Greater(t, baselineGroups, 0)
+			require.Eventually(t, func() bool { return groupCount() == baselineGroups }, 30*time.Second, 100*time.Millisecond)
+			require.Never(t, func() bool { return terminalWrites.Load() != 1 }, 181*time.Second, time.Second)
+			require.Equal(t, before, siblingTiming())
+			return
+		}
 		require.Eventually(t, func() bool {
 			mu.Lock()
 			defer mu.Unlock()
@@ -802,8 +931,10 @@ func TestOscarActionCommissioningThroughAppAndProvider(t *testing.T) {
 			return true
 		}, 5*time.Second, 10*time.Millisecond)
 		mu.Lock()
-		for n, id := range physical.deliveries {
-			priorDeadlines[physical.hosts[n]] = confirmed[id]
+		if !terminalGroup {
+			for n, id := range physical.deliveries {
+				priorDeadlines[physical.hosts[n]] = confirmed[id]
+			}
 		}
 		mu.Unlock()
 		require.Equal(t, before, siblingTiming())
