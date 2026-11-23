@@ -42,6 +42,9 @@ type OscarAlertPage struct {
 	// Required: true
 	Records GettableAlerts `json:"records"`
 
+	// Source severity from the same sampled alert, present when it differs from the effective severity.
+	SourceSeverityByFingerprint map[string]string `json:"source_severity_by_fingerprint,omitempty"`
+
 	// timing by fingerprint
 	// Required: true
 	TimingByFingerprint map[string]OscarAlertTiming `json:"timing_by_fingerprint"`

@@ -88,11 +88,14 @@ func (n *DedupStage) needsUpdate(entry *nflogpb.Entry, firing, resolved map[uint
 	}
 
 	// Nothing changed, only notify if the repeat interval has passed.
-	isRepeatIntervalElapsed := entry.Timestamp.AsTime().Before(now.Add(-repeat))
-	if isRepeatIntervalElapsed {
+	if repeatElapsed(entry, now, repeat) {
 		return ReasonRepeatIntervalElapsed
 	}
 	return ReasonDoNotNotify
+}
+
+func repeatElapsed(entry *nflogpb.Entry, now time.Time, repeat time.Duration) bool {
+	return entry.Timestamp.AsTime().Before(now.Add(-repeat))
 }
 
 // partitionAlertsByState separates alerts into firing and resolved, returning both slices and sets.
@@ -134,6 +137,16 @@ func (n *DedupStage) Exec(ctx context.Context, _ *slog.Logger, alerts ...*alert.
 		return ctx, nil, errors.New("repeat interval missing")
 	}
 
+	selection, selected := selectedAction(ctx)
+	if selected {
+		if !selection.matches(n.recv.GroupName, n.recv.Integration, int(n.recv.Idx)) || len(alerts) == 0 {
+			return ctx, nil, nil
+		}
+		if len(alerts) != 1 || alerts[0].ProviderSource() != selection.Source || selection.Invoke == nil {
+			return ctx, nil, errors.New("native action selection does not match the provider member")
+		}
+	}
+
 	firing, resolved, firingSet, resolvedSet := partitionAlertsByState(alerts, n.hash)
 
 	ctx = WithFiringAlerts(ctx, firing)
@@ -158,11 +171,45 @@ func (n *DedupStage) Exec(ctx context.Context, _ *slog.Logger, alerts ...*alert.
 		baseline = entry.Timestamp.AsTime().UnixNano()
 	}
 	ctx = context.WithValue(ctx, keyManagedPreviousNotification, baseline)
+	if selected {
+		// The selected target has its own durable dedup claim. Managed eligibility still needs the group baseline.
+		ctx = WithNflogStore(ctx, nflog.NewStore(entry))
+		return WithNotificationReason(ctx, ReasonUnknown), alerts, nil
+	}
 	now := n.now()
 	if ctxNow, ok := Now(ctx); ok {
 		now = ctxNow
 	}
 	updateReason := n.needsUpdate(entry, firingSet, resolvedSet, repeatInterval, now)
+	if reader, ok := ctx.Value(ordinaryReaderKey{}).(OrdinaryReader); ok && len(alerts) > 0 {
+		if entry != nil {
+			ctx = context.WithValue(ctx, incompleteContentKey{}, &ordinaryBaseline{entry: entry, hash: n.hash, repeatDue: repeatElapsed(entry, now, repeatInterval)})
+		}
+		due := func(members []*alert.Alert) bool {
+			if len(members) == 0 {
+				return false
+			}
+			_, _, f, r := partitionAlertsByState(members, n.hash)
+			return n.needsUpdate(entry, f, r, repeatInterval, now).shouldNotify()
+		}
+		batch, err := reader(ctx, n.recv.GroupName, n.recv.Integration, int(n.recv.Idx), alerts, due)
+		if err != nil {
+			return ctx, nil, err
+		}
+		if len(batch.Members) == 0 {
+			return ctx, nil, nil
+		}
+		batch.group, batch.previous = alerts, entry
+		batch.groupFiring, batch.groupResolved, batch.hash = firingSet, resolvedSet, n.hash
+		alerts = batch.Members
+		ctx = context.WithValue(ctx, ordinaryBatchKey{}, batch)
+		firing, resolved, firingSet, resolvedSet = partitionAlertsByState(alerts, n.hash)
+		ctx = WithResolvedAlerts(WithFiringAlerts(ctx, firing), resolved)
+		updateReason = n.needsUpdate(entry, firingSet, resolvedSet, repeatInterval, now)
+		if !updateReason.shouldNotify() {
+			updateReason = ReasonRepeatIntervalElapsed
+		}
+	}
 	ctx = WithNotificationReason(ctx, updateReason)
 
 	if updateReason == ReasonFirstNotification {

@@ -600,7 +600,7 @@ func (t *Template) Data(recv string, groupLabels, routeLabels model.LabelSet, no
 
 	// The call to alert.Alert is necessary to correctly resolve the internal
 	// representation to the user representation.
-	for _, a := range typedAlerts {
+	for i, a := range typedAlerts {
 		alrt := Alert{
 			Status:       string(a.Status()),
 			Labels:       make(KV, len(a.Labels)),
@@ -608,7 +608,7 @@ func (t *Template) Data(recv string, groupLabels, routeLabels model.LabelSet, no
 			StartsAt:     a.StartsAt,
 			EndsAt:       a.EndsAt,
 			GeneratorURL: a.GeneratorURL,
-			Fingerprint:  a.Fingerprint().String(),
+			Fingerprint:  alerts[i].ProviderSource().Fingerprint().String(),
 		}
 		for k, v := range a.Labels {
 			alrt.Labels[string(k)] = string(v)

@@ -147,7 +147,16 @@ func TestAggrGroup(t *testing.T) {
 				t.Fatalf("received batch too early after %v (want >= %v)", got, minWait)
 			}
 			sort.Sort(b.alerts)
-			if !reflect.DeepEqual(b.alerts, want) {
+			// Compare the alert content: flush sends NotificationCopy, which
+			// keeps an unexported pointer to the stored provider source.
+			wire := func(as alert.AlertSlice) []model.Alert {
+				out := make([]model.Alert, len(as))
+				for i, a := range as {
+					out[i] = a.Alert
+				}
+				return out
+			}
+			if !reflect.DeepEqual(wire(b.alerts), wire(want)) {
 				t.Fatalf("expected alerts %v but got %v", want, b.alerts)
 			}
 			return b.now

@@ -62,6 +62,7 @@ type API struct {
 // Options for the creation of an API object. Alerts, Silences and GroupFunc
 // are mandatory. The zero value for everything else is a safe default.
 type Options struct {
+	ActionOwner                                             apiv2.ActionOwnerConfig
 	ManagedOwnerScheme, ManagedOwnerCA, ManagedOwnerKeyFile string
 	// SilenceMutationKey enables OSCAR's native silence-write guard when set.
 	SilenceMutationKey      []byte
@@ -188,7 +189,10 @@ func (o Options) validate() error {
 
 // New creates a new API object combining all API versions. Note that an Update
 // call is also needed to get the APIs into an operational state.
-func New(opts Options) (*API, error) {
+func New(opts Options) (*API, error) { return NewWithActionDialer(opts, nil) }
+
+// NewWithActionDialer constructs the same API with an explicit private authority dialer.
+func NewWithActionDialer(opts Options, dial apiv2.ActionDialer) (*API, error) {
 	if err := opts.validate(); err != nil {
 		return nil, fmt.Errorf("invalid API options: %w", err)
 	}
@@ -213,6 +217,9 @@ func New(opts Options) (*API, error) {
 	}
 	v2.InstallConversionAdmission(opts.ConversionAdmissionKeys, opts.ConversionCallbackKey)
 	if err := v2.InstallManagedOwner(opts.ManagedOwnerScheme, opts.ManagedOwnerCA, opts.ManagedOwnerKeyFile, opts.ConversionAdmissionKeys, opts.ConversionCallbackKey); err != nil {
+		return nil, err
+	}
+	if err := v2.InstallActionOwner(opts.ActionOwner, dial); err != nil {
 		return nil, err
 	}
 	connect := apiconnect.NewAPI(effective.connect)
@@ -373,6 +380,8 @@ func (api *API) Update(cfg *config.Config, setAlertStatus func(ctx context.Conte
 // TimingIntegration identifies a loaded receiver integration for the OSCAR
 // native paged alert view.
 type (
+	ActionOwnerConfig = apiv2.ActionOwnerConfig
+	ActionDialer      = apiv2.ActionDialer
 	TimingIntegration = apiv2.TimingIntegration
 	TimingLookupFunc  = apiv2.TimingLookupFunc
 )
@@ -432,6 +441,9 @@ func (api *API) instrumentHandler(prefix string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path, _ := strings.CutPrefix(r.URL.Path, prefix)
 		// avoid high cardinality label values by replacing the actual silence IDs with a placeholder
+		if strings.HasPrefix(path, "/api/v2/oscar/actions/") && path != "/api/v2/oscar/actions/eligibility" {
+			path = "/api/v2/oscar/actions/{operation_id}"
+		}
 		if strings.HasPrefix(path, "/api/v2/silence/") {
 			path = "/api/v2/silence/{silenceID}"
 		}

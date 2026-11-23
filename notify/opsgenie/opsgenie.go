@@ -102,9 +102,10 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		return notify.Unrecoverable(err, notify.DefaultReason)
 	}
 
-	for _, req := range requests {
+	for index, req := range requests {
+		req = req.WithContext(notify.WithMutationStep(ctx, index))
 		req.Header.Set("User-Agent", notify.UserAgentHeader)
-		resp, err := n.client.Do(req)
+		resp, err := notify.DoMutation(n.client, req)
 		if err != nil {
 			return notify.Retry(0, err, notify.DefaultReason)
 		}
@@ -156,6 +157,7 @@ func (n *Notifier) createRequests(ctx context.Context, as ...*alert.Alert) ([]*h
 
 	requests := []*http.Request{}
 
+	var routing []string
 	var (
 		alias  = key.Hash()
 		alerts = alert.Alerts(as...)
@@ -216,6 +218,9 @@ func (n *Notifier) createRequests(ctx context.Context, as ...*alert.Alert) ([]*h
 			responders = append(responders, responder)
 		}
 
+		for _, r := range responders {
+			routing = append(routing, r.ID, r.Name, r.Username, r.Type)
+		}
 		msg := &opsGenieCreateMessage{
 			Alias:       alias,
 			Message:     message,
@@ -295,6 +300,9 @@ func (n *Notifier) createRequests(ctx context.Context, as ...*alert.Alert) ([]*h
 		return nil, false, fmt.Errorf("templating error: %w", err)
 	}
 
+	if !notify.PreparedHTTPDestination(ctx, n.client, append([]string{n.conf.APIURL.String(), alias, apiKey}, routing...)...) {
+		return nil, false, notify.ErrDestination
+	}
 	for _, req := range requests {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", fmt.Sprintf("GenieKey %s", apiKey))

@@ -1,0 +1,12 @@
+decoder : Decoder {{classname}}
+decoder =
+{{#vendorExtensions.x-elm-nullable-record}}
+    Decode.nullable valueDecoder
+
+
+valueDecoder : Decoder {{classname}}Value
+valueDecoder =
+{{/vendorExtensions.x-elm-nullable-record}}    {{#isElm018}}decode{{/isElm018}}{{#isElm019}}Decode.succeed{{/isElm019}} {{classname}}{{#vendorExtensions.x-elm-nullable-record}}Value{{/vendorExtensions.x-elm-nullable-record}}
+{{#allVars}}
+        |> {{>recordFieldDecoder}}
+{{/allVars}}

@@ -155,7 +155,24 @@ func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*alert.A
 		select {
 		case <-tick.C:
 			now := time.Now()
-			verdict := r.integration.Notify(ctx, sent...)
+			var verdict NotifyVerdict
+			if selection, selected := selectedAction(ctx); selected {
+				if !selection.matches(r.groupName, r.integration.Name(), r.integration.Index()) || len(sent) != 1 || sent[0].ProviderSource() != selection.Source || selection.Invoke == nil {
+					return ctx, nil, DefaultReason, errors.New("native action target mismatch before entry")
+				}
+				verdict = selection.Invoke(ctx, &r.integration, sent[0])
+				// An integration retry hint does not prove the external destination saw no effect.
+				if verdict.ShouldRetry() {
+					verdict = Unrecoverable(verdict.Err(), verdict.Reason())
+				}
+			} else if batch, ok := ctx.Value(ordinaryBatchKey{}).(OrdinaryBatch); ok {
+				verdict = batch.Invoke(ctx, &r.integration, sent)
+				if verdict.ShouldRetry() {
+					verdict = Unrecoverable(verdict.Err(), verdict.Reason())
+				}
+			} else {
+				verdict = r.integration.Notify(ctx, sent...)
+			}
 			i++
 			dur := time.Since(now)
 			// Back off from the end of the attempt, not from its start, so a

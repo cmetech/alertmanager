@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/prometheus/common/route"
 	"github.com/prometheus/common/version"
 
+	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/api"
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
@@ -50,18 +52,39 @@ import (
 // New wires every Alertmanager subsystem according to opts but does not
 // start serving HTTP yet. On error, partial setup is rolled back via the
 // same cleanup stack that Stop would drain on success.
-func New(opts Options) (*App, error) {
+func New(opts Options) (*App, error) { return newWithActionDialer(opts, nil) }
+
+func newWithActionDialer(opts Options, dial api.ActionDialer) (*App, error) {
 	a := &App{
 		opts:      opts,
 		serveErrc: make(chan error, 1),
 		webReload: make(chan chan error),
 	}
-	if err := a.setup(); err != nil {
+	if err := a.setup(dial); err != nil {
 		// Roll back partial setup (Stop is idempotent and nil-safe).
 		_ = a.Stop(context.Background())
 		return nil, err
 	}
 	return a, nil
+}
+
+// configureNativeActions is the same factory used by CLI and embedded options.
+func configureNativeActions(opts Options, read func(string, string, func(*alert.Alert)), logger *slog.Logger) (api.ActionOwnerConfig, *nativeActions) {
+	actionOwner := opts.ActionOwner
+	if actionOwner.Enabled && actionOwner.Dispatch == nil {
+		actionOwner.Dispatch = newNativeActions(read, opts.ConversionCallbackKey, logger)
+	}
+	actions, candidate := actionOwner.Dispatch.(*nativeActions)
+	if candidate && (!actionOwner.Enabled || actions == nil || actions.version != 1) {
+		actions, actionOwner.Dispatch = nil, nil
+	} else if actions != nil {
+		actions.key = slices.Clone(opts.ConversionCallbackKey)
+		actions.scheme, actions.caFile = actionOwner.Scheme, actionOwner.CAFile
+		if actions.scheme == "" {
+			actions.scheme = "https"
+		}
+	}
+	return actionOwner, actions
 }
 
 // Run starts an Alertmanager instance using opts and blocks until ctx is
@@ -175,7 +198,7 @@ type App struct {
 // stack drained in Stop.
 //
 //nolint:gocyclo // intentional, see comment above.
-func (a *App) setup() error {
+func (a *App) setup(dial api.ActionDialer) error {
 	opts := a.opts
 	if err := opts.validate(); err != nil {
 		return err
@@ -379,7 +402,8 @@ func (a *App) setup() error {
 		clusterPeer = peer
 	}
 
-	apih, err := api.New(api.Options{
+	actionOwner, actions := configureNativeActions(opts, alerts.ReadActionSource, logger)
+	apih, err := api.NewWithActionDialer(api.Options{
 		Alerts:                     alerts,
 		Silences:                   silences,
 		Peer:                       clusterPeer,
@@ -394,6 +418,7 @@ func (a *App) setup() error {
 		ConnectSendMaxBytes:        opts.ConnectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: opts.ConnectMaxRequestBodyBytes,
 		SilenceMutationKey:         opts.SilenceMutationKey,
+		ActionOwner:                actionOwner,
 		ManagedOwnerScheme:         opts.ManagedOwnerScheme,
 		ManagedOwnerCA:             opts.ManagedOwnerCA, ManagedOwnerKeyFile: opts.ManagedOwnerKeyFile,
 		ConversionAdmissionKeys: opts.ConversionAdmissionKeys,
@@ -403,7 +428,7 @@ func (a *App) setup() error {
 		Registry:                reg,
 		RequestDuration:         m.requestDuration,
 		GroupFunc:               groupFn,
-	})
+	}, dial)
 	if err != nil {
 		return fmt.Errorf("failed to create API: %w", err)
 	}
@@ -468,6 +493,8 @@ func (a *App) setup() error {
 	// at shutdown. The long-lived singletons above are updated in place
 	// (apih.Update, eventRec/tracing ApplyConfig) rather than rebuilt.
 	r = &reloader{
+		actionDial:                  dial,
+		actions:                     actions,
 		alerts:                      alerts,
 		apih:                        apih,
 		dispatcherMetrics:           dispatch.NewDispatcherMetrics(false, reg, ff),

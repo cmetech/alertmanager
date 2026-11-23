@@ -113,7 +113,7 @@ func (a *Alerts) gcAlerts() (deleted []*alert.Alert) {
 	a.Lock()
 	defer a.Unlock()
 	for fp, alrt := range a.alerts {
-		if alrt.Resolved() {
+		if alrt.Resolved() && (alrt.ManualEpisode == "" || alrt.ManualTerminal) {
 			deleted = append(deleted, alrt)
 			delete(a.alerts, fp)
 		}
@@ -163,7 +163,7 @@ func (a *Alerts) SetUnlessObsoleteResolved(alrt *alert.Alert) (bool, error) {
 	if a.destroyed {
 		return false, ErrDestroyed
 	}
-	if current, ok := a.alerts[alrt.Fingerprint()]; ok &&
+	if current, ok := a.alerts[alrt.ProviderSource().Fingerprint()]; ok &&
 		!alrt.Timeout && alrt.Resolved() && alrt.EndsAt.Before(current.StartsAt) {
 		return false, nil
 	}
@@ -177,7 +177,7 @@ func (a *Alerts) setLocked(alrt *alert.Alert) error {
 		return ErrDestroyed
 	}
 
-	fp := alrt.Fingerprint()
+	fp := alrt.ProviderSource().Fingerprint()
 	name := alrt.Name()
 
 	// Apply per alert limits if necessary
@@ -196,13 +196,28 @@ func (a *Alerts) setLocked(alrt *alert.Alert) error {
 	return nil
 }
 
+// DeleteExact removes an identical member and retires an empty group store.
+func (a *Alerts) DeleteExact(member *alert.Alert) bool {
+	a.Lock()
+	defer a.Unlock()
+	fp := member.ProviderSource().Fingerprint()
+	if a.alerts[fp] != member {
+		return false
+	}
+	delete(a.alerts, fp)
+	if len(a.alerts) == 0 {
+		a.destroyed = true
+	}
+	return true
+}
+
 // DeleteIfNotModified deletes the slice of Alerts from the store if not
 // modified.
 func (a *Alerts) DeleteIfNotModified(alerts alert.AlertSlice, destroyIfEmpty bool) error {
 	a.Lock()
 	defer a.Unlock()
 	for _, alrt := range alerts {
-		fp := alrt.Fingerprint()
+		fp := alrt.ProviderSource().Fingerprint()
 		if other, ok := a.alerts[fp]; ok && alrt.UpdatedAt.Equal(other.UpdatedAt) {
 			delete(a.alerts, fp)
 		}

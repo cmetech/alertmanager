@@ -15,15 +15,20 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	commoncfg "github.com/prometheus/common/config"
 	"log/slog"
 	"net/url"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/common/model"
 
+	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/api"
+	v2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/config/receiver"
@@ -52,6 +57,8 @@ import (
 // (stop old, build new, start + wait-for-loading, then publish) — in one
 // cohesive, independently testable place.
 type reloader struct {
+	actionDial api.ActionDialer
+	actions    *nativeActions
 	// Long-lived components: created once during startup.
 	alerts            provider.Alerts
 	apih              *api.API
@@ -88,6 +95,16 @@ type reloader struct {
 // groups returns the alert groups from the currently active dispatcher.
 // It is wired into the API as its GroupFunc.
 func (r *reloader) groups(ctx context.Context, routeFilter func(*dispatch.Route) bool, alertFilter dispatch.AlertFilter) (dispatch.AlertGroups, map[model.Fingerprint][]string, error) {
+	if r.actions != nil && r.actions.recovery != nil {
+		filter := alertFilter
+		alertFilter = func(m *alert.Alert, now time.Time) (alert.AlertStatus, bool) {
+			view := r.actions.ReadView(m.ProviderSource())
+			if view == nil || !view.Labels.Equal(m.Labels) {
+				return alert.AlertStatus{}, false
+			}
+			return filter(m, now)
+		}
+	}
 	return r.dispatcher.Load().Groups(ctx, routeFilter, alertFilter)
 }
 
@@ -126,7 +143,11 @@ func (r *reloader) reload(conf *config.Config) error {
 			configLogger.Info("skipping creation of receiver not referenced by any route", "receiver", rcv.Name)
 			continue
 		}
-		integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, r.logger)
+		var opts []commoncfg.HTTPClientOption
+		if r.actionDial != nil {
+			opts = append(opts, commoncfg.WithDialContextFunc(r.actionDial))
+		}
+		integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, r.logger, opts...)
 		if err != nil {
 			return err
 		}
@@ -154,10 +175,36 @@ func (r *reloader) reload(conf *config.Config) error {
 	// Apply tracing first: it is the last step that can fail, and doing
 	// it before stopping the old components keeps them running if it
 	// errors.
+	var actionTargets map[string][]actionIntegration
+	var supported bool
+	var recipientKey func() []byte
+	if r.actions != nil && r.actions.canInstall() {
+		actionTargets, supported, err = actionDestinations(conf, receivers)
+		if err != nil {
+			return err
+		}
+		recipientKey = r.actions.bindingKey()
+		if recipientKey == nil {
+			for _, targets := range actionTargets {
+				for _, target := range targets {
+					if target.prepared != nil {
+						supported = false
+					}
+				}
+			}
+		}
+		supported = supported && v2.ActionCallbackConfigReady(conf, r.actions.key, r.actions.scheme, r.actions.caFile)
+		if old := r.actions.snapshot(); !supported && old != nil && old.supported {
+			return errors.New("active native action graph cannot switch to unsupported receivers")
+		}
+	}
 	if err := r.tracingMgr.ApplyConfig(conf.TracingConfig); err != nil {
 		return fmt.Errorf("failed to apply tracing config: %w", err)
 	}
 	r.apih.PauseTiming()
+	if r.actions != nil {
+		r.actions.pause()
+	}
 	if r.afterTimingPause != nil {
 		r.afterTimingPause()
 	}
@@ -197,10 +244,29 @@ func (r *reloader) reload(conf *config.Config) error {
 	r.metrics.configuredIntegrations.Set(float64(integrationsNum))
 	r.metrics.configuredInhibitionRules.Set(float64(len(conf.InhibitRules)))
 
+	var stage notify.Stage = pipeline
+	var graph *actionGraph
+	if actions := r.actions; supported || actions != nil && actions.recovery != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		graph = &actionGraph{graphID: uuid.NewString(), key: recipientKey, log: r.notificationLog, supported: supported, ctx: ctx, cancel: cancel, routes: routes, targets: actionTargets, inhibitor: newInhibitor, silencer: r.silencer, timeMuter: intervener, pipeline: pipeline}
+		graph.adapter = actions
+		for _, targets := range actionTargets {
+			for _, t := range targets {
+				graph.canonical = graph.canonical || t.canonical
+			}
+		}
+		newInhibitor.Project = func(s *alert.Alert, use func(*alert.Alert)) { actions.graphView(graph, s, false, use) }
+		stage = notify.StageFunc(func(ctx context.Context, l *slog.Logger, members ...*alert.Alert) (context.Context, []*alert.Alert, error) {
+			reader := func(ctx context.Context, receiver, name string, index int, members []*alert.Alert, due func([]*alert.Alert) bool) (notify.OrdinaryBatch, error) {
+				return actions.prepare(ctx, graph, receiver, name, index, members, due)
+			}
+			return pipeline.Exec(notify.WithOrdinaryReader(ctx, reader), l, members...)
+		})
+	}
 	newDispatcher := dispatch.NewDispatcher(
 		r.alerts,
 		routes,
-		pipeline,
+		stage,
 		intervener,
 		r.timeoutFunc,
 		r.dispatchMaintenanceInterval,
@@ -232,6 +298,13 @@ func (r *reloader) reload(conf *config.Config) error {
 	// Populate the new inhibition cache before publishing a route and status
 	// callback from the same configuration generation. In-flight readers retain
 	// the old callback and its inhibitor after the reload.
+	if graph != nil {
+		graph.dispatcher = newDispatcher
+		graph.retired = make(chan *alert.Alert, 256)
+		newDispatcher.Project = func(s *alert.Alert, use func(*alert.Alert)) { r.actions.graphView(graph, s, true, use) }
+		newDispatcher.SweepRetired = func() bool { return graph.sweepRetired.Swap(false) }
+		newDispatcher.Retired = func(s *alert.Alert) bool { return r.actions.retired(graph, s) }
+	}
 	go newInhibitor.Run()
 	newInhibitor.WaitForLoading()
 	r.inhibitor.Store(newInhibitor)
@@ -263,6 +336,9 @@ func (r *reloader) reload(conf *config.Config) error {
 		r.beforeTimingPublish()
 	}
 	r.apih.PublishTiming(conf, timingIntegrations, intervener, timingLookup)
+	if graph != nil {
+		r.actions.installed(graph)
+	}
 
 	return nil
 }
@@ -272,6 +348,9 @@ func (r *reloader) reload(conf *config.Config) error {
 // config has been applied yet (both pointers nil).
 func (r *reloader) stop() error {
 	r.apih.PauseTiming()
+	if r.actions != nil {
+		r.actions.pause()
+	}
 	if i := r.inhibitor.Load(); i != nil {
 		i.Stop()
 	}

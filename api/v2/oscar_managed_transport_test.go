@@ -173,3 +173,12 @@ func TestManagedCallbackUsesOwnerTransport(t *testing.T) {
 		})
 	}
 }
+
+func TestOscarActionDirectReadinessPreservesConversionGate(t *testing.T) {
+	t.Parallel()
+	api := &API{alertmanagerConfig: &config.Config{Receivers: []config.Receiver{{Name: "direct", WebhookConfigs: []*webhook.WebhookConfig{{URL: "https://receiver.example/alerts"}}}}}}
+	require.True(t, api.callbacksReadyFor(&managedClient{scheme: "https"}, true))
+	require.False(t, api.conversionCallbackReady())
+	api.alertmanagerConfig.Receivers[0].WebhookConfigs[0].URL = "https://alertmanager-middleware:9400/api/v1/internal/fingerprint-conversion/alerts"
+	require.False(t, api.callbacksReadyFor(&managedClient{scheme: "https"}, true))
+}

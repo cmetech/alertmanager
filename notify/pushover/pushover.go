@@ -160,6 +160,9 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		return notify.Unrecoverable(err, notify.DefaultReason)
 	}
 
+	if !notify.PreparedHTTPDestination(ctx, n.client, n.apiURL, parameters.Get("token"), parameters.Get("user"), parameters.Get("device")) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
 	u, err := url.Parse(n.apiURL)
 	if err != nil {
 		return notify.Unrecoverable(err, notify.DefaultReason)

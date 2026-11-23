@@ -159,11 +159,6 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 		return notify.Retry(0, fmt.Errorf("execute 'api_url' template: %w", tmplErr), notify.ClientErrorReason)
 	}
 
-	client, err := n.createSNSClient(ctx, apiURL)
-	if err != nil {
-		return n.classifyClientError(err)
-	}
-
 	publishInput, err := n.createPublishInput(ctx, tmpl, &tmplErr)
 	if err != nil {
 		reason := notify.DefaultReason
@@ -173,7 +168,58 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 		return notify.Retry(0, err, reason)
 	}
 
-	publishOutput, err := client.Publish(ctx, publishInput)
+	client, err := n.createSNSClient(ctx, apiURL)
+	if err != nil {
+		return n.classifyClientError(err)
+	}
+
+	var options []func(*sns.Options)
+	if notify.CurrentProviderEntry(ctx) != nil {
+		resolved := client.Options()
+		// ARN addresses identify the destination account. A phone number with
+		// ambient credentials also needs the resolved sending account.
+		principal := n.conf.Sigv4.RoleARN
+		if principal == "" {
+			principal = n.conf.Sigv4.AccessKey
+		}
+		if publishInput.PhoneNumber != nil && principal == "" {
+			creds, err := resolved.Credentials.Retrieve(ctx)
+			if err != nil {
+				return n.classifyClientError(err)
+			}
+			principal = creds.AccountID
+			if principal == "" {
+				principal = creds.AccessKeyID
+			}
+			options = append(options, func(o *sns.Options) {
+				o.Credentials = aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) { return creds, nil })
+			})
+		}
+		fields := []string{aws.ToString(resolved.BaseEndpoint), resolved.Region, fmt.Sprint(resolved.EndpointOptions.UseDualStackEndpoint), fmt.Sprint(resolved.EndpointOptions.UseFIPSEndpoint), principal, aws.ToString(publishInput.TopicArn), aws.ToString(publishInput.TargetArn), aws.ToString(publishInput.PhoneNumber)}
+		var matches bool
+		if native, ok := resolved.HTTPClient.(*http.Client); ok {
+			matches = notify.PreparedHTTPDestination(ctx, native, fields...)
+		} else {
+			matches = notify.PreparedDestination(ctx, fields...)
+		}
+		if !matches {
+			return notify.Unrecoverable(notify.ErrDestination, notify.ConfigErrorReason)
+		}
+		options = append(options, func(o *sns.Options) {
+			o.RetryMaxAttempts = 1
+			var c *http.Client
+			switch native := o.HTTPClient.(type) {
+			case *http.Client:
+				c = native
+			case *awshttp.BuildableClient:
+				// Freeze after SDK defaults and custom CA resolution. Preserve the
+				// SDK dialer, proxy, TLS and read timeout on the final publish.
+				c = notify.AWSProviderClient(native)
+			}
+			o.HTTPClient = &notify.SDKTransport{Context: ctx, Client: c}
+		})
+	}
+	publishOutput, err := client.Publish(ctx, publishInput, options...)
 	if err != nil {
 		return n.classifyPublishError(err)
 	}
@@ -264,6 +310,9 @@ func (n *Notifier) createPublishInput(ctx context.Context, tmpl func(string) str
 			}
 			publishInput.MessageDeduplicationId = aws.String(key.Hash())
 			publishInput.MessageGroupId = aws.String(key.Hash())
+			if e := notify.CurrentProviderEntry(ctx); e != nil && e.ActionID != "" {
+				publishInput.MessageDeduplicationId = aws.String(notify.Key(e.ActionID).Hash())
+			}
 		}
 	}
 	if n.conf.PhoneNumber != "" {

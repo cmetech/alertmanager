@@ -30,7 +30,6 @@ import (
 	"net/textproto"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	commoncfg "github.com/prometheus/common/config"
@@ -129,6 +128,41 @@ func (n *Email) Notify(ctx context.Context, as ...*alert.Alert) notify.NotifyVer
 		err     error
 		success = false
 	)
+	var (
+		tmplErr error
+		data    = notify.GetTemplateData(ctx, n.tmpl, as, n.logger)
+		tmpl    = notify.TmplText(n.tmpl, data, &tmplErr)
+	)
+	from := tmpl(n.conf.From)
+	if tmplErr != nil {
+		return notify.Unrecoverable(fmt.Errorf("execute 'from' template: %w", tmplErr), notify.DefaultReason)
+	}
+	to := tmpl(n.conf.To)
+	if tmplErr != nil {
+		return notify.Unrecoverable(fmt.Errorf("execute 'to' template: %w", tmplErr), notify.DefaultReason)
+	}
+
+	addrs, err := mail.ParseAddressList(from)
+	if err != nil {
+		return notify.Unrecoverable(fmt.Errorf("parse 'from' addresses: %w", err), notify.DefaultReason)
+	}
+	if len(addrs) != 1 {
+		return notify.Unrecoverable(fmt.Errorf("must be exactly one 'from' address (got: %d)", len(addrs)), notify.DefaultReason)
+	}
+	sender := addrs[0].Address
+	addrs, err = mail.ParseAddressList(to)
+	if err != nil {
+		return notify.Unrecoverable(fmt.Errorf("parse to addresses: %w", err), notify.DefaultReason)
+	}
+	if entry := notify.CurrentProviderEntry(ctx); entry != nil {
+		address := []string{n.conf.Smarthost.String(), sender}
+		for _, addr := range addrs {
+			address = append(address, addr.Address)
+		}
+		if !notify.PreparedDestination(ctx, address...) {
+			return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+		}
+	}
 	// Determine whether to use Implicit TLS
 	var useImplicitTLS bool
 	if n.conf.ForceImplicitTLS != nil {
@@ -147,7 +181,7 @@ func (n *Email) Notify(ctx context.Context, as ...*alert.Alert) notify.NotifyVer
 			tlsConfig.ServerName = n.conf.Smarthost.Host
 		}
 
-		conn, err = tls.Dial("tcp", n.conf.Smarthost.String(), tlsConfig)
+		conn, err = (&tls.Dialer{Config: tlsConfig}).DialContext(ctx, "tcp", n.conf.Smarthost.String())
 		if err != nil {
 			return notify.Retry(0, fmt.Errorf("establish TLS connection to server: %w", err), notify.DefaultReason)
 		}
@@ -161,6 +195,9 @@ func (n *Email) Notify(ctx context.Context, as ...*alert.Alert) notify.NotifyVer
 			return notify.Retry(0, fmt.Errorf("establish connection to server: %w", err), notify.DefaultReason)
 		}
 	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	c, err = smtp.NewClient(conn, n.conf.Smarthost.Host)
 	if err != nil {
 		conn.Close()
@@ -168,7 +205,10 @@ func (n *Email) Notify(ctx context.Context, as ...*alert.Alert) notify.NotifyVer
 	}
 	defer func() {
 		// Try to clean up after ourselves but don't log anything if something has failed.
-		if err := c.Quit(); success && err != nil {
+		if !success {
+			return
+		}
+		if err := c.Quit(); err != nil {
 			n.logger.Warn("failed to close SMTP connection", "err", err)
 		}
 	}()
@@ -211,54 +251,14 @@ func (n *Email) Notify(ctx context.Context, as ...*alert.Alert) notify.NotifyVer
 		}
 	}
 
-	var (
-		tmplErr error
-		data    = notify.GetTemplateData(ctx, n.tmpl, as, n.logger)
-		tmpl    = notify.TmplText(n.tmpl, data, &tmplErr)
-	)
-	from := tmpl(n.conf.From)
-	if tmplErr != nil {
-		return notify.Unrecoverable(fmt.Errorf("execute 'from' template: %w", tmplErr), notify.DefaultReason)
-	}
-	to := tmpl(n.conf.To)
-	if tmplErr != nil {
-		return notify.Unrecoverable(fmt.Errorf("execute 'to' template: %w", tmplErr), notify.DefaultReason)
-	}
-
-	addrs, err := mail.ParseAddressList(from)
-	if err != nil {
-		return notify.Unrecoverable(fmt.Errorf("parse 'from' addresses: %w", err), notify.DefaultReason)
-	}
-	if len(addrs) != 1 {
-		return notify.Unrecoverable(fmt.Errorf("must be exactly one 'from' address (got: %d)", len(addrs)), notify.DefaultReason)
-	}
-	if err = c.Mail(addrs[0].Address); err != nil {
+	if err = c.Mail(sender); err != nil {
 		return notify.Retry(0, fmt.Errorf("send MAIL command: %w", err), notify.DefaultReason)
-	}
-	addrs, err = mail.ParseAddressList(to)
-	if err != nil {
-		return notify.Unrecoverable(fmt.Errorf("parse 'to' addresses: %w", err), notify.DefaultReason)
 	}
 	for _, addr := range addrs {
 		if err = c.Rcpt(addr.Address); err != nil {
 			return notify.Retry(0, fmt.Errorf("send RCPT command: %w", err), notify.DefaultReason)
 		}
 	}
-
-	// Send the email headers and body.
-	message, err := c.Data()
-	if err != nil {
-		return notify.Retry(0, fmt.Errorf("send DATA command: %w", err), notify.DefaultReason)
-	}
-	closeOnce := sync.OnceValue(func() error {
-		return message.Close()
-	})
-	// Close the message when this method exits in order to not leak resources. Even though we're calling this explicitly
-	// further down, the method may exit before then.
-	defer func() {
-		// If we try close an already-closed writer, it'll send a subsequent request to the server which is invalid.
-		_ = closeOnce()
-	}()
 
 	buffer := &bytes.Buffer{}
 	for header, t := range n.conf.Headers {
@@ -304,13 +304,6 @@ func (n *Email) Notify(ctx context.Context, as ...*alert.Alert) notify.NotifyVer
 	fmt.Fprintf(buffer, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	fmt.Fprintf(buffer, "Content-Type: multipart/alternative;  boundary=%s\r\n", multipartWriter.Boundary())
 	fmt.Fprintf(buffer, "MIME-Version: 1.0\r\n\r\n")
-
-	// TODO: Add some useful headers here, such as URL of the alertmanager
-	// and active/resolved.
-	_, err = message.Write(buffer.Bytes())
-	if err != nil {
-		return notify.Unrecoverable(fmt.Errorf("write headers: %w", err), notify.DefaultReason)
-	}
 
 	if len(n.conf.Text) > 0 {
 		// Text template
@@ -367,13 +360,27 @@ func (n *Email) Notify(ctx context.Context, as ...*alert.Alert) notify.NotifyVer
 		return notify.Unrecoverable(fmt.Errorf("close multipartWriter: %w", err), notify.DefaultReason)
 	}
 
+	entry := notify.CurrentProviderEntry(ctx)
+	if entry != nil && (entry.Check == nil || !entry.Check()) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
+	message, err := c.Data()
+	if err != nil {
+		return notify.Retry(0, fmt.Errorf("send DATA command: %w", err), notify.DefaultReason)
+	}
+	if _, err = message.Write(buffer.Bytes()); err != nil {
+		return notify.Unrecoverable(fmt.Errorf("write headers: %w", err), notify.DefaultReason)
+	}
 	_, err = message.Write(multipartBuffer.Bytes())
 	if err != nil {
 		return notify.Unrecoverable(fmt.Errorf("write body buffer: %w", err), notify.DefaultReason)
 	}
 
 	// Complete the message and await response.
-	if err = closeOnce(); err != nil {
+	if entry != nil && (entry.Begin == nil || !entry.Begin()) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
+	if err = message.Close(); err != nil {
 		return notify.Retry(0, fmt.Errorf("delivery failure: %w", err), notify.DefaultReason)
 	}
 

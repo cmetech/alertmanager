@@ -149,6 +149,9 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 	}
 
 	// A message as referenced in https://learn.microsoft.com/en-us/connectors/teams/?tabs=text1%2Cdotnet#request-body-schema
+	if !notify.PreparedHTTPDestination(ctx, n.client, url) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
 	t := teamsMessage{
 		Type: "message",
 		Attachments: []Attachment{

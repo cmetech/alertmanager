@@ -1,0 +1,252 @@
+// Copyright The Prometheus Authors
+// SPDX-License-Identifier: Apache-2.0
+
+package notify
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"net/http"
+	"sync"
+
+	"github.com/prometheus/common/model"
+
+	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/nflog/nflogpb"
+)
+
+// SelectedAction describes one pending journal target of one provider member.
+// Invoke must acquire its durable entry claim and check validity before notifying.
+type SelectedAction struct {
+	Source      *alert.Alert
+	Receiver    string
+	Integration string
+	Index       int
+	Invoke      func(context.Context, *Integration, *alert.Alert) NotifyVerdict
+}
+
+type selectedActionKey struct{}
+
+// WithSelectedAction passes the selection through the existing suppression and integration stages.
+func WithSelectedAction(ctx context.Context, selection SelectedAction) context.Context {
+	return context.WithValue(ctx, selectedActionKey{}, selection)
+}
+
+func selectedAction(ctx context.Context) (SelectedAction, bool) {
+	action, ok := ctx.Value(selectedActionKey{}).(SelectedAction)
+	return action, ok
+}
+
+func (s SelectedAction) matches(receiver, integration string, index int) bool {
+	return s.Receiver == receiver && s.Integration == integration && s.Index == index
+}
+
+// ProviderEntry carries one final local entry gate and an optional signed canonical batch.
+type ProviderEntry struct {
+	// AddressID derives an opaque identity for provider-owned group metadata.
+	AddressID func(...string) string
+
+	steps map[int]bool
+	http  http.RoundTripper
+	// RecheckHTTP verifies a pinned canonical credential before final entry.
+	RecheckHTTP func() bool
+	Truncated   uint64 // Original webhook members already excluded before terminal contact reservation.
+	Begin       func() bool
+	// Check verifies preparation without marking an external effect.
+	Check func() bool
+	// Select records the exact provider input after native filtering.
+	Select func([]*alert.Alert)
+	// RequireContent excludes generic provider diagnostics from tracked delivery.
+	RequireContent bool
+	// NoSend marks a conclusive native decision to skip a delivery.
+	NoSend bool
+	// ActionID is stable across attempts at the same selected logical target.
+	ActionID string
+	// Destination checks the exact prepared addressing fields before use.
+	Destination func(...string) bool
+	Members     []alert.NativeDeliveryMember
+	Key         []byte
+}
+
+type providerEntryKey struct{}
+
+// WithProviderEntry attaches in-process entry authority to a single integration invocation.
+func WithProviderEntry(ctx context.Context, entry *ProviderEntry) context.Context {
+	return context.WithValue(ctx, providerEntryKey{}, entry)
+}
+
+// CurrentProviderEntry returns the entry to check after blocking preparation, immediately before contact.
+func CurrentProviderEntry(ctx context.Context) *ProviderEntry {
+	entry, _ := ctx.Value(providerEntryKey{}).(*ProviderEntry)
+	return entry
+}
+
+// OrdinaryBatch selects contacts with durable coverage before the group log is advanced.
+type OrdinaryBatch struct {
+	Members []*alert.Alert
+	// LogMembers reports ordinary acceptances after invocation. An empty slice preserves the group clock.
+	LogMembers                 func() ([]*alert.Alert, error)
+	Invoke                     func(context.Context, *Integration, []*alert.Alert) NotifyVerdict
+	group                      []*alert.Alert
+	previous                   *nflogpb.Entry
+	groupFiring, groupResolved map[uint64]struct{}
+	hash                       func(*alert.Alert) uint64
+}
+
+// OrdinaryReader integrates member coverage with the receiver's existing group dedup decision.
+type (
+	OrdinaryReader    func(context.Context, string, string, int, []*alert.Alert, func([]*alert.Alert) bool) (OrdinaryBatch, error)
+	ordinaryReaderKey struct{}
+	ordinaryBatchKey  struct{}
+)
+
+// WithOrdinaryReader installs the configuration generation's native action reader.
+func WithOrdinaryReader(ctx context.Context, reader OrdinaryReader) context.Context {
+	return context.WithValue(ctx, ordinaryReaderKey{}, reader)
+}
+
+// ErrDestination is returned when a prepared target no longer matches admission.
+var ErrDestination = errors.New("native provider destination unavailable")
+
+// PreparedDestination submits the actual addressing fields used by this notifier.
+// During planning this is a read-only stop point before provider I/O.
+func PreparedDestination(ctx context.Context, fields ...string) bool {
+	e := CurrentProviderEntry(ctx)
+	return e == nil || e.Destination == nil || e.Destination(fields...)
+}
+
+// DestinationDigest binds opaque provider addressing fields to an integration.
+func DestinationDigest(key []byte, config string, fields ...string) string {
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte("oscar-native-recipient-v1"))
+	for _, value := range append([]string{config}, fields...) {
+		h.Write(binary.BigEndian.AppendUint64(nil, uint64(len(value))))
+		h.Write([]byte(value))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// PreparedDigest renders the configured recipient and stops at its declaration.
+// Only the registered native integrations with this pre-I/O declaration use it.
+func (i *Integration) PreparedDigest(ctx context.Context, key []byte, config string, members []*alert.Alert) (string, error) {
+	var digest string
+	entry := &ProviderEntry{AddressID: func(fields ...string) string { return DestinationDigest(key, config, fields...) }, Destination: func(fields ...string) bool {
+		digest = DestinationDigest(key, config, fields...)
+		return false
+	}}
+	i.notifier.Notify(WithProviderEntry(ctx, entry), members...)
+	if digest == "" {
+		return "", ErrDestination
+	}
+	return digest, nil
+}
+
+type mutationStepKey struct{}
+
+// WithMutationStep distinguishes a subsequent configured provider write.
+func WithMutationStep(ctx context.Context, step int) context.Context {
+	if CurrentProviderEntry(ctx) == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, mutationStepKey{}, step)
+}
+
+func (entry *ProviderEntry) beginStep(ctx context.Context) bool {
+	step, _ := ctx.Value(mutationStepKey{}).(int)
+	if entry.steps == nil {
+		entry.steps = make(map[int]bool)
+	}
+	if entry.steps[step] {
+		return false
+	}
+	entry.steps[step] = true
+	return entry.Begin != nil && entry.Begin()
+}
+
+const incompleteContent = "oscarIncompleteContent"
+
+type (
+	incompleteContentKey struct{}
+	ordinaryBaseline     struct {
+		entry     *nflogpb.Entry
+		hash      func(*alert.Alert) uint64
+		repeatDue bool
+		once      sync.Once
+		states    map[uint64]bool
+	}
+)
+
+// Build the previous membership index only when a held or incomplete flush needs it.
+func (b *ordinaryBaseline) acknowledged(m *alert.Alert) bool {
+	b.once.Do(func() {
+		b.states = make(map[uint64]bool, len(b.entry.FiringAlerts)+len(b.entry.ResolvedAlerts))
+		for _, h := range b.entry.FiringAlerts {
+			b.states[h] = false
+		}
+		for _, h := range b.entry.ResolvedAlerts {
+			b.states[h] = true
+		}
+	})
+	resolved, ok := b.states[b.hash(m)]
+	return ok && resolved == m.Resolved()
+}
+
+// OrdinaryLogBaseline returns the state acknowledged by the prior native group
+// entry, whether that entry has unfinished content, and whether its repeat is due.
+func OrdinaryLogBaseline(ctx context.Context) (func(*alert.Alert) bool, bool, bool) {
+	b, _ := ctx.Value(incompleteContentKey{}).(*ordinaryBaseline)
+	if b == nil {
+		return nil, false, false
+	}
+	return b.acknowledged, b.entry.GetReceiverData()[incompleteContent].GetIntVal() == 1, b.repeatDue
+}
+
+// ContentBaseline identifies acknowledged members while an ordinary group's
+// content or a held resolution still needs a later flush.
+func ContentBaseline(ctx context.Context) func(*alert.Alert) bool {
+	ack, incomplete, _ := OrdinaryLogBaseline(ctx)
+	if incomplete {
+		return ack
+	}
+	return nil
+}
+
+// MarkContentIncomplete retains tail progress in the existing group log.
+func MarkContentIncomplete(ctx context.Context, incomplete bool) {
+	if store, ok := NflogStore(ctx); ok {
+		if incomplete {
+			store.SetInt(incompleteContent, 1)
+		} else {
+			store.Delete(incompleteContent)
+		}
+	}
+}
+
+// PrepareContent freezes any provider-specific encoded member subset before reservation.
+func (i *Integration) PrepareContent(ctx context.Context, members []*alert.Alert, truncated uint64) (context.Context, []*alert.Alert, error) {
+	if n, ok := i.notifier.(interface {
+		PrepareContent(context.Context, []*alert.Alert, uint64) (context.Context, []*alert.Alert, error)
+	}); ok {
+		return n.PrepareContent(ctx, members, truncated)
+	}
+	return ctx, members, nil
+}
+
+type routeRendererKey struct{}
+
+// WithRouteLabelRenderer retains the dispatcher's configured route label templates for a reduced cohort.
+func WithRouteLabelRenderer(ctx context.Context, render func(...*alert.Alert) model.LabelSet) context.Context {
+	return context.WithValue(ctx, routeRendererKey{}, render)
+}
+
+// ForMembers renders route labels against the members that will supply the provider payload.
+func ForMembers(ctx context.Context, members []*alert.Alert) context.Context {
+	if render, ok := ctx.Value(routeRendererKey{}).(func(...*alert.Alert) model.LabelSet); ok {
+		return WithRouteLabels(ctx, render(members...))
+	}
+	return ctx
+}

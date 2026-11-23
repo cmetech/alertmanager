@@ -15,6 +15,7 @@ package notify
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -147,6 +148,9 @@ func (i *Integration) Notify(ctx context.Context, alerts ...*alert.Alert) (verdi
 	defer func() {
 		span.SetAttributes(attribute.Bool("alerting.notify.error.recoverable", verdict.ShouldRetry()))
 		if err := verdict.Err(); err != nil {
+			if CurrentProviderEntry(ctx) != nil {
+				verdict = Unrecoverable(err, verdict.Reason())
+			}
 			i.recordFailure(span, verdict.Reason(), err)
 		}
 		span.End()
@@ -165,6 +169,9 @@ func (i *Integration) Notify(ctx context.Context, alerts ...*alert.Alert) (verdi
 				}
 				if len(ordinary) == 0 {
 					return Success()
+				}
+				if e := CurrentProviderEntry(ctx); e != nil && e.Select != nil {
+					e.Select(ordinary)
 				}
 				return i.notifier.Notify(ctx, ordinary...)
 			}
@@ -475,6 +482,11 @@ func hashAlert(a *alert.Alert) uint64 {
 		b = append(b, sep)
 	}
 
+	if source := a.ProviderSource().Fingerprint(); source != a.Fingerprint() {
+		// Extra separators distinguish projected membership from every UTF-8 label tuple.
+		b = append(b, sep, sep)
+		b = binary.BigEndian.AppendUint64(b, uint64(source))
+	}
 	hash := xxhash.Sum64(b)
 
 	return hash

@@ -68,6 +68,12 @@ func NewAlertmanagerAPI(spec *loads.Document) *AlertmanagerAPI {
 			return middleware.NotImplemented("operation silence.DeleteSilence has not yet been implemented")
 		}),
 
+		AlertExecuteOscarActionHandler: alert.ExecuteOscarActionHandlerFunc(func(params alert.ExecuteOscarActionParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.ExecuteOscarAction has not yet been implemented")
+		}),
+
 		AlertgroupGetAlertGroupsHandler: alertgroup.GetAlertGroupsHandlerFunc(func(params alertgroup.GetAlertGroupsParams) middleware.Responder {
 			_ = params
 
@@ -78,6 +84,18 @@ func NewAlertmanagerAPI(spec *loads.Document) *AlertmanagerAPI {
 			_ = params
 
 			return middleware.NotImplemented("operation alert.GetAlerts has not yet been implemented")
+		}),
+
+		AlertGetOscarActionHandler: alert.GetOscarActionHandlerFunc(func(params alert.GetOscarActionParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.GetOscarAction has not yet been implemented")
+		}),
+
+		AlertGetOscarActionEligibilityHandler: alert.GetOscarActionEligibilityHandlerFunc(func(params alert.GetOscarActionEligibilityParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.GetOscarActionEligibility has not yet been implemented")
 		}),
 
 		AlertGetOscarAlertsPageHandler: alert.GetOscarAlertsPageHandlerFunc(func(params alert.GetOscarAlertsPageParams) middleware.Responder {
@@ -159,10 +177,16 @@ type AlertmanagerAPI struct {
 
 	// SilenceDeleteSilenceHandler sets the operation handler for the delete silence operation
 	SilenceDeleteSilenceHandler silence.DeleteSilenceHandler
+	// AlertExecuteOscarActionHandler sets the operation handler for the execute oscar action operation
+	AlertExecuteOscarActionHandler alert.ExecuteOscarActionHandler
 	// AlertgroupGetAlertGroupsHandler sets the operation handler for the get alert groups operation
 	AlertgroupGetAlertGroupsHandler alertgroup.GetAlertGroupsHandler
 	// AlertGetAlertsHandler sets the operation handler for the get alerts operation
 	AlertGetAlertsHandler alert.GetAlertsHandler
+	// AlertGetOscarActionHandler sets the operation handler for the get oscar action operation
+	AlertGetOscarActionHandler alert.GetOscarActionHandler
+	// AlertGetOscarActionEligibilityHandler sets the operation handler for the get oscar action eligibility operation
+	AlertGetOscarActionEligibilityHandler alert.GetOscarActionEligibilityHandler
 	// AlertGetOscarAlertsPageHandler sets the operation handler for the get oscar alerts page operation
 	AlertGetOscarAlertsPageHandler alert.GetOscarAlertsPageHandler
 	// ReceiverGetReceiversHandler sets the operation handler for the get receivers operation
@@ -257,11 +281,20 @@ func (o *AlertmanagerAPI) Validate() error {
 	if o.SilenceDeleteSilenceHandler == nil {
 		unregistered = append(unregistered, "silence.DeleteSilenceHandler")
 	}
+	if o.AlertExecuteOscarActionHandler == nil {
+		unregistered = append(unregistered, "alert.ExecuteOscarActionHandler")
+	}
 	if o.AlertgroupGetAlertGroupsHandler == nil {
 		unregistered = append(unregistered, "alertgroup.GetAlertGroupsHandler")
 	}
 	if o.AlertGetAlertsHandler == nil {
 		unregistered = append(unregistered, "alert.GetAlertsHandler")
+	}
+	if o.AlertGetOscarActionHandler == nil {
+		unregistered = append(unregistered, "alert.GetOscarActionHandler")
+	}
+	if o.AlertGetOscarActionEligibilityHandler == nil {
+		unregistered = append(unregistered, "alert.GetOscarActionEligibilityHandler")
 	}
 	if o.AlertGetOscarAlertsPageHandler == nil {
 		unregistered = append(unregistered, "alert.GetOscarAlertsPageHandler")
@@ -378,6 +411,10 @@ func (o *AlertmanagerAPI) initHandlerCache() {
 		o.handlers["DELETE"] = make(map[string]http.Handler)
 	}
 	o.handlers["DELETE"]["/silence/{silenceID}"] = silence.NewDeleteSilence(o.context, o.SilenceDeleteSilenceHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/oscar/actions"] = alert.NewExecuteOscarAction(o.context, o.AlertExecuteOscarActionHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
@@ -386,6 +423,14 @@ func (o *AlertmanagerAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/alerts"] = alert.NewGetAlerts(o.context, o.AlertGetAlertsHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/oscar/actions/{operation_id}"] = alert.NewGetOscarAction(o.context, o.AlertGetOscarActionHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/oscar/actions/eligibility"] = alert.NewGetOscarActionEligibility(o.context, o.AlertGetOscarActionEligibilityHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}

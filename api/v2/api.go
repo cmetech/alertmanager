@@ -53,6 +53,7 @@ import (
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
 	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/inhibit"
 	"github.com/prometheus/alertmanager/labelset"
 	"github.com/prometheus/alertmanager/marker"
 	"github.com/prometheus/alertmanager/matcher/compat"
@@ -67,12 +68,14 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/api/v2")
 
 // API represents an Alertmanager API v2.
 type API struct {
-	managedOwner *managedOwner
-	peer         cluster.ClusterPeer
-	silences     *silence.Silences
-	alerts       provider.Alerts
-	alertGroups  groupsFn
-	uptime       time.Time
+	managedOwner    *managedOwner
+	actionOwner     *nativeActionOwner
+	actionForbidden map[string][]byte
+	peer            cluster.ClusterPeer
+	silences        *silence.Silences
+	alerts          provider.Alerts
+	alertGroups     groupsFn
+	uptime          time.Time
 
 	// mtx protects alertmanagerConfig, setAlertStatus and route.
 	mtx sync.RWMutex
@@ -150,6 +153,17 @@ func NewAPI(
 		return docui.ServeSpec(swaggerSpec.Raw(), swaggerContext.RoutesHandler(b), docui.WithSpecPath("/swagger.json"))
 	}
 
+	// actionRoutes authenticates the original request bytes before Swagger binding.
+	// A parsed operation has no authority to invoke the owner independently.
+	openAPI.AlertExecuteOscarActionHandler = alert_ops.ExecuteOscarActionHandlerFunc(func(alert_ops.ExecuteOscarActionParams) middleware.Responder {
+		return alert_ops.NewExecuteOscarActionUnauthorized()
+	})
+	openAPI.AlertGetOscarActionHandler = alert_ops.GetOscarActionHandlerFunc(func(alert_ops.GetOscarActionParams) middleware.Responder {
+		return alert_ops.NewGetOscarActionUnauthorized()
+	})
+	openAPI.AlertGetOscarActionEligibilityHandler = alert_ops.GetOscarActionEligibilityHandlerFunc(func(alert_ops.GetOscarActionEligibilityParams) middleware.Responder {
+		return alert_ops.NewGetOscarActionEligibilityUnauthorized()
+	})
 	openAPI.AlertGetOscarAlertsPageHandler = alert_ops.GetOscarAlertsPageHandlerFunc(api.getOscarAlertsPageHandler)
 	openAPI.AlertGetAlertsHandler = alert_ops.GetAlertsHandlerFunc(api.getAlertsHandler)
 	openAPI.AlertPostAlertsHandler = alert_ops.PostAlertsHandlerFunc(api.postAlertsHandler)
@@ -344,6 +358,12 @@ func (api *API) getAlertsHandler(params alert_ops.GetAlertsParams) middleware.Re
 			break
 		}
 
+		if readManaged, _ := params.HTTPRequest.Context().Value(managedReadKey{}).(string); readManaged == "" {
+			alrt = api.actionView(alrt)
+			if alrt == nil {
+				continue
+			}
+		}
 		routes := api.route.Match(alrt.Labels)
 		receivers := make([]string, 0, len(routes))
 		for _, r := range routes {
@@ -638,7 +658,7 @@ func (api *API) getAlertGroupsHandler(params alertgroup_ops.GetAlertGroupsParams
 		}
 
 		for _, alrt := range alertGroup.Alerts {
-			fp := alrt.Fingerprint()
+			fp := alrt.ProviderSource().Fingerprint()
 			receivers := allReceivers[fp]
 			status, ok := alertGroup.AlertStatuses[fp]
 			if !ok {
@@ -661,6 +681,7 @@ func (api *API) getAlertGroupsHandler(params alertgroup_ops.GetAlertGroupsParams
 // from the read path.
 func predictAlertStatus(ctx context.Context, setAlertStatus setAlertStatusFn, a *alert.Alert) alert.AlertStatus {
 	var c statusCollector
+	ctx = inhibit.WithProviderFingerprint(ctx, a.ProviderSource().Fingerprint())
 	setAlertStatus(marker.WithContext(ctx, &c), a.LabelSet())
 	return c.status()
 }
@@ -1102,8 +1123,8 @@ func getSwaggerSpec() (*loads.Document, *analysis.Spec, error) {
 		return swaggerSpecCache, swaggerSpecAnalysisCache, nil
 	}
 
-	// Load embedded swagger file.
-	swaggerSpec, err := loads.Analyzed(restapi.SwaggerJSON, "")
+	// The flattened spec preserves explicit zero bounds lost in go-swagger's original-spec copy.
+	swaggerSpec, err := loads.Analyzed(restapi.FlatSwaggerJSON, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load embedded swagger file: %w", err)
 	}

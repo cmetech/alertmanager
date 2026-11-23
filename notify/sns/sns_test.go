@@ -17,8 +17,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -34,6 +39,7 @@ import (
 
 	"github.com/prometheus/alertmanager/alert"
 	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/notify/test"
 	"github.com/prometheus/alertmanager/template"
 )
 
@@ -282,4 +288,84 @@ func TestClassifyPublishError(t *testing.T) {
 			require.Contains(t, verdict.Err().Error(), tc.errMsg)
 		})
 	}
+}
+
+func TestOscarActionFIFOLogicalIdentity(t *testing.T) {
+	t.Parallel()
+	n := &Notifier{conf: &SNSConfig{TopicARN: "arn:aws:sns:us-east-1:123456789012:example.fifo", Message: "hello"}}
+	ctx := notify.WithGroupKey(t.Context(), "group")
+	var err error
+	render := func(s string) string { return s }
+	input, err := n.createPublishInput(ctx, render, &err)
+	require.NoError(t, err)
+	action, err := n.createPublishInput(notify.WithProviderEntry(ctx, &notify.ProviderEntry{ActionID: "one"}), render, &err)
+	require.NoError(t, err)
+	require.Equal(t, *input.MessageGroupId, *action.MessageGroupId)
+	require.NotEqual(t, *input.MessageDeduplicationId, *action.MessageDeduplicationId)
+	replay, err := n.createPublishInput(notify.WithProviderEntry(ctx, &notify.ProviderEntry{ActionID: "one"}), render, &err)
+	require.NoError(t, err)
+	require.Equal(t, *action.MessageDeduplicationId, *replay.MessageDeduplicationId)
+}
+
+func TestOscarActionSNSDoesNotReplayPublish(t *testing.T) {
+	t.Parallel()
+	for _, buildable := range []bool{false, true} {
+		t.Run(fmt.Sprint(buildable), func(t *testing.T) {
+			var count atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				count.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+			}))
+			defer server.Close()
+			c := &SNSConfig{UseAWSHTTPClient: buildable, APIUrl: server.URL, TopicARN: "arn:aws:sns:us-east-1:123456789012:example", Message: "alarm", Sigv4: sigv4.SigV4Config{Region: "us-east-1", AccessKey: "test", SecretKey: "secret"}, HTTPConfig: &commoncfg.DefaultHTTPClientConfig}
+			n, err := New(c, test.CreateTmpl(t), logger)
+			require.NoError(t, err)
+			var entries int
+			entry := &notify.ProviderEntry{Begin: func() bool { entries++; return true }}
+			ctx := notify.WithProviderEntry(notify.WithGroupKey(t.Context(), "group"), entry)
+			require.Error(t, n.Notify(ctx).Err())
+			require.EqualValues(t, 1, count.Load())
+			require.Equal(t, 1, entries)
+		})
+	}
+}
+
+func TestOscarActionSNSHeaderChangedDuringValidation(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	defer server.Close()
+	file := t.TempDir() + "/tenant"
+	require.NoError(t, os.WriteFile(file, []byte("first"), 0o600))
+	cfg := commoncfg.DefaultHTTPClientConfig
+	cfg.HTTPHeaders = &commoncfg.Headers{Headers: map[string]commoncfg.Header{"X-Tenant": {Files: []string{file}}}}
+	c := &SNSConfig{APIUrl: server.URL, TopicARN: "arn:aws:sns:us-east-1:123456789012:example", Message: "alarm", Sigv4: sigv4.SigV4Config{Region: "us-east-1", AccessKey: "test", SecretKey: "secret"}, HTTPConfig: &cfg}
+	n, err := New(c, test.CreateTmpl(t), logger)
+	require.NoError(t, err)
+	i := notify.NewIntegration(n, c, "sns", 0, "team")
+	ctx := notify.WithGroupKey(t.Context(), "group")
+	key := []byte(strings.Repeat("a", 32))
+	digest, err := i.PreparedDigest(ctx, key, "config", nil)
+	require.NoError(t, err)
+	// The legacy SNS recipient used only the eight SDK fields. Reusing its key
+	// cannot map an outstanding unknown onto the current file-bound recipient.
+	probe := &notify.ProviderEntry{Destination: func(fields ...string) bool {
+		require.Len(t, fields, 10)
+		require.Equal(t, []string{file, "first"}, fields[8:])
+		require.NotEqual(t, notify.DestinationDigest(key, "config", fields[:8]...), digest)
+		require.Equal(t, notify.DestinationDigest(key, "config", fields...), digest)
+		return false
+	}}
+	require.Error(t, n.Notify(notify.WithProviderEntry(ctx, probe)).Err())
+	entry := &notify.ProviderEntry{Destination: func(fields ...string) bool { return digest == notify.DestinationDigest(key, "config", fields...) }, Begin: func() bool {
+		require.NoError(t, os.WriteFile(file, []byte("second"), 0o600))
+		got, err := i.PreparedDigest(ctx, key, "config", nil)
+		return err == nil && got == digest
+	}}
+	require.Error(t, n.Notify(notify.WithProviderEntry(ctx, entry)).Err())
+	require.Zero(t, calls.Load())
 }

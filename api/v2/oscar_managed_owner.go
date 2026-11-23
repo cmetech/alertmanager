@@ -242,6 +242,10 @@ func (api *API) managedMemberEligible(ctx context.Context, incoming *alert.Alert
 	if root == nil || setStatus == nil || !api.conversionCallbackReady() {
 		return false, errors.New("managed notification eligibility unavailable")
 	}
+	current = api.actionView(current)
+	if current == nil {
+		return false, nil
+	}
 	state := predictAlertStatus(ctx, setStatus, current)
 	if len(state.SilencedBy) != 0 || len(state.InhibitedBy) != 0 || state.State == alert.AlertStateSuppressed {
 		return false, nil
@@ -270,6 +274,7 @@ func (api *API) managedMemberEligible(ctx context.Context, incoming *alert.Alert
 
 func (o *managedOwner) attachMember(a *alert.Alert, key string, slot *ownerSlot) {
 	op := slot.claims()
+	a.ManagedOperationKind = op.Kind
 	a.ManagedMember = alert.ManagedMembership{Episode: key, Generation: slot.Generation, Event: op.EventID, Digest: op.Digest}
 	a.ManagedEligible = o.eligible
 }
@@ -779,4 +784,71 @@ func (o *managedOwner) read(ctx context.Context, raw json.RawMessage, confirm bo
 		return nil, errors.New("managed lookup busy or stale")
 	}
 	return map[string]any{"contract": managedContract, "state": state.State, "generation": state.Generation}, nil
+}
+
+// verifyActionMember joins the provider stamp to the currently promoted private owner slot.
+func (o *managedOwner) verifyActionMember(ctx context.Context, a *alert.Alert, logical string) error {
+	m := a.ManagedMember
+	s, err := o.state(ctx, "lookup", map[string]string{"key": m.Episode}, m.Episode)
+	if err != nil {
+		return unavailable
+	}
+	return actionMemberProof(s, a, logical)
+}
+
+var discardedManagedMember = errors.New("managed observation superseded or cancelled")
+
+type closedManagedOwner struct {
+	key        string
+	generation int64
+}
+
+func (closedManagedOwner) Error() string { return "authoritative managed closure" }
+
+func actionMemberProof(s ownerState, a *alert.Alert, logical string) error {
+	m := a.ManagedMember
+	if s.Key != m.Episode {
+		return unverified
+	}
+	if s.State == "exact_closed" && s.Closed != nil && s.Generation > m.Generation && (s.Phase == "closing" || s.Phase == "retired" || s.Phase == "closed") && (s.Current == nil || s.Current.claims().Kind != "clear" || s.Current.Generation != s.Generation) {
+		return closedManagedOwner{s.Key, s.Generation}
+	}
+	slot := s.Current
+	if slot == nil || slot.Generation != m.Generation {
+		if s.Phase == "cancelled" && s.Pending == nil && m.Generation <= s.Generation || slot != nil && slot.Generation > m.Generation {
+			return discardedManagedMember
+		}
+		return unverified
+	}
+	if slot.claims().Kind != a.ManagedOperationKind || slot.claims().EventID != m.Event || slot.claims().Digest != m.Digest || slot.Projection.Fingerprint != a.Fingerprint().String() || !slot.Projection.Alert.StartsAt.Equal(a.StartsAt) {
+		return unverified
+	}
+	switch s.Phase {
+	case "cancelled":
+		if s.Pending != nil || s.Closed != nil || s.Generation <= m.Generation {
+			return unverified
+		}
+	case "applied", "ack", "settled", "retired":
+		if s.Generation != m.Generation {
+			return unverified
+		}
+	default:
+		return unverified
+	}
+	if a.ManagedOperationKind == "clear" {
+		if s.Closed == nil || logical != "resolved" {
+			return unverified
+		}
+		return nil
+	}
+	if s.Closed != nil {
+		return resolved
+	}
+	if logical == "resolved" && a.EndsAt.Before(slot.Projection.Alert.EndsAt) {
+		return discardedManagedMember
+	}
+	if logical == "resolved" && (!a.Resolved() || !a.EndsAt.Equal(slot.Projection.Alert.EndsAt)) {
+		return unverified
+	}
+	return nil
 }

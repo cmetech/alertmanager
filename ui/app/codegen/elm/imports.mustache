@@ -1,0 +1,4 @@
+{{#elmImports}}
+import {{moduleName}}{{#as}} as {{as}}{{/as}}{{#hasExposures}} exposing ({{#exposures}}{{^-first}}, {{/-first}}{{.}}{{/exposures}}){{/hasExposures}}
+{{/elmImports}}{{#models}}{{#model}}{{#vendorExtensions.x-elm-natural-fields}}import Utils.ActionNatural as ActionNatural
+{{/vendorExtensions.x-elm-natural-fields}}{{/model}}{{/models}}

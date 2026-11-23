@@ -88,7 +88,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 
 	message, truncated := notify.TruncateInBytes(message, maxMessageSize)
 	if truncated {
-		logger.Debug("message truncated due to exceeding maximum allowed length by webex", "truncated_message", message)
+		logger.Debug("message truncated due to exceeding maximum allowed length by webex")
 	}
 
 	w := webhook{
@@ -96,6 +96,9 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		RoomID:   tmpl(n.conf.RoomID),
 	}
 
+	if !notify.PreparedHTTPDestination(ctx, n.client, n.conf.APIURL.String(), w.RoomID) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
 	var payload bytes.Buffer
 	if err = json.NewEncoder(&payload).Encode(w); err != nil {
 		return notify.Unrecoverable(err, notify.DefaultReason)

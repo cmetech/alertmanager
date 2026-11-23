@@ -1,3 +1,111 @@
+## Unreleased — Route policy escalations on the effective severity
+
+- The native policy command accepts an empty destination scope for escalation. Pending destinations
+  can renew under the original operation while entered siblings retain their original provider token.
+- Pair native source `e92c1dc1` with OSCAR source `d1491edcb` before commissioning. The v1
+  wire schema and generated artifacts remain compatible. Operator qualification is UNRUN.
+
+## Unreleased — Source severity for Active Alerts
+
+- The version 2 Active Alerts page includes an optional source severity map for selected alerts whose effective severity is higher. Matching and sorting use the existing effective view.
+- Pair native source `09688a83` with OSCAR Alertmanager and Middleware source `a09ec7fea` and AdminUI source `292304d34`. The read contract is additive and uses the existing C2/C3 storage prerequisites. Operator qualification is pending.
+
+## Unreleased — Scheduled native action concurrency
+
+- The leased native owner admits at most four concurrent scheduled policy executions, including requests whose callers have timed out. It checks the signed expiry for initial and recovery mutations.
+- Pair native source `0b065e06` with OSCAR source `eca179df0`. The existing assertion and response wire formats apply. Deploy the matching owner before enabling scheduling. Operator qualification is pending.
+
+## Unreleased — Leased OSCAR manual alert publication
+
+- Native Alertmanager pulls ordered manual source transitions from its authenticated action store. Observations replace the previous variant at the original start. Exact stamp retries preserve the resident and subscriber stream. Recovery and policy clear use the source owner's terminal position.
+- Native source `157edead` pairs with OSCAR source `b1b892990` and its manual bridge migration. Update both writers together. The public alert API retains its existing contract. Commissioning and runtime qualification are pending.
+
+## Unreleased — Canonical callback provenance
+
+- Native Alertmanager includes the sending graph, request target, group identity and original severity on its private canonical entry command. The retained structural routes include matching canonical siblings. Oversized descriptions leave policy scope unavailable while the physical callback proceeds.
+- Pair native source `0939a5eb` with OSCAR's callback receipt migration and matching private writer before commissioning. The signed v1 callback body and destination identity remain compatible. Operator qualification is pending.
+
+## Unreleased — Direct notification receipts during terminal reconciliation
+
+- Native Alertmanager records the accepted members of a direct notification even when settlement and lookup both fail for an excluded terminal token. A subsequent flush can hold that terminal and honor the direct sibling's earlier delivery. A rejected provider request retains its original failure reason.
+- Source `76b82742` uses the existing private store and configuration. This native-only fix requires no migration or activation. Runtime qualification is pending.
+
+## Unreleased — Terminal permit expiry during grouped delivery
+
+- Native Alertmanager rechecks each member's original source and wire before private admission. When a permit expires between admission chunks, the remaining eligible members can reach the configured recipient in their original order. The expired member settles with its original token.
+- Native source `cbde7c83` uses the existing version 2 private cohort contract. The paired OSCAR Alertmanager fixture `b11a4e19a` covers expiry inside the store transaction. The feature defaults off, requires no additional migration or configuration, and awaits runtime qualification.
+
+## Unreleased — Ordinary terminal group admission
+
+- Native Alertmanager claims a tracked group’s firing and terminal members in bounded private requests. A clear keeps its deterministic identity and original receipt when the group exceeds 4,096 members. An eligible subset can enter after a concurrent receipt only when its rendered members and recipient still match.
+- Pair native source `a2f63cef` with OSCAR Alertmanager `d592f7c09`. Readiness requires `ordinary_cohort: 2`. Canonical callbacks also require B2’s durable receipt capability. This default-off change uses the existing schema and settings. Runtime qualification is pending.
+
+## Unreleased — Managed timeout recovery
+
+- An expired managed raise or update can reach its signed terminal callback after its mutable episode slot is reclaimed. Alertmanager verifies the native variant and generation, then checks the promoted managed record before closing the interval and claiming the existing terminal receipt. Source `8da616f6` uses the current configuration and store schema. The feature defaults off and awaits runtime qualification.
+
+## Unreleased — Native ordinary entry and terminal delivery
+
+- Alertmanager verifies each untracked direct or legacy callback's original resident token and issuing epoch at provider entry. When a tracked alert expires, the next due flush recovers its terminal receipt through the current slot or the indexed source.
+- Tracked firing groups split private inspection and admission requests at both 64 members and 256 KiB of encoded JSON. Long receiver names retain the native group and original receipt tokens. Source `7300d30f` uses the existing store contract and default-off setting. This native change requires no migration. Runtime qualification is pending.
+
+## Unreleased — Native action recovery and group entry
+
+- Alertmanager checks the earliest active source or claim expiry at the provider transition. Rehydrated slots reread the durable row, read-side inhibition uses the original provider identity, and unsupported first-enrollment severities release capacity for supported alerts.
+- Tracked full-scope firing groups use the private `ordinary_cohort: 1` store commands. First and repeat notifications retain the native group and each admitted member's receipt. Canonical graphs also require B2's `native_delivery_receipts: 1`. Pair native source `a8951628` with OSCAR Alertmanager source `d93ac2365`. The feature defaults off. This change introduces no configuration or schema migration. Runtime qualification remains pending.
+
+## Unreleased — Native action recovery and commissioning
+
+- Alertmanager installs the dispatch adapter when the existing native action flag is enabled. Recovered severity drives routing, inhibition, templates and native reads. Possible inhibitors hold their matching dependents while the owner verifies current resident identity.
+- Up to 4,096 mutable episode slots serve a larger live alert population through indexed rehydration. Original-token settlement survives eviction and lease loss. Canonical commissioning requires the authenticated `native_delivery_receipts: 1` lease response from B2. Direct-only graphs retain their existing store and recipient-binding requirements. The stock private HTTP callback and verified HTTPS callback use scheme-specific TLS checks.
+- Source `889d7387` affects the native Alertmanager reader. The default stays disabled. There is no new schema migration or configuration value. B2 consumer commissioning and operator qualification are pending.
+
+## Unreleased — Native action delivery transports
+
+- Dormant native dispatch now delivers outstanding incident.io group members when tracked or direct repeats fill a size-limited payload. The wire count includes members omitted for payload size and for `max_alerts`. The group log records the members actually delivered during recovery. Native implementation `f551a091` uses the existing store schema and configuration.
+
+- Dormant native dispatch preserves completed clear receipts and the firing repeat deadline during persistent partial-resolution holds. Exact operator replay returns conclusive no-effect target receipts, and permanent private authority redirects invalidate local readiness. Implementation `aa975e49` uses the existing version 2 store schema and requires no additional migration.
+
+- The dormant native action reader now requires recipient-binding version 2. Incompatible renewals fence local delivery, and valid pending recipients can renew independently when a sibling's file is unavailable. Ordinary firing reservations bind the inspected lifecycle and severity. Partially acknowledged resolved groups retain their remaining work. Pair native implementation `997c7bc0` with OSCAR `3456c500f` and its authority migration before qualification.
+
+- Native transport review fixes preserve ordinary Telegram token redaction, validate direct expiry before later writes, and independently revalidate previously admitted recipients. Reduced groups use their actual rendered route labels and address. Incident.io freezes retained content before reservation and preserves resolved tails through dispatcher cleanup. Jira records a resolved no-send in the ordinary group lifecycle. SNS pins file-based addressing headers on its native HTTP path. Implementation `b4b813a5`.
+- Pair with OSCAR store `04aeee7ee` and its updated `add_native_alert_actions.sql` migration. The private lease now provides a stable per-authority recipient key, preserving contact ownership and repeat deadlines across authentication rotation. Pre-upgrade NULL authorities with retained work require verified continuity. Native action version remains zero. Operator qualification is pending.
+
+
+- The dormant Alertmanager action reader binds the configured recipients of all 18 receiver kinds and checks its entry permit before each provider mutation. Selected notifications use the chosen alert and detached group metadata. Group sends record the members accepted by incident.io after its payload-size fallback. SMTP finalization, Telegram diagnostics, Slack updates, Jira transitions and SNS FIFO publish use their configured provider semantics. Implementation `1f2d5361`.
+- This native-only checkpoint keeps action version zero. It introduces no database migration or new configuration. That initial source checkpoint derived recipient bindings from the store credential. The paired transport review fix above supersedes that derivation. Inhibition recovery, downstream commissioning and runtime qualification remain pending.
+
+## Unreleased — Tracked terminal contact checkpoint
+
+- Native webhook batches with an unverifiable input and a configured alert limit wait for the next group evaluation. Partial ordinary success records an accepted direct sibling in the notification log while preserving existing coverage deadlines. Paged takeover discards progress after a lease change and refreshes resident projections that an intervening owner may have closed. Implementation `044d263b`. This native-only correction uses the existing private journal and configuration. Operator qualification is pending.
+
+- Terminal contacts validate the outgoing copy, exact source evidence and managed promotion before provider entry. Ordinary grouped delivery keeps member order and reserves only the native post-filter webhook prefix. Proposed canonical configuration must pass commissioning before replacing the prior graph.
+- Native takeover resumes indexed membership pages within the same epoch. This reader requires the new private lease marker and the paired OSCAR terminal index upgrade. Existing releases remain disabled pending transport, inhibition and operator qualification. Implementation `b5b18c84`.
+
+- Native dispatch reserves a due tracked clear through OSCAR's private terminal journal, validates the original provider alert at entry, and retains its stable delivery identity across reservation replay. Ordinary group eligibility and send-resolved filtering still apply.
+- A dormant embedded adapter leaves the ordinary notification pipeline in place. Native action version remains zero pending full transport and restart qualification. Pair implementation `a2dc58b6` with the matching OSCAR journal. This change requires the existing A2 schema and adds no migration.
+
+## Unreleased — Native firing-member dispatch checkpoint
+
+- Stage effective route/group and inhibition updates, exact provider identity on notification copies, and per-member firing coverage for selected and ordinary webhook dispatch.
+- The source checkpoint keeps native action version zero. The CLI cannot advertise or commission this reader. Terminal receipt semantics, transport coverage, and restart publication remain open.
+- No database migration, new configuration, or release pin change accompanies this checkpoint. The A2 migration and matching OSCAR consumers remain deployment prerequisites. See [native action dispatch](doc/design/oscar-native-action-dispatch.md).
+
+## Unreleased — Native action admission
+
+- Add signed action, lookup and eligibility endpoints, a leased episode owner and bounded notification-entry permits. Native requires the matching OSCAR store protocol and a commissioned v1 dispatch reader before advertising readiness. Existing deployments default to disabled.
+- Journal managed changes after durable promotion or closure. During lease takeover, retire superseded ordinary observations and hold unproven resident intervals until definitive provider garbage collection. Revalidate the source before effects and preserve late delivery evidence.
+- Require a fresh Middleware recovery grant for held policy work and successor creation. Execute conflicts include the linked child operation ID when the store returns a receipt. The generated Go and Elm clients expose that receipt.
+- Native action receipts preserve submillisecond permit expiry for signed recovery. Go clients can format the new `*time.Time` with `time.RFC3339Nano`. Elm clients can reuse the timestamp string directly. The served API schema publishes inclusive zero lower bounds for cancellation generation and severity revision. These client and schema corrections require no database migration.
+- Deployment requires the matching OSCAR database migration, separate action credentials and dispatch integration. Runtime and load qualification remain pending.
+
+## Unreleased — Native action delivery contract
+
+- The signed native callback builder accepts a resolved managed raise/update when the delivered end matches the provider member’s elapsed end. Its same-generation renewal regression awaits operator execution. No configuration or migration change.
+- The confined signed delivery builder binds its real provider member and owner-issued operation kind. A managed clear can report a resolved logical episode while the transport is still firing. The ordinary webhook continues to use its existing status. Operator qualification is pending; no migration or configuration change.
+- The fork defines the signed native action webhook and immutable dispatch view. The normal notifier continues to emit its existing webhook format. The durable owner must be installed before action delivery can be enabled. Matching Python verifier and source matrix land in OSCAR. No migration or operator configuration change.
+- The shared protocol vector is frozen at SHA256 `ec481659f721adce5b5531669a065b2cf925f6a3bfe437205cac97fdeeb1c94c`. Go behavior and runtime qualification await operator execution.
+
 ## Unreleased — Configured internal managed-owner transport
 
 - Managed episode ownership accepts the deployment's explicit internal HTTP or HTTPS scheme through `--oscar.managed-owner-scheme`. Existing callers default to HTTPS. The destination remains fixed to `alertmanager-middleware:9400`; callback and owner schemes must agree. HTTP uses the existing protected internal network, while HTTPS still requires the configured CA and hostname verification. Both retain independent owner/callback credentials, signed operations, and redirect rejection. OSCAR Compose must pass the scheme selected by its existing internal transport configuration; no global TLS migration is required. No schema or state migration.

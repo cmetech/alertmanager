@@ -15,6 +15,8 @@ package config
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1001,4 +1003,43 @@ func (c *Receiver) UnmarshalYAML(unmarshal func(any) error) error {
 	}
 	c.Labels["name"] = c.Name
 	return nil
+}
+
+// ActionIntegrationDigests binds each target to its configured integration, including redacted secret values.
+// Reloading only routes preserves the integration identity and its durable contact coverage.
+func (c *Config) ActionIntegrationDigests() (map[string]map[string][]string, error) {
+	var raw struct {
+		Global    map[string]any
+		Receivers []struct {
+			Name   string
+			Fields map[string]any `yaml:",inline"`
+		}
+	}
+	if err := yaml.Unmarshal([]byte(c.original), &raw); err != nil {
+		return nil, err
+	}
+	result := map[string]map[string][]string{}
+	for _, receiver := range raw.Receivers {
+		targets := map[string][]string{}
+		for field, value := range receiver.Fields {
+			name, ok := strings.CutSuffix(field, "_configs")
+			if !ok {
+				continue
+			}
+			list, ok := value.([]any)
+			if !ok {
+				return nil, fmt.Errorf("invalid %s on %s", field, receiver.Name)
+			}
+			for idx, item := range list {
+				encoded, err := yaml.Marshal([]any{receiver.Name, name, idx, raw.Global, item})
+				if err != nil {
+					return nil, err
+				}
+				digest := sha256.Sum256(encoded)
+				targets[name] = append(targets[name], hex.EncodeToString(digest[:]))
+			}
+		}
+		result[receiver.Name] = targets
+	}
+	return result, nil
 }

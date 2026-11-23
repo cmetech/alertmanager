@@ -72,18 +72,6 @@ type PostMessage struct {
 	Actions     []RocketchatAttachmentAction `json:"actions,omitempty"`
 }
 
-type rocketchatRoundTripper struct {
-	wrapped http.RoundTripper
-	token   string
-	tokenID string
-}
-
-func (t *rocketchatRoundTripper) RoundTrip(req *http.Request) (res *http.Response, e error) {
-	req.Header.Set("X-Auth-Token", t.token)
-	req.Header.Set("X-User-Id", t.tokenID)
-	return t.wrapped.RoundTrip(req)
-}
-
 // New returns a new Rocketchat notification handler.
 func New(c *RocketchatConfig, t *template.Template, l *slog.Logger, httpOpts ...commoncfg.HTTPClientOption) (*Notifier, error) {
 	client, err := notify.NewClientWithTracing(*c.HTTPConfig, "rocketchat", httpOpts...)
@@ -99,14 +87,24 @@ func New(c *RocketchatConfig, t *template.Template, l *slog.Logger, httpOpts ...
 		return nil, err
 	}
 
-	client.Transport = &rocketchatRoundTripper{wrapped: client.Transport, token: token, tokenID: tokenID}
+	post := func(ctx context.Context, c *http.Client, url string, body io.Reader) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Auth-Token", token)
+		req.Header.Set("X-User-Id", tokenID)
+		req.Header.Set("User-Agent", notify.UserAgentHeader)
+		req.Header.Set("Content-Type", "application/json")
+		return notify.DoMutation(c, req)
+	}
 	return &Notifier{
 		conf:         c,
 		tmpl:         t,
 		logger:       l,
 		client:       client,
 		retrier:      &notify.Retrier{},
-		postJSONFunc: notify.PostJSON,
+		postJSONFunc: post,
 		token:        token,
 		tokenID:      tokenID,
 	}, nil
@@ -218,6 +216,9 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 		return notify.Unrecoverable(err, notify.DefaultReason)
 	}
 	url := n.conf.APIURL.JoinPath("api/v1/chat.postMessage").String()
+	if !notify.PreparedHTTPDestination(ctx, n.client, url, n.tokenID, n.token, body.Channel) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
 	resp, err := n.postJSONFunc(ctx, n.client, url, &buf)
 	if err != nil {
 		return notify.Retry(0, notify.RedactURL(err), notify.DefaultReason)

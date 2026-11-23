@@ -28,3 +28,17 @@ func TestExportedNotificationHashMatchesNativeDedupHash(t *testing.T) {
 	require.Equal(t, hashAlert(a), HashAlert(a))
 	require.NotEqual(t, uint64(a.Fingerprint()), HashAlert(a))
 }
+
+func TestOscarActionProjectedNflogIdentity(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	a := alert.New(model.Alert{StartsAt: now, Labels: model.LabelSet{"severity": "major"}}, now, false)
+	b := alert.New(model.Alert{StartsAt: now, Labels: model.LabelSet{"severity": "critical"}}, now, false)
+	ref := alert.EpisodeRef{AuthorityID: "11111111-1111-4111-8111-111111111111", EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1}
+	view, err := alert.BuildDispatchView(a, ref, "critical", 1)
+	require.NoError(t, err)
+	m := view.NotificationMember()
+	require.Equal(t, b.Fingerprint(), m.Fingerprint())
+	require.NotEqual(t, HashAlert(b), HashAlert(m))
+	require.Equal(t, HashAlert(a), HashAlert(a.NotificationCopy(now)))
+}

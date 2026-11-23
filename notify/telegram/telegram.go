@@ -46,7 +46,7 @@ type Notifier struct {
 	conf    *TelegramConfig
 	tmpl    *template.Template
 	logger  *slog.Logger
-	client  *telebot.Bot
+	client  *http.Client
 	retrier *notify.Retrier
 }
 
@@ -61,16 +61,11 @@ func New(conf *TelegramConfig, t *template.Template, l *slog.Logger, httpOpts ..
 		httpclient.Timeout = conf.Timeout
 	}
 
-	client, err := createTelegramClient(conf.APIUrl.String(), conf.ParseMode, httpclient)
-	if err != nil {
-		return nil, err
-	}
-
 	return &Notifier{
 		conf:    conf,
 		tmpl:    t,
 		logger:  l,
-		client:  client,
+		client:  httpclient,
 		retrier: &notify.Retrier{},
 	}, nil
 }
@@ -100,6 +95,9 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 			return notify.Unrecoverable(err, notify.DefaultReason)
 		}
 		if len(messageText) > maxMessageLenBytes || htmlTextRuneCount(messageText) > maxMessageLenRunes {
+			if entry := notify.CurrentProviderEntry(ctx); entry != nil && entry.RequireContent {
+				return notify.Unrecoverable(errors.New("alert content exceeds Telegram limits"), notify.EncodingErrorReason)
+			}
 			messageText = `Alertmanager notification could not be sent: message length exceeds Telegram limits.
 			Please check the template used for producing the message content.`
 		}
@@ -113,7 +111,7 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 		}
 	}
 
-	n.client.Token, err = n.getBotToken()
+	token, err := n.getBotToken()
 	if err != nil {
 		return notify.Retry(0, err, notify.DefaultReason)
 	}
@@ -123,7 +121,15 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 		return notify.Retry(0, err, notify.DefaultReason)
 	}
 
-	message, err := n.client.Send(telebot.ChatID(chatID), messageText, &telebot.SendOptions{
+	if !notify.PreparedHTTPDestination(ctx, n.client, n.conf.APIUrl.String(), token, strconv.FormatInt(chatID, 10), strconv.Itoa(n.conf.MessageThreadID)) {
+		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
+	}
+	bot, err := createTelegramClient(n.conf.APIUrl.String(), n.conf.ParseMode, &http.Client{Transport: &notify.SDKTransport{Client: n.client, Context: ctx}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+	if err != nil {
+		return notify.Unrecoverable(err, notify.ConfigErrorReason)
+	}
+	bot.Token = token
+	message, err := bot.Send(telebot.ChatID(chatID), messageText, &telebot.SendOptions{
 		DisableNotification:   n.conf.DisableNotifications,
 		DisableWebPagePreview: true,
 		ThreadID:              n.conf.MessageThreadID,
@@ -136,7 +142,7 @@ func (n *Notifier) Notify(ctx context.Context, alrt ...*alert.Alert) notify.Noti
 		err = notify.RedactURL(err)
 		return notify.Retry(0, err, failureReason(err))
 	}
-	logger.Debug("Telegram message successfully published", "message_id", message.ID, "chat_id", message.Chat.ID)
+	logger.Debug("Telegram message successfully published", "message_id", message.ID)
 
 	return notify.Success()
 }

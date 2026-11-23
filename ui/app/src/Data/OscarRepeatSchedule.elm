@@ -54,7 +54,7 @@ encoder model =
         , ( "receiver", Encode.string model.receiver )
         , ( "integration", Encode.string model.integration )
         , ( "repeat_interval_duration", Encode.string model.repeatIntervalDuration )
-        , ( "next_repeat_eligible_at", Maybe.withDefault Encode.null (Maybe.map DateTime.encoder) model.nextRepeatEligibleAt )
+        , ( "next_repeat_eligible_at", (Maybe.withDefault Encode.null << Maybe.map DateTime.encoder) model.nextRepeatEligibleAt )
         , ( "state", stateEncoder model.state )
         ]
 

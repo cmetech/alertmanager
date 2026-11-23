@@ -23,6 +23,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/exporter-toolkit/web"
 
+	"github.com/prometheus/alertmanager/api"
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/provider/mem"
@@ -52,6 +53,7 @@ const (
 // fields default to their zero value (which generally matches the kingpin
 // flag default).
 type Options struct {
+	ActionOwner                                             api.ActionOwnerConfig
 	ManagedOwnerScheme, ManagedOwnerCA, ManagedOwnerKeyFile string
 	// Storage and lifecycle.
 	ConfigFile                  string

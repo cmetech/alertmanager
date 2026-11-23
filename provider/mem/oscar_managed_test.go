@@ -153,3 +153,57 @@ func TestManagedFutureStartRemainsRetryableAndCannotStrandManualRetirement(t *te
 	require.NoError(t, p.ApplyManaged(t.Context(), "future", fresh, provider.ManagedStamp{Generation: 1}, valid))
 	require.Equal(t, a.StartsAt, fresh.StartsAt)
 }
+
+func TestManualOrderedReplacementAndStampReplay(t *testing.T) {
+	p := clearProvider(t, &clearCallback{})
+	p.EnableManaged()
+	p.EnableManaged() // shared bootstrap is independent of receiver enrollment
+	start := time.Now().Add(-time.Minute)
+	source := func(level, stamp string, terminal bool) *alert.Alert {
+		end := start.Add(time.Hour)
+		if terminal {
+			end = start.Add(time.Second)
+		}
+		a := alert.New(model.Alert{Labels: model.LabelSet{"severity": model.LabelValue(level), "alertname": "Manual example"}, StartsAt: start, EndsAt: end}, time.Now(), false)
+		a.ManualEpisode, a.ManualStamp, a.ManualTerminal = "manual", stamp, terminal
+		return a
+	}
+	var observed []*alert.Alert
+	p.SetActionObserver(func(_ string, a *alert.Alert, closed bool) {
+		if !closed {
+			observed = append(observed, a)
+		}
+	})
+	_, sub := p.SlurpAndSubscribe("manual")
+	defer sub.Close()
+	ok := func() error { return nil }
+	x, y, z := source("warning", "a", false), source("major", "b", false), source("major", "c", true)
+	one, two, three := provider.ManagedStamp{Generation: 1, Digest: "a"}, provider.ManagedStamp{Generation: 2, Digest: "b"}, provider.ManagedStamp{Generation: 3, Digest: "c"}
+	apply := func(a *alert.Alert, s, prior provider.ManagedStamp) error {
+		return p.ApplyManual(t.Context(), a.ActionOwner(), a, s, prior, false, ok)
+	}
+	require.NoError(t, apply(x, one, provider.ManagedStamp{}))
+	require.Equal(t, x.ManualStamp, (<-sub.Next()).Data.ManualStamp)
+	require.Error(t, apply(y, two, provider.ManagedStamp{}))
+	require.NoError(t, apply(y, two, one))
+	require.True(t, (<-sub.Next()).Data.ManualTerminal)
+	replacement := (<-sub.Next()).Data
+	require.False(t, replacement.ManagedReceiver)
+	require.Equal(t, y.StartsAt, replacement.StartsAt)
+	require.NoError(t, apply(y, two, one))
+	require.Len(t, observed, 2)
+	select {
+	case <-sub.Next():
+		t.Fatal("same stamp republished")
+	default:
+	}
+	require.Error(t, p.ApplyManaged(t.Context(), "receiver", y, two, ok))
+	require.NoError(t, apply(z, three, two))
+	require.True(t, (<-sub.Next()).Data.ManualTerminal)
+	require.Len(t, observed, 3)
+	require.Error(t, apply(x, one, provider.ManagedStamp{}))
+	p.FinalizeManual(z.ActionOwner(), three)
+	p.gcAlerts()
+	_, found := p.ManagedApplied(z.ActionOwner())
+	require.False(t, found)
+}

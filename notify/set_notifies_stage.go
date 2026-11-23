@@ -62,6 +62,9 @@ func (n SetNotifiesStage) mutedAlerts(ctx context.Context) []uint64 {
 
 // Exec implements the Stage interface.
 func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*alert.Alert) (context.Context, []*alert.Alert, error) {
+	if _, selected := selectedAction(ctx); selected {
+		return ctx, alerts, nil
+	}
 	gkey, ok := GroupKey(ctx)
 	if !ok {
 		return ctx, nil, errors.New("group key missing")
@@ -84,6 +87,23 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*a
 		return ctx, nil, errors.New("resolved alerts missing")
 	}
 
+	var held error
+	if batch, ordinary := ctx.Value(ordinaryBatchKey{}).(OrdinaryBatch); ordinary {
+		if batch.LogMembers == nil {
+			return ctx, alerts, nil
+		}
+		var accepted []*alert.Alert
+		accepted, held = batch.LogMembers()
+		if len(accepted) == 0 {
+			return ctx, alerts, held
+		}
+		if !slices.Equal(accepted, batch.group) {
+			f, r, fs, rs := partitionAlertsByState(accepted, batch.hash)
+			firing = retainLoggedMembers(f, fs, batch.groupFiring, batch.previous.GetFiringAlerts())
+			resolved = retainLoggedMembers(r, rs, batch.groupResolved, batch.previous.GetResolvedAlerts())
+		}
+	}
+
 	repeat, ok := RepeatInterval(ctx)
 	if !ok {
 		return ctx, nil, errors.New("repeat interval missing")
@@ -100,5 +120,21 @@ func (n SetNotifiesStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*a
 
 	// Extract receiver data from context if present (it's ok for it to be nil).
 	store, _ := NflogStore(ctx)
-	return ctx, alerts, n.nflog.Log(n.recv, gkey, firing, resolved, muted, store, expiry)
+	if err := n.nflog.Log(n.recv, gkey, firing, resolved, muted, store, expiry); err != nil {
+		return ctx, nil, err
+	}
+	return ctx, alerts, held
+}
+
+// retainLoggedMembers keeps previously acknowledged siblings still present in this state.
+func retainLoggedMembers(accepted []uint64, seen, current map[uint64]struct{}, previous []uint64) []uint64 {
+	for _, hash := range previous {
+		if _, present := current[hash]; present {
+			if _, recorded := seen[hash]; !recorded {
+				accepted = append(accepted, hash)
+				seen[hash] = struct{}{}
+			}
+		}
+	}
+	return accepted
 }

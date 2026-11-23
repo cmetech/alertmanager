@@ -36,3 +36,21 @@ func TestGroupKeyForAlertMatchesNativeAggregationGroup(t *testing.T) {
 	t.Cleanup(func() { ag.next.Stop(); ag.cancel() })
 	require.Equal(t, ag.GroupKey(), GroupKeyForAlert(a, route))
 }
+
+func TestOscarActionDistinctSourcesWithIdenticalEffectiveLabels(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load("route:\n  receiver: default\nreceivers:\n- name: default\n")
+	require.NoError(t, err)
+	rt := NewRoute(cfg.Route, nil)
+	now := time.Now()
+	a := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	b := alert.New(model.Alert{Labels: model.LabelSet{"severity": "critical"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	ref := alert.EpisodeRef{AuthorityID: "11111111-1111-4111-8111-111111111111", EpisodeID: "22222222-2222-4222-8222-222222222222", Generation: 1, VariantRevision: 1}
+	view, err := alert.BuildDispatchView(a, ref, "critical", 1)
+	require.NoError(t, err)
+	ag := newAggrGroup(t.Context(), nil, rt, nil, eventrecorder.NopRecorder(), promslog.NewNopLogger(), nil)
+	t.Cleanup(func() { ag.next.Stop(); ag.cancel() })
+	require.True(t, ag.insert(t.Context(), view.NotificationMember()))
+	require.True(t, ag.insert(t.Context(), b))
+	require.Len(t, ag.alerts.List(), 2)
+}

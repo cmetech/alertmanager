@@ -742,3 +742,78 @@ func BenchmarkFingerprintEquals(b *testing.B) {
 		})
 	}
 }
+
+func TestOscarActionInhibitionReprojection(t *testing.T) {
+	t.Parallel()
+	ih := NewInhibitor(nil, []amcommoncfg.InhibitRule{
+		{SourceMatch: map[string]string{"role": "source"}, TargetMatch: map[string]string{"role": "target"}, Equal: []string{"severity"}},
+		{SourceMatch: map[string]string{"severity": "critical"}, TargetMatch: map[string]string{"severity": "warning"}, Equal: []string{"cluster"}},
+	}, nopLogger, eventrecorder.NopRecorder())
+	now := time.Now()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"role": "source", "cluster": "c", "severity": "warning"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	effective := source.Alert
+	effective.Labels = source.Labels.Clone()
+	effective.Labels["severity"] = "critical"
+	projected := alert.New(effective, now, false)
+	ih.processAlert(context.Background(), source)
+	ih.UpdateProjection(source.Fingerprint(), projected)
+	checkMutes(t, ih, model.LabelSet{"role": "target", "severity": "warning"}, false)
+	checkMutes(t, ih, model.LabelSet{"role": "target", "severity": "critical"}, true)
+	checkMutes(t, ih, model.LabelSet{"cluster": "c", "severity": "warning"}, true)
+	require.False(t, ih.MutesSource(context.Background(), source.LabelSet(), source.Fingerprint()))
+	ih.UpdateProjection(source.Fingerprint(), nil)
+	checkMutes(t, ih, model.LabelSet{"cluster": "c", "severity": "warning"}, false)
+}
+
+func TestOscarActionUnresolvedInhibitionUsesEqualKeyAndProviderIdentity(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	src := alert.New(model.Alert{Labels: model.LabelSet{"cluster": "one"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	target := model.LabelSet{"cluster": "one", "severity": "critical", "role": "target"}
+	rule := amcommoncfg.InhibitRule{SourceMatch: map[string]string{"severity": "critical"}, TargetMatch: map[string]string{"role": "target"}, Equal: []string{"severity", "cluster", "missing"}}
+	ih := NewInhibitor(nil, []amcommoncfg.InhibitRule{rule, rule}, nopLogger, eventrecorder.NopRecorder())
+	ih.UpdateUnresolved(src.Fingerprint(), src)
+	require.True(t, ih.MayDependOnUnresolved(target, target.Fingerprint()))
+	require.False(t, ih.MayDependOnUnresolved(target, src.Fingerprint()))
+	checkMutes(t, ih, target, false)
+	target["cluster"] = "two"
+	require.False(t, ih.MayDependOnUnresolved(target, target.Fingerprint()))
+	target["cluster"] = "one"
+	twoSided := alert.New(model.Alert{Labels: model.LabelSet{"role": "target", "cluster": "one"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	ih.UpdateUnresolved(twoSided.Fingerprint(), twoSided)
+	ih.UpdateUnresolved(src.Fingerprint(), nil)
+	require.False(t, ih.MayDependOnUnresolved(target, target.Fingerprint()))
+}
+
+func TestOscarActionUnresolvedOverflowIsPerRuleAndReleases(t *testing.T) {
+	t.Parallel()
+	rule := amcommoncfg.InhibitRule{SourceMatch: map[string]string{"kind": "source", "severity": "critical"}, TargetMatch: map[string]string{"kind": "target"}, Equal: []string{"cluster"}}
+	ih := NewInhibitor(nil, []amcommoncfg.InhibitRule{rule}, nopLogger, eventrecorder.NopRecorder())
+	now := time.Now()
+	var last *alert.Alert
+	for i := range maxUnresolvedPairs + 1 {
+		last = alert.New(model.Alert{Labels: model.LabelSet{"kind": "source", "severity": "major", "cluster": model.LabelValue(fmt.Sprint(i))}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+		ih.UpdateUnresolved(last.Fingerprint(), last)
+	}
+	target := model.LabelSet{"kind": "target", "cluster": "different"}
+	require.True(t, ih.MayDependOnUnresolved(target, target.Fingerprint()))
+	inert := model.LabelSet{"kind": "other"}
+	require.False(t, ih.MayDependOnUnresolved(inert, inert.Fingerprint()))
+	ih.UpdateUnresolved(last.Fingerprint(), nil)
+	require.False(t, ih.MayDependOnUnresolved(target, target.Fingerprint()))
+	require.Equal(t, maxUnresolvedPairs, ih.rules[0].unknown.count)
+}
+
+func TestOscarActionPredictedStatusUsesOriginalProviderIdentity(t *testing.T) {
+	rule := amcommoncfg.InhibitRule{SourceMatch: map[string]string{"severity": "critical"}, TargetMatch: map[string]string{"severity": "major"}, Equal: []string{"host"}}
+	i := NewInhibitor(nil, []amcommoncfg.InhibitRule{rule}, nopLogger, eventrecorder.NopRecorder())
+	now := time.Now()
+	makeMember := func(severity string) *alert.Alert {
+		return alert.New(model.Alert{Labels: model.LabelSet{"host": "h", "severity": model.LabelValue(severity)}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	}
+	major, minor, critical := makeMember("major"), makeMember("minor"), makeMember("critical")
+	i.UpdateProjection(major.Fingerprint(), critical)
+	i.UpdateProjection(minor.Fingerprint(), major)
+	require.True(t, i.MutesSource(t.Context(), major.LabelSet(), minor.Fingerprint()))
+	require.True(t, i.Mutes(WithProviderFingerprint(t.Context(), minor.Fingerprint()), major.LabelSet()))
+}

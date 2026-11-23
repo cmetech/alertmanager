@@ -435,6 +435,28 @@ func TestSlackPostUpdatesToThread(t *testing.T) {
 		return notify.WithNflogStore(ctx, store)
 	}
 
+	t.Run("guarded first post retains recipient across native parent assignment", func(t *testing.T) {
+		var captured []capturedRequest
+		n := newTestNotifier(t, &SlackConfig{UpdateMessage: true, PostUpdatesToThread: true}, &captured, "111.222")
+		store := nflog.NewStore(nil)
+		ctx := newCtx(store)
+		key := []byte(strings.Repeat("a", 32))
+		address := func(fields ...string) string { return notify.DestinationDigest(key, "config", fields...) }
+		entry := &notify.ProviderEntry{AddressID: address}
+		entry.Destination = func(fields ...string) bool { return true }
+		i := notify.NewIntegration(n, n.conf, "slack", 0, "team")
+		before, err := i.PreparedDigest(ctx, key, "config", nil)
+		require.NoError(t, err)
+		require.NoError(t, n.Notify(notify.WithProviderEntry(ctx, entry)).Err())
+		after, err := i.PreparedDigest(ctx, key, "config", nil)
+		require.NoError(t, err)
+		require.Equal(t, before, after)
+		store.SetStr("channelId", "unrelated")
+		changed, err := i.PreparedDigest(ctx, key, "config", nil)
+		require.NoError(t, err)
+		require.NotEqual(t, after, changed)
+		require.Len(t, captured, 1)
+	})
 	t.Run("first notification posts to channel and stores thread ts", func(t *testing.T) {
 		var captured []capturedRequest
 		notifier := newTestNotifier(t, &SlackConfig{UpdateMessage: true, PostUpdatesToThread: true}, &captured, "111.222")

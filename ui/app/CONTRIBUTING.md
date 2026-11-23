@@ -65,6 +65,24 @@ Your app should be available at `http://localhost:<port>`. Navigate to
 `src/Main.elm`. Any changes to the file system are detected automatically,
 triggering a recompile of the project.
 
+## Native action wire types
+
+At the repository root, `make assets` overlays the field and record templates in
+`ui/app/codegen/elm/` on the pinned generator's Elm templates. These keep
+required nullable keys present, map UUIDs to JSON strings and use the declared
+integer minimum for native action counters. The nullable policy binding accepts
+either a complete record or explicit JSON null. The execute conflict model
+accepts a reason-only object and a durable receipt carrying the operation ID.
+
+Elm decodes JSON numbers through JavaScript. The generated action models accept
+positive counters from 1 and zero-allowed counters from 0 through
+9,007,199,254,740,991. Larger integer tokens fail decoding. Native and the Go
+client retain the full unsigned 64-bit range. Middleware signs the exact
+serialized bytes. Native verifies the signature and required keys before
+binding, including fields that explicitly carry null. The generated Go model's
+standalone `Validate` helper treats those nil pointers as missing. Normal client
+serialization and response decoding use the wire model directly.
+
 ## Committing changes
 
 Before you commit changes, please run `make build-all` on the root level

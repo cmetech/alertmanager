@@ -38,6 +38,7 @@ func (a *Alerts) EnableManaged() {
 		return
 	}
 	a.stamps = make(map[string]provider.ManagedStamp)
+	a.manualFinal = make(map[string]bool)
 	a.owners = make(map[model.Fingerprint]string)
 	a.variants = make(map[string]map[model.Fingerprint]bool)
 	a.handoff.Store(&orderedHandoff{turn: make(chan struct{}, 1)})
@@ -82,6 +83,19 @@ func managedSize(a *alert.Alert) int {
 // ApplyManaged replaces every currently owned problem in one provider commit.
 // A nil incoming alert retires the problems fenced by an operator close.
 func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert.Alert, stamp provider.ManagedStamp, validate func() error) error {
+	return a.applyOrdered(ctx, owner, incoming, stamp, nil, false, validate)
+}
+
+// ApplyManual installs an admitted manual publication under its exact preceding stamp.
+// Restore may seed only an empty, privately unowned provider after process restart.
+func (a *Alerts) ApplyManual(ctx context.Context, owner string, incoming *alert.Alert, stamp, prior provider.ManagedStamp, restore bool, validate func() error) error {
+	if incoming == nil || incoming.ManualEpisode == "" || owner != incoming.ActionOwner() || stamp.Generation < 1 || incoming.ManualStamp != stamp.Digest {
+		return errors.New("invalid manual publication")
+	}
+	return a.applyOrdered(ctx, owner, incoming, stamp, &prior, restore, validate)
+}
+
+func (a *Alerts) applyOrdered(ctx context.Context, owner string, incoming *alert.Alert, stamp provider.ManagedStamp, manualPrior *provider.ManagedStamp, restore bool, validate func() error) error {
 	stream := a.handoff.Load()
 	if stream == nil || owner == "" || validate == nil {
 		return errors.New("managed provider unavailable")
@@ -101,6 +115,40 @@ func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert
 	if incoming != nil && incoming.StartsAt.After(now) {
 		return errors.New("managed start is ahead of native clock")
 	}
+	if manualPrior != nil {
+		applied, exists := a.stamps[owner]
+		if exists && applied == stamp {
+			current, err := a.alerts.Get(incoming.Fingerprint())
+			if err != nil && incoming.ManualTerminal && a.owners[incoming.Fingerprint()] == owner && a.variants[owner][incoming.Fingerprint()] {
+				// The exact stored terminal stamp survives normal resolved GC.
+				return validate()
+			}
+			if err != nil || a.owners[incoming.Fingerprint()] != owner || current.ManualStamp != stamp.Digest ||
+				current.ManualTerminal != incoming.ManualTerminal || !current.StartsAt.Equal(incoming.StartsAt) || !current.EndsAt.Equal(incoming.EndsAt) || !current.Labels.Equal(incoming.Labels) || !current.Annotations.Equal(incoming.Annotations) {
+				return errors.New("manual publication resident mismatch")
+			}
+			return validate()
+		}
+		if restore && exists || !restore && applied != *manualPrior || !restore && exists && stamp.Generation != applied.Generation+1 {
+			return errors.New("manual publication predecessor mismatch")
+		}
+		if exists {
+			found := false
+			for fp, active := range a.variants[owner] {
+				if !active {
+					continue
+				}
+				old, err := a.alerts.Get(fp)
+				if err != nil || a.owners[fp] != owner || old.ManualStamp != applied.Digest || old.ManualTerminal {
+					return errors.New("manual predecessor unavailable")
+				}
+				found = true
+			}
+			if !found {
+				return errors.New("manual predecessor missing")
+			}
+		}
+	}
 	var changes []*alert.Alert
 	size := 0
 	existing := make(map[model.Fingerprint]bool)
@@ -109,7 +157,7 @@ func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert
 			continue
 		}
 		old, err := a.alerts.Get(fp)
-		if err != nil || old.Labels["alert_type"] != "problem" || old.ResolvedAt(now) {
+		if err != nil || manualPrior == nil && (old.Labels["alert_type"] != "problem" || old.ResolvedAt(now)) || manualPrior != nil && !a.variants[owner][fp] {
 			continue
 		}
 		if old.StartsAt.After(now) {
@@ -118,6 +166,7 @@ func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert
 		retired := *old
 		retired.Labels, retired.Annotations = old.Labels.Clone(), old.Annotations.Clone()
 		retired.EndsAt, retired.UpdatedAt, retired.Timeout = now, now, false
+		retired.ManualTerminal = manualPrior != nil
 		retired.EndTimeSource = alert.EndTimeSourceSender
 		changes = append(changes, &retired)
 		size += managedSize(&retired)
@@ -129,7 +178,7 @@ func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert
 	if incoming != nil {
 		copy := *incoming
 		copy.Labels, copy.Annotations = incoming.Labels.Clone(), incoming.Annotations.Clone()
-		copy.ManagedReceiver = true
+		copy.ManagedReceiver = manualPrior == nil
 		incoming = &copy
 		fp := incoming.Fingerprint()
 		if _, tracked := a.variants[owner][fp]; !tracked && len(a.variants[owner]) >= maxManagedBatchItems {
@@ -184,6 +233,9 @@ func (a *Alerts) ApplyManaged(ctx context.Context, owner string, incoming *alert
 	if len(refs) == 0 {
 		delete(a.variants, owner)
 	}
+	if a.actionObserver != nil {
+		a.actionObserver(owner, incoming, incoming == nil)
+	}
 	metadata := map[string]string{}
 	a.propagator.Inject(ctx, propagation.MapCarrier(metadata))
 	messages := make([]*provider.Alert, 0, len(changes))
@@ -208,6 +260,30 @@ func (a *Alerts) ManagedApplied(owner string) (provider.ManagedStamp, bool) {
 	defer a.mtx.Unlock()
 	stamp, ok := a.stamps[owner]
 	return stamp, ok
+}
+
+// FinalizeManual releases a terminal tombstone after its SQL commit and native GC, in either order.
+func (a *Alerts) FinalizeManual(owner string, stamp provider.ManagedStamp) {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	if a.stamps[owner] != stamp {
+		return
+	}
+	a.manualFinal[owner] = true
+	for fp, current := range a.variants[owner] {
+		if current {
+			if _, err := a.alerts.Get(fp); err == nil {
+				return
+			}
+			delete(a.owners, fp)
+			delete(a.variants[owner], fp)
+		}
+	}
+	if len(a.variants[owner]) == 0 {
+		delete(a.variants, owner)
+	}
+	delete(a.manualFinal, owner)
+	delete(a.stamps, owner)
 }
 
 // ReleaseManaged drops the stale generation only after SQL archived the close.

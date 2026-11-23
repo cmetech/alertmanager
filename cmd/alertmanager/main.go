@@ -52,6 +52,12 @@ func run() int {
 		configFile                  = kingpin.Flag("config.file", "Alertmanager configuration file name.").Default("alertmanager.yml").String()
 		dataDir                     = kingpin.Flag("storage.path", "Base path for data storage.").Default("data/").String()
 		oscarConversionKeys         = kingpin.Flag("oscar.conversion-ingress-key", "Confined producer/key-id:secret-file admission binding; repeat for each actor.").Strings()
+		actionEnabled               = kingpin.Flag("oscar.native-actions", "Enable the version-gated native action owner.").Bool()
+		actionScheme                = kingpin.Flag("oscar.action-store-scheme", "Internal transport to the native action journal.").Default("https").Enum("http", "https")
+		actionCA                    = kingpin.Flag("oscar.action-store-ca-file", "CA of the private action journal.").String()
+		actionKey                   = kingpin.Flag("oscar.action-owner-key-file", "Private action journal credential.").String()
+		actionOperator              = kingpin.Flag("oscar.action-operator-key-file", "Middleware operator assertion verification key.").String()
+		actionPolicy                = kingpin.Flag("oscar.action-policy-key-file", "Middleware policy assertion verification key.").String()
 		managedOwnerScheme          = kingpin.Flag("oscar.managed-owner-scheme", "Configured internal transport to the private managed receiver owner.").Default("https").Enum("http", "https")
 		managedOwnerCA              = kingpin.Flag("oscar.managed-owner-ca-file", "CA of the private managed receiver owner.").String()
 		managedOwnerKey             = kingpin.Flag("oscar.managed-owner-key-file", "Distinct managed receiver owner credential.").String()
@@ -263,6 +269,7 @@ func run() int {
 		ConnectSendMaxBytes:        *connectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: *connectMaxRequestBodyBytes,
 		SilenceMutationKey:         oscarSilenceKey,
+		ActionOwner:                api.ActionOwnerConfig{Enabled: *actionEnabled, Scheme: *actionScheme, CAFile: *actionCA, StoreKeyFile: *actionKey, OperatorKeyFile: *actionOperator, PolicyKeyFile: *actionPolicy},
 		ManagedOwnerScheme:         *managedOwnerScheme,
 		ManagedOwnerCA:             *managedOwnerCA, ManagedOwnerKeyFile: *managedOwnerKey,
 		ConversionAdmissionKeys: conversionKeys,

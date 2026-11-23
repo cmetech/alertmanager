@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,12 +46,13 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/provider/mem"
 type Alerts struct {
 	cancel context.CancelFunc
 
-	mtx      sync.Mutex
-	stamps   map[string]provider.ManagedStamp
-	handoff  atomic.Pointer[orderedHandoff]
-	shutdown <-chan struct{}
-	owners   map[model.Fingerprint]string
-	variants map[string]map[model.Fingerprint]bool
+	mtx         sync.Mutex
+	stamps      map[string]provider.ManagedStamp
+	manualFinal map[string]bool
+	handoff     atomic.Pointer[orderedHandoff]
+	shutdown    <-chan struct{}
+	owners      map[model.Fingerprint]string
+	variants    map[string]map[model.Fingerprint]bool
 
 	alerts *store.Alerts
 
@@ -58,6 +60,7 @@ type Alerts struct {
 	next      int
 
 	callback                               AlertStoreCallback
+	actionObserver                         func(string, *alert.Alert, bool)
 	observer                               StateObserver
 	heartbeatProbe                         atomic.Bool
 	putWait, putHold, gcHold, snapshotHold prometheus.Histogram
@@ -85,6 +88,56 @@ func (a *Alerts) SetStateObserver(observer StateObserver) {
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	a.observer = observer
+}
+
+// SetActionObserver installs the bounded in-memory lifecycle handoff before serving.
+// The observer must never wait for persistence or acquire a lock across I/O.
+func (a *Alerts) SetActionObserver(fn func(string, *alert.Alert, bool)) {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	a.actionObserver = fn
+	if fn != nil {
+		// Installation normally precedes ingestion. Embedded providers may
+		// already contain residents; replay only their current owner variant.
+		for _, s := range a.alerts.List() {
+			fp := s.Fingerprint()
+			owner := a.owners[fp]
+			if owner == "" || a.variants[owner][fp] {
+				fn(owner, s, false)
+			}
+		}
+	}
+}
+
+// ReadActionSource hands a current, provider-owned member to a bounded local reader.
+// A managed replacement may have a new fingerprint. Its applied owner key selects it.
+func (a *Alerts) ReadActionSource(owner, fingerprint string, read func(*alert.Alert)) {
+	a.mtx.Lock()
+	defer a.mtx.Unlock()
+	n, err := strconv.ParseUint(fingerprint, 16, 64)
+	if err != nil {
+		return
+	}
+	fp := model.Fingerprint(n)
+	if owner != "" {
+		found := false
+		for candidate, current := range a.variants[owner] {
+			if current {
+				fp = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return
+		}
+	}
+	if a.owners[fp] != owner {
+		return
+	}
+	if source, err := a.alerts.Get(fp); err == nil {
+		read(source)
+	}
 }
 
 // SnapshotWithSequence captures one owned copy and its sequence atomically.
@@ -288,7 +341,16 @@ func (a *Alerts) gcAlerts() []*alert.Alert {
 	deleted := a.alerts.GC()
 	for _, old := range deleted {
 		fp := old.Fingerprint()
-		if owner := a.owners[fp]; owner != "" && !a.variants[owner][fp] {
+		owner := a.owners[fp]
+		if a.actionObserver != nil && (owner == "" || a.variants[owner][fp]) {
+			a.actionObserver(owner, old, true)
+		}
+		if a.manualFinal[owner] && a.variants[owner][fp] && old.ManualTerminal {
+			delete(a.stamps, owner)
+			delete(a.manualFinal, owner)
+			a.variants[owner][fp] = false
+		}
+		if owner != "" && !a.variants[owner][fp] {
 			delete(a.owners, fp)
 			delete(a.variants[owner], fp)
 			if len(a.variants[owner]) == 0 {
@@ -489,6 +551,9 @@ func (a *Alerts) putLocked(ctx context.Context, messages *[]*provider.Alert, ale
 			continue
 		}
 
+		if a.actionObserver != nil {
+			a.actionObserver("", alrt, false)
+		}
 		a.callback.PostStore(alrt, existing)
 		if a.observer != nil {
 			a.observer.Upserted(alrt)
