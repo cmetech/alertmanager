@@ -1565,7 +1565,9 @@ func TestOscarActionPublishedFiringClosesOnDueWireBeforeGC(t *testing.T) {
 			t.Cleanup(func() { _ = r.stop() })
 			cfg, integration, key := transitionWebhook(t, r, sink, canonical)
 			now := time.Now()
-			s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Second)}, now, false)
+			// StartsAt+group_wait (1h) stays in the future so the dispatcher
+			// does not flush the group itself alongside the manual flush below.
+			s := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(-time.Second)}, now, false)
 			wire := s.NotificationCopy(now)
 			firing := restoredFixture(t, s)
 			firing.Floor = ""
