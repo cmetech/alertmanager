@@ -126,7 +126,7 @@ func (n *Notifier) Notify(ctx context.Context, as ...*alert.Alert) notify.Notify
 	}
 	parameters := url.Values{"corpsecret": {tmpl(apiSecret)}, "corpid": {tmpl(string(n.conf.CorpID))}}
 	if tmplErr != nil {
-		return notify.Unrecoverable(tmplErr, notify.TemplateErrorReason)
+		return notify.Unrecoverable(fmt.Errorf("templating error: %w", tmplErr), notify.TemplateErrorReason)
 	}
 	if !notify.PreparedHTTPDestination(ctx, n.client, n.conf.APIURL.String(), parameters.Get("corpid"), parameters.Get("corpsecret"), msg.AgentID, msg.ToUser, msg.ToParty, msg.Totag) {
 		return notify.Unrecoverable(notify.ErrDestination, notify.DefaultReason)
