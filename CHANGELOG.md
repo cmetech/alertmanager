@@ -1,3 +1,10 @@
+## Unreleased — Route policy escalations on the effective severity
+
+- The native policy command accepts an empty destination scope for escalation. Pending destinations
+  can renew under the original operation while entered siblings retain their original provider token.
+- Pair native source `e92c1dc1` with OSCAR source `d1491edcb` before commissioning. The v1
+  wire schema and generated artifacts remain compatible. Operator qualification is UNRUN.
+
 ## Unreleased — Source severity for Active Alerts
 
 - The version 2 Active Alerts page includes an optional source severity map for selected alerts whose effective severity is higher. Matching and sorting use the existing effective view.
