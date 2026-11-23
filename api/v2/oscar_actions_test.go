@@ -289,3 +289,17 @@ func TestServedActionSchemaZeroBounds(t *testing.T) {
 		require.False(t, property.ExclusiveMinimum, "%s.%s", model, field)
 	}
 }
+
+func TestPolicyEscalationAdmitsNormalRoutingScope(t *testing.T) {
+	t.Parallel()
+	var req ActionRequestV1
+	require.True(t, decodeAction([]byte(actionBody), &req))
+	req.Actor = ActionActor{Kind: "policy", ID: "resend-policy"}
+	req.PolicyBinding = &PolicyBinding{BindingID: req.OperationID, RevisionID: req.EpisodeRef.EpisodeID}
+	req.TargetScope = []ScopeEntry{}
+	sev := "critical"
+	req.Kind, req.TargetSeverity = "escalate", &sev
+	require.True(t, validAction(req))
+	req.Kind, req.TargetSeverity = "resend", nil
+	require.False(t, validAction(req))
+}

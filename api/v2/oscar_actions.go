@@ -157,7 +157,7 @@ func validAction(req ActionRequestV1) bool {
 	if (req.PolicyBinding != nil) != (req.Actor.Kind == "policy") || req.Actor.Kind != "policy" && req.Actor.Kind != "operator" {
 		return false
 	}
-	if b := req.PolicyBinding; b != nil && (!managedUUID.MatchString(b.BindingID) || !managedUUID.MatchString(b.RevisionID) || len(req.TargetScope) == 0 || !dispatchKind(req.Kind)) {
+	if b := req.PolicyBinding; b != nil && (!managedUUID.MatchString(b.BindingID) || !managedUUID.MatchString(b.RevisionID) || req.Kind == "resend" && len(req.TargetScope) == 0 || !dispatchKind(req.Kind)) {
 		return false
 	}
 	seen := map[[3]string]bool{}

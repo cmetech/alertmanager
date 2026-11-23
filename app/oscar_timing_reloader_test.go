@@ -1762,3 +1762,47 @@ func TestOscarTerminalCohortPreparedSubsetAfterAdmissionRace(t *testing.T) {
 		})
 	}
 }
+
+func TestOscarEscalationRoutesCriticalOnlyToB(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load(`route:
+  receiver: A
+  routes:
+  - receiver: B
+    matchers: ['severity="critical"']
+receivers:
+- name: A
+  webhook_configs: [{url: 'http://a.invalid'}]
+- name: B
+  webhook_configs: [{url: 'http://b.invalid'}]
+`)
+	require.NoError(t, err)
+	r := newTestReloader(t)
+	t.Cleanup(func() { _ = r.stop() })
+	a := newNativeActions(nil, nil, r.logger)
+	a.version, r.actions = 1, a
+	now := time.Now()
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
+	p := transportProjection(t, source, "22222222-2222-4222-8222-222222222222", "firing")
+	require.NoError(t, a.Bind(&terminalFixtureJournal{projections: map[*alert.Alert]v2.EpisodeProjection{source: p}}))
+	require.NoError(t, r.reload(cfg))
+	req := v2.ActionRequestV1{Kind: "escalate", TargetScope: []v2.ScopeEntry{}}
+	src, _, err := a.Plan(t.Context(), source, p, req)
+	require.NoError(t, err)
+	require.Len(t, src, 1)
+	require.Equal(t, "A", src[0].ReceiverID)
+	p.PreviousEffective, p.Floor = "major", "critical"
+	p.SeverityRevision++
+	dst, reason, err := a.Plan(t.Context(), source, p, req)
+	require.NoError(t, err)
+	require.Empty(t, reason)
+	require.Len(t, dst, 1)
+	require.Equal(t, "B", dst[0].ReceiverID)
+	require.Empty(t, dst[0].Scope)
+	require.Equal(t, model.LabelValue("major"), source.Labels["severity"])
+	req.Kind, req.TargetScope = "resend", []v2.ScopeEntry{{ReceiverID: "A"}}
+	dst, reason, err = a.Plan(t.Context(), source, p, req)
+	require.NoError(t, err)
+	require.Empty(t, dst)
+	require.Equal(t, "NATIVE_SUPPRESSED", reason)
+}

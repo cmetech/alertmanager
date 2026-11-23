@@ -1298,7 +1298,7 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	}
 	var targets []DispatchTarget
 	reason := ""
-	if dispatchKind(req.Kind) && req.PolicyBinding == nil && i != nil && i.Intent != nil && i.Intent.State == "accepted" && len(i.Result.Targets) > 0 {
+	if dispatchKind(req.Kind) && (req.PolicyBinding == nil || req.Kind == "escalate") && i != nil && i.Intent != nil && i.Intent.State == "accepted" && len(i.Result.Targets) > 0 {
 		// A renewed operation keeps every frozen target. One currently eligible
 		// pending target can make progress; every entry revalidates its own target.
 		eligible := false
@@ -1430,10 +1430,11 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if err = o.publish(ctx, s, p); err != nil {
 		return ActionResultV1{}, err
 	}
-	if r.State == "accepted" && (r.PermitExpiresAt == nil || !o.localDeadline(*r.PermitExpiresAt).After(time.Now())) {
+	pending := slices.ContainsFunc(r.Targets, func(t TargetResult) bool { return t.State == "pending" && t.SuccessorID == nil })
+	if (r.State == "accepted" || pending) && (r.PermitExpiresAt == nil || !o.localDeadline(*r.PermitExpiresAt).After(time.Now())) {
 		return ActionResultV1{}, actionError{409, "NATIVE_PERMIT_EXPIRED"}
 	}
-	if r.State == "accepted" && len(r.Targets) > 0 {
+	if pending {
 		if err = o.dispatch.Wake(ctx, req.OperationID); err != nil {
 			return ActionResultV1{}, err
 		}
