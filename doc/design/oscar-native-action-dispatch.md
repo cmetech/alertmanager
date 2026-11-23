@@ -18,7 +18,8 @@ operation has its own original token and 30-second permit. The native pipeline
 sends the retained group in its original order and settles the original tokens
 in bounded chunks. A lost admission reply permits only an indexed lookup of the
 original IDs. Entered or unknown coverage holds that member. Direct groups of
-tracked members use the cohort marker independently of B2. Untracked direct
+tracked members use the cohort marker independently of B2, including a group
+with a single tracked member. Untracked direct
 members use local entry passes. At provider entry the resident must still have
 the exact negative classification, issuing epoch and original pass token.
 

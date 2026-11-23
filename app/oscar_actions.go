@@ -733,7 +733,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		ctx = context.WithValue(notify.ForMembers(ctx, candidates), batchDestinationKey{}, &batchDestination{config: i.digest, members: candidates})
 		cohort, canBatch := a.journal.(v2.OrdinaryCohortJournal)
 		var requests []v2.OrdinaryCandidate
-		planTogether := canBatch && (i.canonical && g.callbackCommissioned() || !i.canonical && len(candidates) > 1)
+		planTogether := canBatch && (i.canonical && g.callbackCommissioned() || !i.canonical)
 		if planTogether {
 			// Finish enrollment/routing for the complete physical group before
 			// asking the authority for any finite entry permit.
