@@ -149,7 +149,6 @@ func (i *Integration) Notify(ctx context.Context, alerts ...*alert.Alert) (verdi
 		span.SetAttributes(attribute.Bool("alerting.notify.error.recoverable", verdict.ShouldRetry()))
 		if err := verdict.Err(); err != nil {
 			if CurrentProviderEntry(ctx) != nil {
-				err = errors.New("native provider notification failed")
 				verdict = Unrecoverable(err, verdict.Reason())
 			}
 			i.recordFailure(span, verdict.Reason(), err)
