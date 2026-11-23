@@ -621,6 +621,10 @@ func TestOverflowGCAndDeferredRecoveryAtCapacity(t *testing.T) {
 				*out.(*[]EpisodeProjection) = rows
 				return nil
 			}
+			if args["projection"] == "terminal" {
+				*out.(*[]EpisodeProjection) = []EpisodeProjection{}
+				return nil
+			}
 			require.Equal(t, "source", args["projection"])
 			require.Equal(t, fp, args["fingerprint"])
 			*out.(*[]EpisodeProjection) = []EpisodeProjection{p}
