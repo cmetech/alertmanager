@@ -250,6 +250,9 @@ func init() {
             "$ref": "#/parameters/oscarActionSignature"
           },
           {
+            "$ref": "#/parameters/oscarActionScope"
+          },
+          {
             "type": "string",
             "description": "Signed recovery directive required only for a freshly fenced policy recovery submission.",
             "name": "X-Oscar-Action-Recovery",
@@ -304,6 +307,75 @@ func init() {
         }
       }
     },
+    "/oscar/actions/contact-check": {
+      "post": {
+        "description": "Private owner check for one frozen human worker contact. Performs no admission or settlement.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "checkOscarActionContact",
+        "parameters": [
+          {
+            "$ref": "#/parameters/oscarActionSender"
+          },
+          {
+            "$ref": "#/parameters/oscarActionKeyId"
+          },
+          {
+            "$ref": "#/parameters/oscarActionTime"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSubject"
+          },
+          {
+            "$ref": "#/parameters/oscarActionGrant"
+          },
+          {
+            "$ref": "#/parameters/oscarActionSignature"
+          },
+          {
+            "$ref": "#/parameters/oscarActionScope"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarContactCheck"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact authorized request bytes including fresh nonce",
+            "schema": {
+              "$ref": "#/definitions/oscarContactCheck"
+            },
+            "headers": {
+              "X-Oscar-Contact-Response": {
+                "type": "string",
+                "description": "Operator HMAC over purpose, request signature and exact response digest"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid contact binding"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Contact permission denied"
+          },
+          "409": {
+            "description": "Changed or unavailable contact"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
     "/oscar/actions/eligibility": {
       "post": {
         "description": "Evaluate current eligibility without issuing a permit. Requires an exact-body Middleware action assertion.",
@@ -329,6 +401,9 @@ func init() {
           },
           {
             "$ref": "#/parameters/oscarActionSignature"
+          },
+          {
+            "$ref": "#/parameters/oscarActionScope"
           },
           {
             "name": "body",
@@ -398,6 +473,9 @@ func init() {
           },
           {
             "$ref": "#/parameters/oscarActionSignature"
+          },
+          {
+            "$ref": "#/parameters/oscarActionScope"
           },
           {
             "type": "string",
@@ -1535,6 +1613,47 @@ func init() {
         }
       }
     },
+    "oscarContactCheck": {
+      "type": "object",
+      "required": [
+        "nonce",
+        "operation_id",
+        "command_digest",
+        "episode_ref",
+        "severity_revision",
+        "target_key",
+        "effect_digest"
+      ],
+      "properties": {
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "effect_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "severity_revision": {
+          "type": "integer"
+        },
+        "target_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
     "oscarDispatchTarget": {
       "type": "object",
       "required": [
@@ -1945,6 +2064,12 @@ func init() {
       "in": "header",
       "required": true
     },
+    "oscarActionScope": {
+      "type": "string",
+      "description": "Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.",
+      "name": "X-Oscar-Action-Scope",
+      "in": "header"
+    },
     "oscarActionSender": {
       "type": "string",
       "name": "X-Oscar-Action-Sender",
@@ -2283,6 +2408,12 @@ func init() {
           },
           {
             "type": "string",
+            "description": "Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.",
+            "name": "X-Oscar-Action-Scope",
+            "in": "header"
+          },
+          {
+            "type": "string",
             "description": "Signed recovery directive required only for a freshly fenced policy recovery submission.",
             "name": "X-Oscar-Action-Recovery",
             "in": "header"
@@ -2336,6 +2467,96 @@ func init() {
         }
       }
     },
+    "/oscar/actions/contact-check": {
+      "post": {
+        "description": "Private owner check for one frozen human worker contact. Performs no admission or settlement.",
+        "tags": [
+          "alert"
+        ],
+        "operationId": "checkOscarActionContact",
+        "parameters": [
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Sender",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Key-Id",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Time",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Subject",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Grant",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "name": "X-Oscar-Action-Signature",
+            "in": "header",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.",
+            "name": "X-Oscar-Action-Scope",
+            "in": "header"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/oscarContactCheck"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact authorized request bytes including fresh nonce",
+            "schema": {
+              "$ref": "#/definitions/oscarContactCheck"
+            },
+            "headers": {
+              "X-Oscar-Contact-Response": {
+                "type": "string",
+                "description": "Operator HMAC over purpose, request signature and exact response digest"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid contact binding"
+          },
+          "401": {
+            "description": "Invalid action assertion"
+          },
+          "403": {
+            "description": "Contact permission denied"
+          },
+          "409": {
+            "description": "Changed or unavailable contact"
+          },
+          "503": {
+            "description": "Native authority unavailable"
+          }
+        }
+      }
+    },
     "/oscar/actions/eligibility": {
       "post": {
         "description": "Evaluate current eligibility without issuing a permit. Requires an exact-body Middleware action assertion.",
@@ -2379,6 +2600,12 @@ func init() {
             "name": "X-Oscar-Action-Signature",
             "in": "header",
             "required": true
+          },
+          {
+            "type": "string",
+            "description": "Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.",
+            "name": "X-Oscar-Action-Scope",
+            "in": "header"
           },
           {
             "name": "body",
@@ -2466,6 +2693,12 @@ func init() {
             "name": "X-Oscar-Action-Signature",
             "in": "header",
             "required": true
+          },
+          {
+            "type": "string",
+            "description": "Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.",
+            "name": "X-Oscar-Action-Scope",
+            "in": "header"
           },
           {
             "type": "string",
@@ -3704,6 +3937,48 @@ func init() {
         }
       }
     },
+    "oscarContactCheck": {
+      "type": "object",
+      "required": [
+        "nonce",
+        "operation_id",
+        "command_digest",
+        "episode_ref",
+        "severity_revision",
+        "target_key",
+        "effect_digest"
+      ],
+      "properties": {
+        "command_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "effect_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "episode_ref": {
+          "$ref": "#/definitions/oscarEpisodeRef"
+        },
+        "nonce": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "severity_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target_key": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
     "oscarDispatchTarget": {
       "type": "object",
       "required": [
@@ -4091,6 +4366,12 @@ func init() {
       "name": "X-Oscar-Action-Key-Id",
       "in": "header",
       "required": true
+    },
+    "oscarActionScope": {
+      "type": "string",
+      "description": "Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.",
+      "name": "X-Oscar-Action-Scope",
+      "in": "header"
     },
     "oscarActionSender": {
       "type": "string",

@@ -66,6 +66,11 @@ type ExecuteOscarActionParams struct {
 	*/
 	XOscarActionRecovery *string
 
+	/*Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.
+	  In: header
+	*/
+	XOscarActionScope *string
+
 	/*
 	  Required: true
 	  In: header
@@ -115,6 +120,10 @@ func (o *ExecuteOscarActionParams) BindRequest(r *http.Request, route *middlewar
 	}
 
 	if err := o.bindXOscarActionRecovery(r.Header[http.CanonicalHeaderKey("X-Oscar-Action-Recovery")], true, route.Formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := o.bindXOscarActionScope(r.Header[http.CanonicalHeaderKey("X-Oscar-Action-Scope")], true, route.Formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -222,6 +231,23 @@ func (o *ExecuteOscarActionParams) bindXOscarActionRecovery(rawData []string, ha
 		return nil
 	}
 	o.XOscarActionRecovery = &raw
+
+	return nil
+}
+
+// bindXOscarActionScope binds and validates parameter XOscarActionScope from header.
+func (o *ExecuteOscarActionParams) bindXOscarActionScope(rawData []string, hasKey bool, formats strfmt.Registry) error {
+	var raw string
+	if len(rawData) > 0 {
+		raw = rawData[len(rawData)-1]
+	}
+
+	// Required: false
+
+	if raw == "" { // empty values pass all other validations
+		return nil
+	}
+	o.XOscarActionScope = &raw
 
 	return nil
 }

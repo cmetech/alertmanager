@@ -57,6 +57,13 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 
 	api.JSONProducer = runtime.JSONProducer()
 
+	if api.AlertCheckOscarActionContactHandler == nil {
+		api.AlertCheckOscarActionContactHandler = alert.CheckOscarActionContactHandlerFunc(func(params alert.CheckOscarActionContactParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.CheckOscarActionContact has not yet been implemented")
+		})
+	}
 	if api.SilenceDeleteSilenceHandler == nil {
 		api.SilenceDeleteSilenceHandler = silence.DeleteSilenceHandlerFunc(func(params silence.DeleteSilenceParams) middleware.Responder {
 			_ = params

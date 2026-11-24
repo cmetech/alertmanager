@@ -334,6 +334,58 @@ type ordinaryRequest struct {
 	SeverityRevision uint64               `json:"severity_revision"`
 }
 
+type contactCheck struct {
+	Nonce       string     `json:"nonce"`
+	OperationID string     `json:"operation_id"`
+	Digest      string     `json:"command_digest"`
+	Ref         EpisodeRef `json:"episode_ref"`
+	Revision    uint64     `json:"severity_revision"`
+	TargetKey   string     `json:"target_key"`
+	Effect      string     `json:"effect_digest"`
+}
+
+func (o *nativeActionOwner) checkContact(ctx context.Context, q contactCheck) error {
+	scope, _ := ctx.Value(operatorScopeKey{}).(*operatorScope)
+	if scope == nil || !managedUUID.MatchString(q.OperationID) || !managedHash.MatchString(q.Digest) || !managedHash.MatchString(q.Effect) || !managedHash.MatchString(q.TargetKey) {
+		return unverified
+	}
+	ctx = o.withEpoch(ctx)
+	i, err := o.intent(ctx, q.OperationID)
+	if err != nil {
+		return err
+	}
+	var req ActionRequestV1
+	if i == nil || i.Digest != q.Digest || !decodeAction(i.Request, &req) || !validAction(req) || req.Actor.Kind != "operator" || req.Actor.ID != scope.subject || req.OperationID != q.OperationID || req.EpisodeRef != q.Ref || i.Result.EpisodeRef != q.Ref || i.Result.SeverityRevision != q.Revision {
+		return unverified
+	}
+	digest, err := actionDigest(req)
+	if err != nil || digest != q.Digest {
+		return unverified
+	}
+	index := slices.IndexFunc(i.Result.Targets, func(t TargetResult) bool {
+		return t.TargetKey == q.TargetKey && t.SuccessorID == nil && (t.State == "confirmed" || t.State == "unknown")
+	})
+	if index < 0 {
+		return unverified
+	}
+	target := i.Result.Targets[index].Target
+	s, err := o.residentEpisode(ctx, q.Ref)
+	if err != nil {
+		return err
+	}
+	s.turn.Lock()
+	defer s.turn.Unlock()
+	p, source := s.projection, s.latest()
+	if s.uncertain || p.SeverityRevision != q.Revision || o.verifySource(ctx, source, p.State) != nil {
+		return unverified
+	}
+	candidates, reason, err := o.dispatch.Plan(WithPersistedTarget(ctx, target), source, p, req)
+	if err != nil || reason != "" || !slices.ContainsFunc(candidates, func(now DispatchTarget) bool { return reflect.DeepEqual(target, now) }) {
+		return reconcile
+	}
+	return o.checkOperator(scope, s, q.Ref, p, source, req.Kind)
+}
+
 func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, error) {
 	ctx = o.withEpoch(ctx)
 	if !o.ready() {
@@ -363,6 +415,13 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 		req = ActionRequestV1{Kind: "ordinary", EpisodeRef: r.EpisodeRef, TargetScope: ordinary.Target.Scope}
 	} else if !decodeAction(i.Request, &req) || !validAction(req) {
 		return nil, reconcile
+	}
+	var scope *operatorScope
+	if req.Actor.Kind == "operator" {
+		scope, err = o.recoveryScope(ctx, i, req)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s, err := o.residentEpisode(ctx, r.EpisodeRef)
 	if err != nil {
@@ -414,6 +473,11 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	args := map[string]any{"operation_id": id, "target_key": key}
 	if proof, ok := ctx.Value(callbackProvenanceKey{}).(*CallbackProvenance); ok {
 		args["callback"] = proof
+	}
+	if scope != nil {
+		if err = o.checkOperator(scope, s, req.EpisodeRef, p, source, req.Kind); err != nil {
+			return nil, err
+		}
 	}
 	if err = o.write(ctx, "claim-target", args, &entry); err != nil {
 		// A response arriving after the local cutoff may still contain our original token.

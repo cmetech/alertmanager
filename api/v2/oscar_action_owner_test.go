@@ -51,25 +51,50 @@ func (testActionDispatch) Plan(context.Context, *alert.Alert, EpisodeProjection,
 func (testActionDispatch) Publish(context.Context, EpisodeProjection) error { return nil }
 func (testActionDispatch) Wake(context.Context, string) error               { return nil }
 
+func operatorTestContext(ctx context.Context, req ActionRequestV1) context.Context {
+	all := &pageScope{unrestricted: true}
+	return context.WithValue(ctx, operatorScopeKey{}, &operatorScope{nil, req.Actor.ID, time.Now().Unix() + 15, all, map[string]*pageScope{req.Kind: all}})
+}
+
 func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 	t.Parallel()
-	for _, failure := range []string{"reserve", "commit", "resolve-during-commit", "expired-permit", "expired-sibling-permit", "operation-conflict"} {
+	for _, failure := range []string{"reserve", "commit", "resolve-during-commit", "expired-permit", "expired-sibling-permit", "operation-conflict", "policy-read-deny", "policy-action-deny", "replace-before-decision", "expire-before-decision", "closed-before-decision"} {
 		t.Run(failure, func(t *testing.T) {
 			var req ActionRequestV1
 			require.NoError(t, json.Unmarshal([]byte(actionBody), &req))
 			source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: time.Now().Add(-time.Minute), EndsAt: time.Now().Add(time.Hour)}, time.Now(), false)
+			liveSource := source
+			ctx := operatorTestContext(t.Context(), req)
 			var o *nativeActionOwner
 			var record *actionIntent
+			recoveryFailure := ""
 			var renewed bool
 			var writes int
 			rpc := actionRPCFunc(func(ctx context.Context, cmd string, p map[string]any, out any) error {
 				var value any
 				switch cmd {
+				case "recovery-authority":
+					if recoveryFailure == "outage" {
+						return unavailable
+					}
+					now := time.Now().Unix() + 15
+					policy := scopeWire{Unrestricted: true, Allow: []scopeGroup{}, Deny: []scopeGroup{}}
+					value = map[string]any{"challenge": map[string]any{"version": 1, "authority_id": req.EpisodeRef.AuthorityID, "operation_id": req.OperationID, "logical_id": record.LogicalActionID, "command_digest": record.Digest + recoveryFailure, "episode_ref": req.EpisodeRef, "kind": req.Kind, "actor_id": req.Actor.ID, "expires_at": now, "nonce": strings.Repeat("f", 32)}, "scope": map[string]any{"version": 1, "expires_at": now, "read": policy, "actions": map[string]scopeWire{req.Kind: policy}}}
 				case "lookup":
 					value = record
 				case "reserve":
 					writes++
-					record = &actionIntent{Digest: p["digest"].(string), Result: ActionResultV1{OperationID: req.OperationID, EpisodeRef: req.EpisodeRef, State: "held"}, Request: mustRaw(t, req)}
+					switch failure {
+					case "replace-before-decision", "closed-before-decision":
+						replacement := *source
+						if failure == "closed-before-decision" {
+							replacement.EndsAt = time.Now().Add(-time.Second)
+						}
+						liveSource = &replacement
+					case "expire-before-decision":
+						ctx.Value(operatorScopeKey{}).(*operatorScope).expires = time.Now().Unix()
+					}
+					record = &actionIntent{LogicalActionID: req.OperationID, Digest: p["digest"].(string), Result: ActionResultV1{OperationID: req.OperationID, EpisodeRef: req.EpisodeRef, State: "held"}, Request: mustRaw(t, req)}
 					if failure == "operation-conflict" {
 						record.Digest = strings.Repeat("0", 64)
 					}
@@ -90,6 +115,13 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 					if failure == "resolve-during-commit" {
 						other := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "other"}, StartsAt: source.StartsAt, EndsAt: source.EndsAt}, source.UpdatedAt, false)
 						o.observe("", other, false)
+						o.readSource = func(owner, fp string, fn func(*alert.Alert)) {
+							if fp == other.Fingerprint().String() {
+								fn(other)
+							} else {
+								fn(source)
+							}
+						}
 						_, err := o.Project(ctx, other)
 						require.NoError(t, err)
 						closed := *source
@@ -128,20 +160,43 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 			proj, err := o.Project(t.Context(), source)
 			require.NoError(t, err)
 			req.EpisodeRef = proj.EpisodeRef
-			_, err = o.Execute(t.Context(), req)
+			o.readSource = func(owner, fp string, fn func(*alert.Alert)) { fn(liveSource) }
+			ctx = operatorTestContext(t.Context(), req)
+			switch failure {
+			case "policy-read-deny":
+				ctx.Value(operatorScopeKey{}).(*operatorScope).read = &pageScope{}
+			case "policy-action-deny":
+				ctx.Value(operatorScopeKey{}).(*operatorScope).actions[req.Kind] = &pageScope{}
+			}
+			_, err = o.Execute(ctx, req)
+			switch failure {
+			case "policy-read-deny", "policy-action-deny":
+				require.Error(t, err)
+				require.Zero(t, writes)
+				require.Nil(t, record)
+				return
+			case "replace-before-decision", "expire-before-decision", "closed-before-decision":
+				require.Error(t, err)
+				require.Equal(t, 1, writes)
+				require.Nil(t, record.Intent)
+				require.Nil(t, record.Result.PermitExpiresAt)
+				return
+			}
 			if failure == "operation-conflict" {
 				require.ErrorIs(t, err, conflict)
 				return
 			}
 			if failure == "resolve-during-commit" {
 				require.ErrorIs(t, err, mismatch)
+				require.NotNil(t, record.Result.PermitExpiresAt)
+				require.Equal(t, "accepted", record.Intent.State)
 				return
 			}
 			require.NoError(t, err)
 			if failure == "expired-permit" {
 				expired := time.Now().Add(-time.Second)
 				record.Result.PermitExpiresAt = &expired
-				_, err = o.Execute(t.Context(), req)
+				_, err = o.Execute(operatorTestContext(t.Context(), req), req)
 				require.NoError(t, err)
 				require.True(t, renewed)
 			}
@@ -154,6 +209,13 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 					record.Result.Targets = append(record.Result.Targets, TargetResult{Target: dst, State: "pending"})
 				}
 				require.NoError(t, os.Remove(dynamicFile))
+				for _, fault := range []string{"outage", "substituted"} {
+					recoveryFailure = fault
+					require.Error(t, o.recoverWork(t.Context(), req.OperationID, map[string]bool{}))
+					require.False(t, renewed)
+					require.Equal(t, expired, *record.Result.PermitExpiresAt)
+				}
+				recoveryFailure = ""
 				err = o.recoverWork(t.Context(), req.OperationID, map[string]bool{})
 				require.Equal(t, frozen, record.Intent.Targets)
 				require.NoError(t, err)
@@ -590,7 +652,8 @@ func TestFloorCommitFencesOutstandingEntryBeforeLostReply(t *testing.T) {
 	entry, err = o.Claim(t.Context(), oldID, key)
 	require.NoError(t, err)
 	require.True(t, entry.Valid())
-	_, err = o.Execute(t.Context(), req)
+	o.readSource = func(owner, fp string, fn func(*alert.Alert)) { fn(source) }
+	_, err = o.Execute(operatorTestContext(t.Context(), req), req)
 	require.Error(t, err)
 	require.False(t, entry.Valid())
 	_, err = o.Claim(t.Context(), oldID, key)
@@ -1479,6 +1542,35 @@ func TestFiringReserveRejectsFloorUpdateAfterInspection(t *testing.T) {
 	require.NotContains(t, commands, "reserve-coverage")
 }
 
+func TestOperatorLookupRechecksCurrentReadBeforeReturningReceipt(t *testing.T) {
+	var req ActionRequestV1
+	require.True(t, decodeAction([]byte(actionBody), &req))
+	src := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: time.Now(), EndsAt: time.Now().Add(time.Hour)}, time.Now(), false)
+	receipt := ActionResultV1{OperationID: req.OperationID, EpisodeRef: req.EpisodeRef, State: "confirmed", Targets: []TargetResult{{TargetKey: strings.Repeat("a", 64)}}}
+	o := newNativeActionOwner(req.EpisodeRef.AuthorityID, actionRPCFunc(func(_ context.Context, cmd string, p map[string]any, out any) error {
+		require.Equal(t, "lookup", cmd)
+		return json.Unmarshal(mustRaw(t, receipt), out)
+	}), testActionDispatch{})
+	o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
+	o.recovered = true
+	live := src
+	o.readSource = func(_, _ string, fn func(*alert.Alert)) { fn(live) }
+	o.byID[req.EpisodeRef.EpisodeID] = &episodeSlot{source: src, projection: EpisodeProjection{episodeUpdate: episodeUpdate{EpisodeRef: req.EpisodeRef, State: "firing", SourceSeverity: "major", NativeVariant: variantOf(src)}}}
+	ctx := operatorTestContext(t.Context(), req)
+	got, err := o.Lookup(ctx, req.OperationID)
+	require.NoError(t, err)
+	require.Equal(t, receipt, got)
+	ctx.Value(operatorScopeKey{}).(*operatorScope).read = &pageScope{}
+	got, err = o.Lookup(ctx, req.OperationID)
+	require.Error(t, err)
+	require.Empty(t, got)
+	replacement := *src
+	live = &replacement
+	got, err = o.Lookup(operatorTestContext(t.Context(), req), req.OperationID)
+	require.Error(t, err)
+	require.Empty(t, got)
+}
+
 func TestOperatorReplayReturnsAcceptedIntentNoEffectReceipts(t *testing.T) {
 	var req ActionRequestV1
 	require.True(t, decodeAction([]byte(actionBody), &req))
@@ -1501,7 +1593,12 @@ func TestOperatorReplayReturnsAcceptedIntentNoEffectReceipts(t *testing.T) {
 	o := newNativeActionOwner(req.EpisodeRef.AuthorityID, rpc, testActionDispatch{})
 	o.recovered = true
 	o.lease = actionLease{Epoch: 1, ExpiresAt: expiry}
-	got, err := o.Execute(t.Context(), req)
+	_, err = o.Execute(t.Context(), req)
+	require.Error(t, err)
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: time.Now(), EndsAt: expiry}, time.Now(), false)
+	o.readSource = func(owner, fp string, fn func(*alert.Alert)) { fn(source) }
+	o.byID[req.EpisodeRef.EpisodeID] = &episodeSlot{source: source, projection: EpisodeProjection{episodeUpdate: episodeUpdate{EpisodeRef: req.EpisodeRef, State: "firing", SourceSeverity: "major", NativeVariant: variantOf(source)}}}
+	got, err := o.Execute(operatorTestContext(t.Context(), req), req)
 	require.NoError(t, err)
 	require.Equal(t, receipt, got)
 }
@@ -2164,4 +2261,38 @@ func TestScheduledOwnerSlotsSurviveCallerTimeout(t *testing.T) {
 	expired := context.WithValue(t.Context(), policyAssertionKey{}, policyAssertion{ExpiresAt: time.Now().Add(-time.Second)})
 	_, err = owner.Execute(expired, req)
 	require.Equal(t, actionError{403, "POLICY_ASSERTION_EXPIRED"}, err)
+}
+
+func TestContactChecksCurrentSourceAndPersistedTarget(t *testing.T) {
+	var req ActionRequestV1
+	require.True(t, decodeAction([]byte(actionBody), &req))
+	req.Kind = "resend"
+	digest, err := actionDigest(req)
+	require.NoError(t, err)
+	key := strings.Repeat("a", 64)
+	target := DispatchTarget{ReceiverID: "ops"}
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: time.Now(), EndsAt: time.Now().Add(time.Hour)}, time.Now(), false)
+	receipt := ActionResultV1{OperationID: req.OperationID, EpisodeRef: req.EpisodeRef, SeverityRevision: 1,
+		Targets: []TargetResult{{Target: target, TargetKey: key, State: "confirmed"}}}
+	o := newNativeActionOwner(req.EpisodeRef.AuthorityID, actionRPCFunc(func(_ context.Context, cmd string, _ map[string]any, out any) error {
+		require.Equal(t, "lookup", cmd)
+		return json.Unmarshal(mustRaw(t, actionIntent{Digest: digest, Request: mustRaw(t, req), Result: receipt}), out)
+	}), singleActionDispatch{target: target})
+	o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
+	o.recovered = true
+	live := source
+	o.readSource = func(_, _ string, fn func(*alert.Alert)) { fn(live) }
+	o.byID[req.EpisodeRef.EpisodeID] = &episodeSlot{source: source, projection: EpisodeProjection{SeverityRevision: 1, episodeUpdate: episodeUpdate{EpisodeRef: req.EpisodeRef, State: "firing", SourceSeverity: "major", NativeVariant: variantOf(source)}}}
+	q := contactCheck{Nonce: key, OperationID: req.OperationID, Digest: digest, Ref: req.EpisodeRef, Revision: 1, TargetKey: key, Effect: key}
+	ctx := operatorTestContext(t.Context(), req)
+	require.NoError(t, o.checkContact(ctx, q))
+	other := q
+	other.TargetKey = strings.Repeat("b", 64)
+	require.Error(t, o.checkContact(ctx, other))
+	replacement := *source
+	live = &replacement
+	require.Error(t, o.checkContact(ctx, q))
+	live = source
+	ctx.Value(operatorScopeKey{}).(*operatorScope).read = &pageScope{}
+	require.Error(t, o.checkContact(ctx, q))
 }

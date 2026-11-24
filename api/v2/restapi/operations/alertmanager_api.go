@@ -62,6 +62,12 @@ func NewAlertmanagerAPI(spec *loads.Document) *AlertmanagerAPI {
 
 		JSONProducer: runtime.JSONProducer(),
 
+		AlertCheckOscarActionContactHandler: alert.CheckOscarActionContactHandlerFunc(func(params alert.CheckOscarActionContactParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.CheckOscarActionContact has not yet been implemented")
+		}),
+
 		SilenceDeleteSilenceHandler: silence.DeleteSilenceHandlerFunc(func(params silence.DeleteSilenceParams) middleware.Responder {
 			_ = params
 
@@ -181,6 +187,8 @@ type AlertmanagerAPI struct {
 	//   - application/json
 	JSONProducer runtime.Producer
 
+	// AlertCheckOscarActionContactHandler sets the operation handler for the check oscar action contact operation
+	AlertCheckOscarActionContactHandler alert.CheckOscarActionContactHandler
 	// SilenceDeleteSilenceHandler sets the operation handler for the delete silence operation
 	SilenceDeleteSilenceHandler silence.DeleteSilenceHandler
 	// AlertExecuteOscarActionHandler sets the operation handler for the execute oscar action operation
@@ -286,6 +294,9 @@ func (o *AlertmanagerAPI) Validate() error {
 		unregistered = append(unregistered, "JSONProducer")
 	}
 
+	if o.AlertCheckOscarActionContactHandler == nil {
+		unregistered = append(unregistered, "alert.CheckOscarActionContactHandler")
+	}
 	if o.SilenceDeleteSilenceHandler == nil {
 		unregistered = append(unregistered, "silence.DeleteSilenceHandler")
 	}
@@ -418,6 +429,10 @@ func (o *AlertmanagerAPI) initHandlerCache() {
 		o.handlers = make(map[string]map[string]http.Handler)
 	}
 
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/oscar/actions/contact-check"] = alert.NewCheckOscarActionContact(o.context, o.AlertCheckOscarActionContactHandler)
 	if o.handlers["DELETE"] == nil {
 		o.handlers["DELETE"] = make(map[string]http.Handler)
 	}

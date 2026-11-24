@@ -89,6 +89,12 @@ type ExecuteOscarActionParams struct {
 	*/
 	XOscarActionRecovery *string
 
+	/* XOscarActionScope.
+
+	   Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.
+	*/
+	XOscarActionScope *string
+
 	// XOscarActionSender.
 	XOscarActionSender string
 
@@ -190,6 +196,17 @@ func (o *ExecuteOscarActionParams) SetXOscarActionRecovery(xOscarActionRecovery 
 	o.XOscarActionRecovery = xOscarActionRecovery
 }
 
+// WithXOscarActionScope adds the xOscarActionScope to the execute oscar action params
+func (o *ExecuteOscarActionParams) WithXOscarActionScope(xOscarActionScope *string) *ExecuteOscarActionParams {
+	o.SetXOscarActionScope(xOscarActionScope)
+	return o
+}
+
+// SetXOscarActionScope adds the xOscarActionScope to the execute oscar action params
+func (o *ExecuteOscarActionParams) SetXOscarActionScope(xOscarActionScope *string) {
+	o.XOscarActionScope = xOscarActionScope
+}
+
 // WithXOscarActionSender adds the xOscarActionSender to the execute oscar action params
 func (o *ExecuteOscarActionParams) WithXOscarActionSender(xOscarActionSender string) *ExecuteOscarActionParams {
 	o.SetXOscarActionSender(xOscarActionSender)
@@ -267,6 +284,14 @@ func (o *ExecuteOscarActionParams) WriteToRequest(r runtime.ClientRequest, reg s
 
 		// header param X-Oscar-Action-Recovery
 		if err := r.SetHeaderParam("X-Oscar-Action-Recovery", *o.XOscarActionRecovery); err != nil {
+			return err
+		}
+	}
+
+	if o.XOscarActionScope != nil {
+
+		// header param X-Oscar-Action-Scope
+		if err := r.SetHeaderParam("X-Oscar-Action-Scope", *o.XOscarActionScope); err != nil {
 			return err
 		}
 	}

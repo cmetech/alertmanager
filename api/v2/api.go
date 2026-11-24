@@ -164,6 +164,9 @@ func NewAPI(
 	openAPI.AlertGetOscarActionEligibilityHandler = alert_ops.GetOscarActionEligibilityHandlerFunc(func(alert_ops.GetOscarActionEligibilityParams) middleware.Responder {
 		return alert_ops.NewGetOscarActionEligibilityUnauthorized()
 	})
+	openAPI.AlertCheckOscarActionContactHandler = alert_ops.CheckOscarActionContactHandlerFunc(func(alert_ops.CheckOscarActionContactParams) middleware.Responder {
+		return alert_ops.NewCheckOscarActionContactUnauthorized()
+	})
 	openAPI.AlertGetOscarScopedAlertsPageHandler = alert_ops.GetOscarScopedAlertsPageHandlerFunc(func(alert_ops.GetOscarScopedAlertsPageParams) middleware.Responder {
 		return alert_ops.NewGetOscarScopedAlertsPageUnauthorized()
 	})

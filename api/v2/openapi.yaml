@@ -164,6 +164,7 @@ paths:
         - $ref: '#/parameters/oscarActionSubject'
         - $ref: '#/parameters/oscarActionGrant'
         - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
         - name: X-Oscar-Action-Recovery
           in: header
           type: string
@@ -202,6 +203,7 @@ paths:
         - $ref: '#/parameters/oscarActionSubject'
         - $ref: '#/parameters/oscarActionGrant'
         - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
         - name: body
           in: body
           required: true
@@ -220,6 +222,36 @@ paths:
         '409': {description: Native lifecycle or operation conflict}
         '413': {description: Request too large}
         '503': {description: Native authority unavailable}
+  /oscar/actions/contact-check:
+    post:
+      tags: [alert]
+      operationId: checkOscarActionContact
+      description: Private owner check for one frozen human worker contact. Performs no admission or settlement.
+      parameters:
+        - $ref: '#/parameters/oscarActionSender'
+        - $ref: '#/parameters/oscarActionKeyId'
+        - $ref: '#/parameters/oscarActionTime'
+        - $ref: '#/parameters/oscarActionSubject'
+        - $ref: '#/parameters/oscarActionGrant'
+        - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
+        - name: body
+          in: body
+          required: true
+          schema: {$ref: '#/definitions/oscarContactCheck'}
+      responses:
+        '200':
+          description: Exact authorized request bytes including fresh nonce
+          headers:
+            X-Oscar-Contact-Response:
+              type: string
+              description: Operator HMAC over purpose, request signature and exact response digest
+          schema: {$ref: '#/definitions/oscarContactCheck'}
+        '400': {description: Invalid contact binding}
+        '401': {description: Invalid action assertion}
+        '403': {description: Contact permission denied}
+        '409': {description: Changed or unavailable contact}
+        '503': {description: Native authority unavailable}
   /oscar/actions/{operation_id}:
     get:
       tags: [alert]
@@ -232,6 +264,7 @@ paths:
         - $ref: '#/parameters/oscarActionSubject'
         - $ref: '#/parameters/oscarActionGrant'
         - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
         - {name: operation_id, in: path, type: string, format: uuid, required: true}
       responses:
         '200':
@@ -501,6 +534,11 @@ parameters:
     in: header
     type: string
     required: true
+  oscarActionScope:
+    name: X-Oscar-Action-Scope
+    in: header
+    type: string
+    description: Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.
   oscarActionSignature:
     name: X-Oscar-Action-Signature
     in: header
@@ -602,6 +640,18 @@ definitions:
       binding_id: {type: string, format: uuid}
       revision_id: {type: string, format: uuid}
       cancellation_generation: {type: integer, format: uint64, x-elm-integer: Natural, minimum: 0}
+  oscarContactCheck:
+    type: object
+    additionalProperties: false
+    required: [nonce, operation_id, command_digest, episode_ref, severity_revision, target_key, effect_digest]
+    properties:
+      nonce: {type: string, pattern: '^[a-f0-9]{64}$'}
+      operation_id: {type: string, format: uuid}
+      command_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
+      episode_ref: {$ref: '#/definitions/oscarEpisodeRef'}
+      severity_revision: {type: integer, minimum: 0}
+      target_key: {type: string, pattern: '^[a-f0-9]{64}$'}
+      effect_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
   oscarActionRequest:
     type: object
     additionalProperties: false
