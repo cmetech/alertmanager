@@ -615,3 +615,28 @@ func TestLedgerKeepsEntriesAcrossLeaseLapse(t *testing.T) {
 	l.cover(k, 7, snap, now.Add(time.Hour), l.stamp())
 	require.False(t, l.covered(k, 8, snap), "a new epoch clears the ledger")
 }
+
+// OSC-134: OSCAR reads the fork's alerts page (provider pending alerts through
+// the dispatch read view) to decide which firing episodes the fork still holds.
+// A ledger skip only removes the OSCAR call; it must leave that view unchanged.
+func TestLedgerSkippedAlertsStayOnPageView(t *testing.T) {
+	h := newLedgerHarness(t, 20, "['...']")
+	h.tick()
+	views := map[*alert.Alert]*alert.Alert{}
+	for _, s := range h.sources {
+		views[s] = h.a.ReadView(s)
+		require.NotNil(t, views[s])
+	}
+	residents, sources := len(h.a.residents), len(h.a.sources)
+	before := h.j.total.Load()
+	for range 3 {
+		h.clock = h.clock.Add(30 * time.Second)
+		h.tick()
+	}
+	require.Equal(t, before, h.j.total.Load(), "every alert was skipped by the ledger")
+	for _, s := range h.sources {
+		require.Same(t, views[s], h.a.ReadView(s), "a skipped alert keeps its page view")
+	}
+	require.Equal(t, residents, len(h.a.residents))
+	require.Equal(t, sources, len(h.a.sources))
+}
