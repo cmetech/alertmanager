@@ -64,7 +64,6 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 			require.NoError(t, json.Unmarshal([]byte(actionBody), &req))
 			source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: time.Now().Add(-time.Minute), EndsAt: time.Now().Add(time.Hour)}, time.Now(), false)
 			liveSource := source
-			ctx := operatorTestContext(t.Context(), req)
 			var o *nativeActionOwner
 			var record *actionIntent
 			recoveryFailure := ""
@@ -161,7 +160,7 @@ func TestOscarActionPersistenceLossAndInvalidation(t *testing.T) {
 			require.NoError(t, err)
 			req.EpisodeRef = proj.EpisodeRef
 			o.readSource = func(owner, fp string, fn func(*alert.Alert)) { fn(liveSource) }
-			ctx = operatorTestContext(t.Context(), req)
+			ctx := operatorTestContext(t.Context(), req)
 			switch failure {
 			case "policy-read-deny":
 				ctx.Value(operatorScopeKey{}).(*operatorScope).read = &pageScope{}
