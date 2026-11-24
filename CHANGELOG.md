@@ -1,3 +1,15 @@
+## Unreleased — Native per-alert delivery ledger (OSC-136)
+
+- The native reader remembers, per alert and native target, the ordinary coverage this process
+  confirmed with OSCAR. A tick contacts OSCAR only for alerts that are new, changed (labels,
+  severity revision, episode or lifecycle), resolved, due for a repeat or due for a retry, instead
+  of re-admitting every tracked firing alert every `group_interval`.
+- Failed or timed-out calls back off per alert (30 s, 1 m, 2 m, 4 m, then 5 m) while the alert is
+  unchanged; siblings are not re-sent. A deferred resolve keeps its group.
+- The ledger clears on a lease epoch change and on every configuration reload. Covered replies
+  start a skip only when OSCAR returns `next_eligible` (OSC-144); older stores omit it and the
+  reader keeps asking. No wire change is required; the field is optional.
+
 ## Unreleased — Native lease isolation and capacity metrics (OSC-139)
 
 - Lease acquire and renew use a dedicated two-connection client, so delivery and recovery calls

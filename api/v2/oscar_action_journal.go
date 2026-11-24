@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"reflect"
 	"slices"
 	"sync/atomic"
@@ -111,6 +113,24 @@ type ActionJournal interface {
 	ReserveOrdinary(context.Context, string, *alert.Alert, EpisodeProjection, DispatchTarget) (ActionResultV1, error)
 	Claim(context.Context, string, string) (Entry, error)
 	Settle(context.Context, Entry, string, string) (ActionResultV1, error)
+}
+
+// conservativeDeadline maps a store time to a local time no later than it,
+// or zero before the lease has anchored the two clocks.
+func (o *nativeActionOwner) conservativeDeadline(db time.Time) time.Time {
+	o.mu.Lock()
+	anchored := !o.dbAnchor.IsZero()
+	o.mu.Unlock()
+	if !anchored {
+		return time.Time{}
+	}
+	return o.localDeadline(db)
+}
+
+// TransientActionError reports a native journal call that failed or timed out.
+func TransientActionError(err error) bool {
+	var e actionError
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &e) && e.code == http.StatusServiceUnavailable
 }
 
 func (o *nativeActionOwner) localDeadline(db time.Time) time.Time {

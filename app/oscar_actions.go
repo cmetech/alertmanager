@@ -65,6 +65,7 @@ type actionGraph struct {
 	timeMuter            notify.TimeMuter
 	dispatcher           *dispatch.Dispatcher
 	pipeline             notify.Stage
+	ledger               *deliveryLedger // per graph: a reload starts empty
 	ctx                  context.Context
 	cancel               context.CancelFunc
 }
@@ -582,6 +583,7 @@ func (a *nativeActions) dispatchPending(ctx context.Context, g *actionGraph, id 
 type ordinaryContact struct {
 	admission *v2.OrdinaryAdmission
 	legacy    bool
+	ordinary  bool // planned by the ordinary reader, not a selected/explicit action
 	operation string
 	target    v2.TargetResult
 	contact   plannedContact
@@ -600,7 +602,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	}
 	i := g.targets[receiver][match]
 	var ordinary []*alert.Alert
-	var held error
+	var held, backoff error
 	var heldResolved bool
 	hold := func(m *alert.Alert, err error) {
 		held = errors.Join(held, err)
@@ -608,6 +610,11 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		if a.countHeld != nil {
 			a.countHeld(err, m.Resolved())
 		}
+	}
+	epoch, start := a.ledgerEpoch(), g.ledger.clock()
+	// retry backs off a member whose OSCAR call failed, timed out or was held by OSCAR.
+	retry := func(m *alert.Alert, p v2.EpisodeProjection) {
+		g.ledger.fail(ledgerKeyFor(ctx, receiver, name, index, m), epoch, snapOf(p, m, start), start)
 	}
 	contacts := make(map[*alert.Alert]ordinaryContact, len(members))
 	for _, m := range members {
@@ -627,12 +634,15 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		}
 		if p == nil {
 			p, pass, err = a.journal.InspectOrdinary(ctx, source)
+			if v2.TransientActionError(err) {
+				retry(m, v2.EpisodeProjection{})
+			}
 		}
 		if err != nil {
 			hold(m, err)
 			continue
 		}
-		c := ordinaryContact{pass: pass, contact: plannedContact{DispatchTarget: v2.DispatchTarget{ReceiverID: receiver}, integration: i}}
+		c := ordinaryContact{ordinary: true, pass: pass, contact: plannedContact{DispatchTarget: v2.DispatchTarget{ReceiverID: receiver}, integration: i}}
 		if p != nil {
 			c.p = *p
 			view, err := effectiveMember(source, *p)
@@ -663,10 +673,24 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				continue
 			}
 		}
+		k, snap := ledgerKeyFor(ctx, receiver, name, index, m), snapOf(c.p, m, start)
+		if g.ledger.deferred(k, epoch, snap) {
+			// Per-alert backoff: no call. A terminal member fails the flush so the dispatcher keeps it.
+			delete(contacts, m)
+			if snap.terminal {
+				heldResolved = true
+				backoff = errors.Join(backoff, errRetryBackoff)
+			}
+			continue
+		}
+		if i.prepared == nil && g.ledger.covered(k, epoch, snap) {
+			delete(contacts, m) // OSCAR would answer covered.
+			continue
+		}
 		result.Members = append(result.Members, m)
 	}
 	if len(result.Members) == 0 {
-		return result, held
+		return result, errors.Join(held, backoff)
 	}
 	full := len(result.Members) == len(members)
 	if i.maxAlerts != 0 {
@@ -677,6 +701,8 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		// Keep nondue positions until RetryStage filters resolved members and Invoke fixes the prefix.
 		result.Members = members
 	}
+	// A deferred resolve must not hold back its siblings above, but it keeps the group.
+	held = errors.Join(held, backoff)
 	var logMembers []*alert.Alert
 	if full {
 		// RetryStage can finish an all-resolved, send_resolved=false batch without invoking a provider.
@@ -748,6 +774,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			for _, m := range candidates {
 				c, err := a.planOrdinary(ctx, g, m, contacts[m])
 				if err != nil {
+					if v2.TransientActionError(err) {
+						retry(m, contacts[m].p)
+					}
 					hold(m, err)
 					delete(contacts, m)
 					continue
@@ -765,6 +794,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			for n, request := range requests {
 				m := request.Member
 				if n >= len(admissions) || admissions[n].Err != nil || !admissions[n].Covered && !admissions[n].Completed && admissions[n].Entry == nil {
+					retry(m, request.Projection)
 					hold(m, actionHeld)
 					delete(contacts, m)
 					continue
@@ -782,6 +812,11 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 					ordinaryAcceptance = true
 				}
 				if admissions[n].Covered || admissions[n].Completed {
+					k := ledgerKeyFor(ctx, receiver, name, index, m)
+					g.ledger.settled(k, epoch, admissions[n].Completed)
+					if until := admissions[n].CoveredUntil; admissions[n].Covered && !until.IsZero() {
+						g.ledger.cover(k, epoch, snapOf(request.Projection, m, start), until)
+					}
 					delete(contacts, m)
 					continue
 				}
@@ -812,6 +847,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			}
 			if err != nil {
 				if err.Error() != "NATIVE_SUPPRESSED" {
+					if v2.TransientActionError(err) {
+						retry(m, c.p)
+					}
 					hold(m, err)
 				}
 				continue
@@ -881,6 +919,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				accepted = slices.DeleteFunc(accepted, func(m *alert.Alert) bool { return omitted[m] })
 			}
 			if v.Err() != nil {
+				for x, c := range entries {
+					retry(pending[x], c.p)
+				}
 				return v
 			}
 		}
@@ -1098,6 +1139,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 	finish := func(v notify.NotifyVerdict) (notify.NotifyVerdict, []*alert.Alert, bool) {
 		late, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
+		sentAt := g.ledger.clock() // before any settle request, so before OSCAR stamps next_eligible
 		var accepted []*alert.Alert
 		var settlement error
 		var cohortReceipts []v2.OrdinaryReceipt
@@ -1130,6 +1172,18 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		}
 		if settlement != nil {
 			v = notify.Unrecoverable(settlement, notify.DefaultReason)
+		} else if v.Err() == nil {
+			// Record ordinary full-scope coverage this process just confirmed.
+			epoch := a.ledgerEpoch()
+			for x, c := range contacts {
+				done := entered[x] || c.p.State == "resolved" && bound.NoSend
+				if !done || !c.ordinary || c.pass != nil || claimed[x] == nil || len(c.contact.Scope) != 0 {
+					continue
+				}
+				k := ledgerKeyFor(ctx, c.contact.ReceiverID, c.contact.integration.name, c.contact.integration.index, members[x])
+				repeat := time.Duration(c.contact.RepeatIntervalUS) * time.Microsecond
+				g.ledger.cover(k, epoch, snapOf(c.p, members[x], sentAt), sentAt.Add(repeat))
+			}
 		}
 		return v, accepted, bound.NoSend && v.Err() == nil
 	}
