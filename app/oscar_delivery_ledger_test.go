@@ -445,12 +445,12 @@ func TestLedgerAC5SkipStrictness(t *testing.T) {
 	l.now = func() time.Time { return now }
 	s := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "x"}, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}, now, false)
 	p := restoredFixture(t, s)
-	k := ledgerKey{group: "g", receiver: "team", integration: "webhook", source: s.Fingerprint()}
+	k := ledgerKey{target: ledgerTarget{receiver: "team", integration: "webhook", source: s.Fingerprint()}, group: "g"}
 	snap := snapOf(p, s, now)
 	require.False(t, l.covered(k, 1, snap), "no entry")
 	l.settled(k, 1, false)
 	require.False(t, l.covered(k, 1, snap), "a covered reply without a deadline creates no skip")
-	l.cover(k, 1, snap, now.Add(time.Hour))
+	l.cover(k, 1, snap, now.Add(time.Hour), l.stamp())
 	require.True(t, l.covered(k, 1, snap))
 	for name, change := range map[string]func(*ledgerSnap){
 		"generation":       func(s *ledgerSnap) { s.ref.Generation++ },
@@ -484,7 +484,7 @@ func TestLedgerAC5SkipStrictness(t *testing.T) {
 	src := h.sources[0]
 	h.j.settleDelay = time.Second // OSCAR stamps next_eligible a second later
 	require.NoError(t, h.flush(src))
-	e := h.g.ledger.entries[h.key(src)]
+	e := h.g.ledger.lockedGet(h.key(src))
 	require.NotNil(t, e)
 	oscar := h.j.coverage[h.j.projections[src].EpisodeRef.EpisodeID].next
 	require.True(t, e.nextEligible.Before(oscar), "local %s must precede OSCAR %s", e.nextEligible, oscar)
@@ -493,7 +493,7 @@ func TestLedgerAC5SkipStrictness(t *testing.T) {
 	h2 := newLedgerHarness(t, 1, "['...']")
 	h2.j.settleErr = errors.New("lost reply")
 	_ = h2.flush(h2.sources[0])
-	e = h2.g.ledger.entries[h2.key(h2.sources[0])]
+	e = h2.g.ledger.lockedGet(h2.key(h2.sources[0]))
 	require.True(t, e == nil || e.nextEligible.IsZero())
 }
 
@@ -501,12 +501,12 @@ func TestLedgerBackoffScheduleAndBound(t *testing.T) {
 	l := newDeliveryLedger()
 	now := time.Now()
 	l.now = func() time.Time { return now }
-	k := ledgerKey{receiver: "r"}
+	k := ledgerKey{target: ledgerTarget{receiver: "r"}}
 	snap := ledgerSnap{severity: 1}
 	var got []time.Duration
 	for range 6 {
 		l.fail(k, 0, snap, now)
-		got = append(got, l.entries[k].nextAttempt.Sub(now))
+		got = append(got, l.lockedGet(k).nextAttempt.Sub(now))
 	}
 	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute}, got)
 	require.True(t, l.deferred(k, 0, snap))
@@ -517,7 +517,52 @@ func TestLedgerBackoffScheduleAndBound(t *testing.T) {
 	require.False(t, l.deferred(k, 0, snap))
 
 	for n := range ledgerMaxEntries + 10 {
-		l.fail(ledgerKey{index: n}, 0, snap, now)
+		l.fail(ledgerKey{target: ledgerTarget{index: n}}, 0, snap, now)
 	}
-	require.LessOrEqual(t, len(l.entries), ledgerMaxEntries)
+	require.LessOrEqual(t, l.size, ledgerMaxEntries)
+}
+
+// OSC-144 P144-2: a later confirmed contact on the same OSCAR target key (any
+// route, explicit or scoped) can lower next_eligible, so it drops every entry.
+func TestLedgerInvalidatesTargetOnAnyConfirm(t *testing.T) {
+	l := newDeliveryLedger()
+	now := time.Now()
+	l.now = func() time.Time { return now }
+	snap := ledgerSnap{severity: 1}
+	target := ledgerTarget{receiver: "team", integration: "webhook"}
+	a, b := ledgerKey{target: target, group: "route-a"}, ledgerKey{target: target, group: "route-b"}
+	other := ledgerKey{target: ledgerTarget{receiver: "team", integration: "webhook", index: 1}, group: "route-a"}
+	for _, k := range []ledgerKey{a, b, other} {
+		l.cover(k, 0, snap, now.Add(time.Hour), l.stamp())
+	}
+	l.invalidate(target, 0)
+	require.False(t, l.covered(a, 0, snap))
+	require.False(t, l.covered(b, 0, snap))
+	require.True(t, l.covered(other, 0, snap), "another target keeps its entry")
+
+	since := l.stamp()
+	l.invalidate(other.target, 0) // a concurrent confirm lands while a covered reply is in flight
+	l.cover(a, 0, snap, now.Add(time.Hour), since)
+	require.False(t, l.covered(a, 0, snap), "a deadline read before an invalidation is not recorded")
+}
+
+func TestLedgerExplicitConfirmInvalidatesOrdinaryEntry(t *testing.T) {
+	h := newLedgerHarness(t, 1, "['...']")
+	s := h.sources[0]
+	require.NoError(t, h.flush(s))
+	m := s.NotificationCopy(time.Now())
+	snap := snapOf(h.j.projections[s], m, h.clock)
+	require.True(t, h.g.ledger.covered(h.key(s), 0, snap))
+	// A selected/explicit action on the same target settles through invoke's finish.
+	ctx := h.ctxFor(m)
+	planned, err := h.g.contacts(ctx, s, h.j.projections[s], nil)
+	require.NoError(t, err)
+	require.Len(t, planned, 1)
+	c := ordinaryContact{
+		operation: "11111111-1111-4111-8111-111111111111", p: h.j.projections[s], contact: planned[0],
+		target: v2.TargetResult{Target: planned[0].DispatchTarget, TargetKey: h.j.projections[s].EpisodeRef.EpisodeID, State: "pending"},
+	}
+	_, _, _ = h.a.invoke(ctx, h.g, h.integration, []*alert.Alert{m}, []ordinaryContact{c}, 0)
+	require.EqualValues(t, 2, h.posts.Load(), "the explicit contact was delivered")
+	require.False(t, h.g.ledger.covered(h.key(s), 0, snap), "and the ordinary skip is gone")
 }

@@ -25,12 +25,20 @@ const (
 	backoffCap       = 5 * time.Minute
 )
 
-// ledgerKey names one alert at one native target of one aggregation group.
-// The group key pins the route, and so the target's repeat interval.
+// ledgerTarget is one alert at one receiver integration. OSCAR keeps one
+// coverage row per such target key (its key ignores the repeat interval and
+// full-receiver scope), so every aggregation group sharing it is invalidated
+// together when any contact on it is confirmed.
+type ledgerTarget struct {
+	receiver, integration string
+	index                 int
+	source                model.Fingerprint
+}
+
+// ledgerKey adds the aggregation group, which pins the route and its repeat interval.
 type ledgerKey struct {
-	group, receiver, integration string
-	index                        int
-	source                       model.Fingerprint
+	target ledgerTarget
+	group  string
 }
 
 // ledgerSnap is everything OSCAR's due check depends on, plus the outgoing
@@ -56,23 +64,27 @@ type ledgerEntry struct {
 // It only removes calls whose answer is provably "covered": a deadline comes
 // from this process's own confirmed settle (taken before the settle was sent,
 // so it falls due no later than OSCAR's next_eligible) or from a deadline
-// OSCAR returned and the lease clock maps conservatively. Any difference in
-// epoch, episode, revision, lifecycle, labels or terminal state falls through
-// to OSCAR. A backoff applies only while the member is unchanged.
+// OSCAR returned on a covered row, mapped conservatively by the lease clock.
+// Any confirmed contact on the target (ordinary or explicit, any scope) first
+// drops every entry for it, because it can lower OSCAR's deadline. Any
+// difference in epoch, episode, revision, lifecycle, labels or terminal state
+// falls through to OSCAR. A backoff applies only while the member is unchanged.
 type deliveryLedger struct {
 	mu      sync.Mutex
 	epoch   uint64
-	entries map[ledgerKey]*ledgerEntry
+	size    int
+	version uint64 // bumped by every invalidation and epoch change
+	entries map[ledgerTarget]map[string]*ledgerEntry
 	now     func() time.Time
 }
 
 func newDeliveryLedger() *deliveryLedger {
-	return &deliveryLedger{entries: make(map[ledgerKey]*ledgerEntry), now: time.Now}
+	return &deliveryLedger{entries: make(map[ledgerTarget]map[string]*ledgerEntry), now: time.Now}
 }
 
 func ledgerKeyFor(ctx context.Context, receiver, integration string, index int, m *alert.Alert) ledgerKey {
 	group, _ := notify.GroupKey(ctx)
-	return ledgerKey{group: group, receiver: receiver, integration: integration, index: index, source: m.ProviderSource().Fingerprint()}
+	return ledgerKey{target: ledgerTarget{receiver: receiver, integration: integration, index: index, source: m.ProviderSource().Fingerprint()}, group: group}
 }
 
 func snapOf(p v2.EpisodeProjection, m *alert.Alert, now time.Time) ledgerSnap {
@@ -100,8 +112,25 @@ func (l *deliveryLedger) clock() time.Time {
 func (l *deliveryLedger) lockedAt(epoch uint64) {
 	if epoch != l.epoch {
 		clear(l.entries)
-		l.epoch = epoch
+		l.epoch, l.size = epoch, 0
+		l.version++
 	}
+}
+
+// stamp returns the invalidation version; take it before the call whose
+// result cover will record.
+func (l *deliveryLedger) stamp() uint64 {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.version
+}
+
+// Caller holds l.mu.
+func (l *deliveryLedger) lockedGet(k ledgerKey) *ledgerEntry {
+	return l.entries[k.target][k.group]
 }
 
 // covered reports whether OSCAR would answer "covered" for this member.
@@ -112,7 +141,7 @@ func (l *deliveryLedger) covered(k ledgerKey, epoch uint64, s ledgerSnap) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lockedAt(epoch)
-	e := l.entries[k]
+	e := l.lockedGet(k)
 	return e != nil && e.covered == s && l.now().Before(e.nextEligible)
 }
 
@@ -124,7 +153,7 @@ func (l *deliveryLedger) deferred(k ledgerKey, epoch uint64, s ledgerSnap) bool 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lockedAt(epoch)
-	e := l.entries[k]
+	e := l.lockedGet(k)
 	if e == nil || e.attempts == 0 {
 		return false
 	}
@@ -135,17 +164,31 @@ func (l *deliveryLedger) deferred(k ledgerKey, epoch uint64, s ledgerSnap) bool 
 	return l.now().Before(e.nextAttempt)
 }
 
-// cover records proven coverage until a local deadline and clears any backoff.
-// A terminal member forgets its entry.
-func (l *deliveryLedger) cover(k ledgerKey, epoch uint64, s ledgerSnap, until time.Time) {
+// invalidate drops every entry for a target after any confirmed contact on it.
+func (l *deliveryLedger) invalidate(t ledgerTarget, epoch uint64) {
 	if l == nil {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lockedAt(epoch)
-	if s.terminal {
-		delete(l.entries, k)
+	l.size -= len(l.entries[t])
+	delete(l.entries, t)
+	l.version++
+}
+
+// cover records proven coverage until a local deadline and clears any backoff.
+// A terminal member forgets its entry. The deadline is dropped if any target
+// was invalidated since since (a concurrent confirm may have lowered it).
+func (l *deliveryLedger) cover(k ledgerKey, epoch uint64, s ledgerSnap, until time.Time, since uint64) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lockedAt(epoch)
+	if s.terminal || l.version != since {
+		l.lockedDelete(k)
 		return
 	}
 	*l.lockedEntry(k) = ledgerEntry{covered: s, nextEligible: until}
@@ -160,8 +203,8 @@ func (l *deliveryLedger) settled(k ledgerKey, epoch uint64, forget bool) {
 	defer l.mu.Unlock()
 	l.lockedAt(epoch)
 	if forget {
-		delete(l.entries, k)
-	} else if e := l.entries[k]; e != nil {
+		l.lockedDelete(k)
+	} else if e := l.lockedGet(k); e != nil {
 		e.attempts, e.nextAttempt = 0, time.Time{}
 	}
 }
@@ -186,26 +229,48 @@ func (l *deliveryLedger) fail(k ledgerKey, epoch uint64, s ledgerSnap, at time.T
 }
 
 // Caller holds l.mu.
+func (l *deliveryLedger) lockedDelete(k ledgerKey) {
+	groups := l.entries[k.target]
+	if _, ok := groups[k.group]; !ok {
+		return
+	}
+	delete(groups, k.group)
+	l.size--
+	if len(groups) == 0 {
+		delete(l.entries, k.target)
+	}
+}
+
+// Caller holds l.mu.
 func (l *deliveryLedger) lockedEntry(k ledgerKey) *ledgerEntry {
-	if e := l.entries[k]; e != nil {
+	if e := l.lockedGet(k); e != nil {
 		return e
 	}
-	if len(l.entries) >= ledgerMaxEntries {
+	if l.size >= ledgerMaxEntries {
 		now := l.now()
-		for key, e := range l.entries {
-			if !now.Before(e.nextEligible) && !now.Before(e.nextAttempt) {
-				delete(l.entries, key)
+		for t, groups := range l.entries {
+			for g, e := range groups {
+				if !now.Before(e.nextEligible) && !now.Before(e.nextAttempt) {
+					l.lockedDelete(ledgerKey{t, g})
+				}
 			}
 		}
 		// ponytail: arbitrary eviction when still full. Safe: the alert falls back to asking OSCAR.
-		for key := range l.entries {
-			if len(l.entries) < ledgerMaxEntries {
+		for t := range l.entries {
+			if l.size < ledgerMaxEntries {
 				break
 			}
-			delete(l.entries, key)
+			l.size -= len(l.entries[t])
+			delete(l.entries, t)
 		}
 	}
+	groups := l.entries[k.target]
+	if groups == nil {
+		groups = make(map[string]*ledgerEntry)
+		l.entries[k.target] = groups
+	}
 	e := &ledgerEntry{}
-	l.entries[k] = e
+	groups[k.group] = e
+	l.size++
 	return e
 }

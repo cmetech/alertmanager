@@ -787,6 +787,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				}
 			}
 			var admissions []v2.OrdinaryAdmission
+			version := g.ledger.stamp()
 			if len(requests) > 0 {
 				admissions = cohort.AdmitCohort(ctx, requests)
 			}
@@ -815,7 +816,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 					k := ledgerKeyFor(ctx, receiver, name, index, m)
 					g.ledger.settled(k, epoch, admissions[n].Completed)
 					if until := admissions[n].CoveredUntil; admissions[n].Covered && !until.IsZero() {
-						g.ledger.cover(k, epoch, snapOf(request.Projection, m, start), until)
+						g.ledger.cover(k, epoch, snapOf(request.Projection, m, start), until, version)
 					}
 					delete(contacts, m)
 					continue
@@ -1140,6 +1141,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		late, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		sentAt := g.ledger.clock() // before any settle request, so before OSCAR stamps next_eligible
+		version := g.ledger.stamp()
 		var accepted []*alert.Alert
 		var settlement error
 		var cohortReceipts []v2.OrdinaryReceipt
@@ -1170,11 +1172,22 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		if len(cohortReceipts) > 0 {
 			settlement = errors.Join(settlement, a.journal.(v2.OrdinaryCohortJournal).SettleCohort(ctx, cohortReceipts))
 		}
+		epoch := a.ledgerEpoch()
+		var own []ledgerTarget
+		for x, c := range contacts {
+			if entered[x] {
+				// Any contact that may have been confirmed on this target (ordinary or
+				// explicit, any scope) can lower OSCAR's deadline: forget every entry.
+				k := ledgerKeyFor(ctx, c.contact.ReceiverID, c.contact.integration.name, c.contact.integration.index, members[x])
+				g.ledger.invalidate(k.target, epoch)
+				own = append(own, k.target)
+			}
+		}
+		version += uint64(len(own)) // this invocation's own invalidations
 		if settlement != nil {
 			v = notify.Unrecoverable(settlement, notify.DefaultReason)
 		} else if v.Err() == nil {
 			// Record ordinary full-scope coverage this process just confirmed.
-			epoch := a.ledgerEpoch()
 			for x, c := range contacts {
 				done := entered[x] || c.p.State == "resolved" && bound.NoSend
 				if !done || !c.ordinary || c.pass != nil || claimed[x] == nil || len(c.contact.Scope) != 0 {
@@ -1182,7 +1195,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 				}
 				k := ledgerKeyFor(ctx, c.contact.ReceiverID, c.contact.integration.name, c.contact.integration.index, members[x])
 				repeat := time.Duration(c.contact.RepeatIntervalUS) * time.Microsecond
-				g.ledger.cover(k, epoch, snapOf(c.p, members[x], sentAt), sentAt.Add(repeat))
+				g.ledger.cover(k, epoch, snapOf(c.p, members[x], sentAt), sentAt.Add(repeat), version)
 			}
 		}
 		return v, accepted, bound.NoSend && v.Err() == nil

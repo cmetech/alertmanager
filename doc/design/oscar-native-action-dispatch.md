@@ -73,7 +73,10 @@ recorded entry and the local deadline has not passed. Deadlines come from this
 process's own confirmed full-scope ordinary settle (taken before the settle
 request, so never later than OSCAR's `next_eligible`) or from a covered row's
 optional `next_eligible`, mapped through the lease clock anchor. Anything else
-asks OSCAR as before. Failed calls back off per member while it is unchanged;
+asks OSCAR as before. Any contact entered on the same OSCAR target key
+(ordinary or explicit, any scope or route) drops every entry for that target,
+because its confirmation can lower `next_eligible`; a deadline read before such
+an invalidation is not recorded. Failed calls back off per member while it is unchanged;
 a deferred resolved member holds its group. A lease epoch change or reload
 clears the ledger. Entries are bounded at 100,000.
 
