@@ -106,6 +106,7 @@ func TestOscarActionGCKeepsHeldResolveUntilDelivered(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(provider.Close)
 	r.alerts = provider
+	r.dispatchMaintenanceInterval = 10 * time.Millisecond
 	a := newNativeActions(nil, nil, r.logger)
 	a.version = 1
 	r.actions = a
@@ -133,7 +134,12 @@ func TestOscarActionGCKeepsHeldResolveUntilDelivered(t *testing.T) {
 	fp := labels.Fingerprint()
 	heldFrom := j.inspected.Load()
 	require.Eventually(t, func() bool { return j.inspected.Load() >= heldFrom+2 }, 5*time.Second, 5*time.Millisecond, "the resolve is held across flushes")
-	require.Never(t, func() bool { _, err := provider.Get(fp); return err != nil }, 300*time.Millisecond, 5*time.Millisecond, "AC-1: GC keeps the held resolve")
+	g := a.snapshot()
+	require.Never(t, func() bool {
+		g.sweepRetired.Store(true) // the retired sweep runs on every maintenance tick
+		_, err := provider.Get(fp)
+		return err != nil || !g.dispatcher.HoldsProjection(alert.New(model.Alert{Labels: labels}, end, false))
+	}, 300*time.Millisecond, 5*time.Millisecond, "AC-1: GC and the retired sweep keep the held resolve and its group")
 	require.Zero(t, resolvedSeen.Load())
 	require.Equal(t, 1.0, gaugeValue(t, reg, "alertmanager_oscar_native_unconfirmed_resolves"), "AC-3")
 	require.Positive(t, gaugeValue(t, reg, "alertmanager_oscar_native_unconfirmed_resolve_oldest_age_seconds"), "AC-3")

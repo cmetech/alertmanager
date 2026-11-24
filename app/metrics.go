@@ -103,11 +103,11 @@ func registerKeptResolveMetrics(reg prometheus.Registerer, alerts interface{ Kep
 	f := promauto.With(reg)
 	f.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "alertmanager_oscar_native_unconfirmed_resolves",
-		Help: "Resolved alerts the last GC pass kept because their native resolve is not yet confirmed.",
+		Help: "Resolved alerts the last GC pass kept because a native aggregation group has not yet flushed them successfully.",
 	}, func() float64 { n, _ := alerts.KeptResolves(); return float64(n) })
 	f.NewGaugeFunc(prometheus.GaugeOpts{
 		Name: "alertmanager_oscar_native_unconfirmed_resolve_oldest_age_seconds",
-		Help: "Seconds since the oldest kept unconfirmed resolve was resolved; 0 when none.",
+		Help: "Seconds since the oldest resolved alert kept by the last GC pass was resolved; 0 when none.",
 	}, func() float64 {
 		if n, oldest := alerts.KeptResolves(); n > 0 {
 			return time.Since(oldest).Seconds()

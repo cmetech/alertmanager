@@ -368,8 +368,13 @@ func (a *Alerts) gcAlerts() []*alert.Alert {
 	defer func() { observeDuration(a.gcHold, start); a.mtx.Unlock() }()
 	a.passKept, a.passOldest = 0, time.Time{}
 	deleted := a.alerts.GC()
+	// Publish oldest before count; KeptResolves reads them in reverse.
+	oldest := int64(0)
+	if a.passKept > 0 {
+		oldest = a.passOldest.UnixNano()
+	}
+	a.keptOldest.Store(oldest)
 	a.keptCount.Store(int64(a.passKept))
-	a.keptOldest.Store(a.passOldest.UnixNano())
 	for _, old := range deleted {
 		fp := old.Fingerprint()
 		owner := a.owners[fp]
