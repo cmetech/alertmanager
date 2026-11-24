@@ -1,0 +1,34 @@
+{
+  "mode": "code closure",
+  "round": 2,
+  "base": "d5631b4fbdd3096724e5230898c9f41dbce6f992",
+  "candidate": "89753bd8a084ceb68ac65208779956ce207e77a0",
+  "original_base": "b3cf31d9db656f34c442e321cd06f71a551d65c7",
+  "comparison": "explicit fix revisions; F1-F3 and adjacent regressions",
+  "origin": "git@github.com:cmetech/alertmanager.git",
+  "changed_paths": [
+    "api/api.go",
+    "api/api_test.go",
+    "api/v2/openapi.yaml",
+    "api/v2/oscar_page.go",
+    "api/v2/oscar_page_test.go",
+    "api/v2/oscar_scoped_page.go",
+    "api/v2/oscar_scoped_page_test.go",
+    "docs/alerts_api.md"
+  ],
+  "status": "?? docs/reviews/\n",
+  "sha256": {
+    "api/api.go": "fec893c58ca778758139bdaa06dd6a3e17d806a61ea37ea0ee8434cf8dc4c70d",
+    "api/api_test.go": "06201c45dbab7af4a40774639d1225fe9bb05588d9573ab4f0def6a722a586dc",
+    "api/v2/openapi.yaml": "3d7b565e2682f214cee46384eab1814e0671b26c7376e349c1c66586f99d2607",
+    "api/v2/oscar_page.go": "adf636563ec0137231147c5f05bc2901441ea208dd7c1360bf5afcd300f97d69",
+    "api/v2/oscar_page_test.go": "2e0e8c1b6d0906e81ba3c28acbbb67acf6f945ef1fdfcaf7bf4f074cba2b7e9e",
+    "api/v2/oscar_scoped_page.go": "b405cf5c66dedb87aeecad433db1d3dfa0096a4a672ec0f40928f732e4ad8680",
+    "api/v2/oscar_scoped_page_test.go": "3f69ccf2c2080aa3d75a70eda3275aaadcad4c150543efd727c124639da0b768",
+    "docs/alerts_api.md": "18e73ecb239a111f6cc9c7a8de41c83fea2c07549ed135b5f6e98edcf2fa92a0"
+  },
+  "exclusions": [
+    "docs/reviews/OSC-117/ (review artifacts)"
+  ],
+  "validation": "Formatting/whitespace/OpenAPI source checks. Runtime tests/builds/CI/generated API remain pending."
+}
