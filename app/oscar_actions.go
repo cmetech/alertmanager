@@ -88,6 +88,7 @@ type nativeActions struct {
 	episodes             map[string]publishedMember
 	pending              map[string]bool
 	read                 func(string, string, func(*alert.Alert))
+	ledgerMetrics        *ledgerMetrics
 	key                  []byte
 	logger               *slog.Logger
 	countHeld            func(error, bool) // journal metrics; nil when unbound
@@ -152,6 +153,7 @@ func (a *nativeActions) pause() {
 	defer a.mu.Unlock()
 	a.generation++
 	if a.graph != nil {
+		a.ledgerMetrics.invalidated("config", a.graph.ledger.count())
 		a.graph.cancel()
 		a.graph = nil
 	}
@@ -638,6 +640,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		if p == nil {
 			// An inspection refused for capacity or a failed call backs off this member alone.
 			if g.ledger.deferred(ledgerKeyFor(ctx, receiver, name, index, m), epoch, snapOf(v2.EpisodeProjection{}, m, start)) {
+				g.ledger.metrics.decided("defer", "backoff")
 				if m.Resolved() || source.Resolved() {
 					heldResolved = true
 					backoff = errors.Join(backoff, errRetryBackoff)
@@ -685,7 +688,8 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			}
 		}
 		k, snap := ledgerKeyFor(ctx, receiver, name, index, m), snapOf(c.p, m, start)
-		if g.ledger.deferred(k, epoch, snap) {
+		switch decision, _ := g.ledger.decide(k, epoch, snap, i.prepared == nil); decision {
+		case "defer":
 			// Per-alert backoff: no call. A terminal member fails the flush so the dispatcher keeps it.
 			delete(contacts, m)
 			if snap.wire || c.p.State == "resolved" {
@@ -693,8 +697,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				backoff = errors.Join(backoff, errRetryBackoff)
 			}
 			continue
-		}
-		if i.prepared == nil && g.ledger.covered(k, epoch, snap) {
+		case "skip":
 			delete(contacts, m) // OSCAR would answer covered.
 			continue
 		}
@@ -1152,7 +1155,6 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		late, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		sentAt := g.ledger.clock() // before any settle request, so before OSCAR stamps next_eligible
-		version := g.ledger.stamp()
 		var accepted []*alert.Alert
 		var settlement error
 		var cohortReceipts []v2.OrdinaryReceipt
@@ -1184,17 +1186,17 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 			settlement = errors.Join(settlement, a.journal.(v2.OrdinaryCohortJournal).SettleCohort(ctx, cohortReceipts))
 		}
 		epoch := a.ledgerEpoch()
-		var own []ledgerTarget
 		for x, c := range contacts {
 			if entered[x] {
 				// Any contact that may have been confirmed on this target (ordinary or
 				// explicit, any scope) can lower OSCAR's deadline: forget every entry.
 				k := ledgerKeyFor(ctx, c.contact.ReceiverID, c.contact.integration.name, c.contact.integration.index, members[x])
 				g.ledger.invalidate(k.target, epoch)
-				own = append(own, k.target)
+				if current := a.snapshot(); current != nil && current != g {
+					current.ledger.invalidate(k.target, epoch) // entered before a reload, confirmed after it
+				}
 			}
 		}
-		version += uint64(len(own)) // this invocation's own invalidations
 		if settlement != nil {
 			v = notify.Unrecoverable(settlement, notify.DefaultReason)
 		} else if v.Err() == nil {
@@ -1206,7 +1208,8 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 				}
 				k := ledgerKeyFor(ctx, c.contact.ReceiverID, c.contact.integration.name, c.contact.integration.index, members[x])
 				repeat := time.Duration(c.contact.RepeatIntervalUS) * time.Microsecond
-				g.ledger.cover(k, epoch, snapOf(c.p, members[x], sentAt), sentAt.Add(repeat), version)
+				// Our own invalidation above precedes this cover; only a later one would drop it.
+				g.ledger.cover(k, epoch, snapOf(c.p, members[x], sentAt), sentAt.Add(repeat), g.ledger.stamp())
 			}
 		}
 		return v, accepted, bound.NoSend && v.Err() == nil

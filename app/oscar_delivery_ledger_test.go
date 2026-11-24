@@ -5,6 +5,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -15,8 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/route"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/alertmanager/alert"
@@ -154,6 +158,7 @@ func (j *ledgerJournal) Settle(ctx context.Context, e v2.Entry, outcome, evidenc
 }
 
 type ledgerHarness struct {
+	failPosts   atomic.Bool
 	t           *testing.T
 	r           *reloader
 	a           *nativeActions
@@ -169,7 +174,12 @@ type ledgerHarness struct {
 func newLedgerHarness(t *testing.T, n int, groupBy string) *ledgerHarness {
 	t.Helper()
 	h := &ledgerHarness{t: t, clock: time.Now()}
-	sink := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { h.posts.Add(1) }))
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h.posts.Add(1)
+		if h.failPosts.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
 	t.Cleanup(sink.Close)
 	cfg, err := config.Load(fmt.Sprintf("route:\n  receiver: team\n  group_by: %s\n  group_wait: 1h\n  repeat_interval: 1h\nreceivers:\n- name: team\n  webhook_configs:\n  - url: %s\n    send_resolved: true\n", groupBy, sink.URL))
 	require.NoError(t, err)
@@ -543,9 +553,13 @@ func TestLedgerInvalidatesTargetOnAnyConfirm(t *testing.T) {
 	require.True(t, l.covered(other, 0, snap), "another target keeps its entry")
 
 	since := l.stamp()
-	l.invalidate(other.target, 0) // a concurrent confirm lands while a covered reply is in flight
+	l.invalidate(target, 0) // a concurrent confirm on the same target lands while a covered reply is in flight
 	l.cover(a, 0, snap, now.Add(time.Hour), since)
-	require.False(t, l.covered(a, 0, snap), "a deadline read before an invalidation is not recorded")
+	require.False(t, l.covered(a, 0, snap), "a deadline read before an invalidation of its target is not recorded")
+	since = l.stamp()
+	l.invalidate(other.target, 0) // C136-4: an unrelated target's confirm does not drop it
+	l.cover(a, 0, snap, now.Add(time.Hour), since)
+	require.True(t, l.covered(a, 0, snap))
 }
 
 func TestLedgerExplicitConfirmInvalidatesOrdinaryEntry(t *testing.T) {
@@ -616,27 +630,125 @@ func TestLedgerKeepsEntriesAcrossLeaseLapse(t *testing.T) {
 	require.False(t, l.covered(k, 8, snap), "a new epoch clears the ledger")
 }
 
-// OSC-134: OSCAR reads the fork's alerts page (provider pending alerts through
-// the dispatch read view) to decide which firing episodes the fork still holds.
-// A ledger skip only removes the OSCAR call; it must leave that view unchanged.
-func TestLedgerSkippedAlertsStayOnPageView(t *testing.T) {
-	h := newLedgerHarness(t, 20, "['...']")
-	h.tick()
-	views := map[*alert.Alert]*alert.Alert{}
-	for _, s := range h.sources {
-		views[s] = h.a.ReadView(s)
-		require.NotNil(t, views[s])
+// C136-2: proven-untracked direct members keep upstream per-tick retries.
+func TestLedgerDirectMemberKeepsUpstreamRetries(t *testing.T) {
+	h := newLedgerHarness(t, 0, "['...']")
+	s := h.add("direct")
+	delete(h.j.projections, s) // InspectOrdinary answers with a direct pass
+	h.failPosts.Store(true)
+	require.Error(t, h.flush(s))
+	require.Error(t, h.flush(s), "retried on the next tick, as upstream")
+	require.EqualValues(t, 2, h.posts.Load())
+	require.Nil(t, h.g.ledger.lockedGet(h.key(s)))
+}
+
+// C136-2: a tracked firing member in backoff is skipped without failing the flush.
+func TestLedgerDeferredFiringDoesNotFailFlush(t *testing.T) {
+	h := newLedgerHarness(t, 1, "['...']")
+	s := h.sources[0]
+	h.j.fail[h.j.projections[s].EpisodeRef.EpisodeID] = true
+	require.Error(t, h.flush(s))
+	require.NoError(t, h.flush(s), "deferred firing member: no error, so nothing is logged at error level")
+}
+
+// C136-3: the individual (non-cohort) reserve path records its confirmation too.
+func TestLedgerIndividualReservePathRecordsConfirm(t *testing.T) {
+	h := newLedgerHarness(t, 1, "['...']")
+	individual := struct{ v2.ActionJournal }{h.j} // hides the cohort methods
+	require.NoError(t, h.a.Bind(individual))
+	s := h.sources[0]
+	require.NoError(t, h.flush(s))
+	require.EqualValues(t, 1, h.posts.Load())
+	calls := h.j.total.Load()
+	h.clock = h.clock.Add(30 * time.Second)
+	require.NoError(t, h.flush(s))
+	require.Equal(t, calls, h.j.total.Load(), "confirmed through reserve/claim/settle: answered from the ledger")
+	require.EqualValues(t, 1, h.posts.Load())
+}
+
+func TestLedgerEpochMapping(t *testing.T) {
+	j := &recoveryFixture{}
+	a := &nativeActions{recovery: j}
+	require.Equal(t, ledgerLapsed, a.ledgerEpoch(), "no live lease: lapsed, not a new epoch")
+	j.epoch.Store(5)
+	require.EqualValues(t, 5, a.ledgerEpoch())
+	require.Zero(t, (&nativeActions{}).ledgerEpoch(), "no recovery journal")
+}
+
+func TestLedgerMetricsAndLookup(t *testing.T) {
+	h := newLedgerHarness(t, 1, "['...']")
+	reg := prometheus.NewRegistry()
+	registerLedgerMetrics(reg, h.a)
+	h.g.ledger.metrics = h.a.ledgerMetrics
+	s := h.sources[0]
+	require.NoError(t, h.flush(s)) // contact/new
+	h.clock = h.clock.Add(30 * time.Second)
+	require.NoError(t, h.flush(s)) // skip/covered
+	m := h.a.ledgerMetrics
+	require.InDelta(t, 1, testutil.ToFloat64(m.decisions.WithLabelValues("contact", "new")), 0)
+	require.InDelta(t, 1, testutil.ToFloat64(m.decisions.WithLabelValues("skip", "covered")), 0)
+	h.clock = h.clock.Add(time.Hour)
+	require.NoError(t, h.flush(s)) // contact/due: the repeat is confirmed and replaces the entry
+	require.InDelta(t, 1, testutil.ToFloat64(m.decisions.WithLabelValues("contact", "due")), 0)
+	require.InDelta(t, 1, testutil.ToFloat64(m.invalidations.WithLabelValues("confirmed_contact")), 0)
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	names := map[string]bool{}
+	for _, f := range families {
+		names[f.GetName()] = true
 	}
-	residents, sources := len(h.a.residents), len(h.a.sources)
-	before := h.j.total.Load()
+	for _, n := range []string{"alertmanager_oscar_native_ledger_entries", "alertmanager_oscar_native_ledger_decisions_total", "alertmanager_oscar_native_ledger_invalidations_total"} {
+		require.True(t, names[n], n)
+	}
+
+	views := h.a.LedgerLookup(s.Fingerprint()).([]LedgerView)
+	require.Len(t, views, 1)
+	p := h.j.projections[s]
+	require.Equal(t, p.EpisodeRef.EpisodeID, views[0].EpisodeID)
+	require.Equal(t, p.LifecycleSeq, views[0].LifecycleSeq)
+	require.Equal(t, s.NotificationCopy(time.Now()).Labels.Fingerprint().String(), views[0].LabelsHash)
+	require.NotNil(t, views[0].NextEligible)
+	require.Nil(t, views[0].NextAttempt)
+	require.Equal(t, 1, h.g.ledger.count(), "lookup does not mutate")
+	require.Empty(t, h.a.LedgerLookup(model.Fingerprint(1)).([]LedgerView))
+}
+
+// OSC-134: OSCAR reads GET /api/v2/oscar/alerts/page to decide which firing
+// episodes the fork still holds. Ledger-skipped alerts stay on that page.
+func TestLedgerSkippedAlertsStayOnAlertsPage(t *testing.T) {
+	h := newLedgerHarness(t, 20, "['...']")
+	for _, s := range h.sources {
+		require.NoError(t, h.r.alerts.Put(t.Context(), s))
+	}
+	page := func() map[string]bool {
+		w := httptest.NewRecorder()
+		h.r.apih.Register(route.New(), "").ServeHTTP(w, httptest.NewRequest("GET", "/api/v2/oscar/alerts/page?perPage=100", nil))
+		require.Equal(t, 200, w.Code, w.Body.String())
+		var body struct {
+			Records []struct {
+				Fingerprint string `json:"fingerprint"`
+			} `json:"records"`
+			Total int `json:"total_records"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		require.Len(t, body.Records, body.Total)
+		seen := map[string]bool{}
+		for _, r := range body.Records {
+			seen[r.Fingerprint] = true
+		}
+		return seen
+	}
+	h.tick()
+	before := page()
+	calls := h.j.total.Load()
 	for range 3 {
 		h.clock = h.clock.Add(30 * time.Second)
 		h.tick()
 	}
-	require.Equal(t, before, h.j.total.Load(), "every alert was skipped by the ledger")
+	require.Equal(t, calls, h.j.total.Load(), "every alert was skipped by the ledger")
+	after := page()
+	require.Equal(t, before, after)
 	for _, s := range h.sources {
-		require.Same(t, views[s], h.a.ReadView(s), "a skipped alert keeps its page view")
+		require.True(t, after[s.Fingerprint().String()], "skipped alert %s is on the page", s.Fingerprint())
 	}
-	require.Equal(t, residents, len(h.a.residents))
-	require.Equal(t, sources, len(h.a.sources))
 }

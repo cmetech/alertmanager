@@ -27,6 +27,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/alertmanager/alert"
 )
@@ -1714,6 +1715,9 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 	if api.managedOwner != nil {
 		o.verifyManaged = api.managedOwner.verifyActionMember
 		o.lockManaged = func(key string) (func(), error) { _, release, err := api.managedOwner.enter(key); return release, err }
+	}
+	if l, ok := c.Dispatch.(interface{ LedgerLookup(model.Fingerprint) any }); ok {
+		api.Handler = ledgerRoute(api.Handler, l.LedgerLookup)
 	}
 	if err = c.Dispatch.Bind(o); err != nil {
 		return fmt.Errorf("native action dispatch: %w", err)

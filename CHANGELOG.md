@@ -9,6 +9,12 @@
 - The ledger clears on a lease epoch change and on every configuration reload. Covered replies
   start a skip only when OSCAR returns `next_eligible` (OSC-144); older stores omit it and the
   reader keeps asking. No wire change is required; the field is optional.
+- Observability: `alertmanager_oscar_native_ledger_entries`,
+  `alertmanager_oscar_native_ledger_decisions_total{decision,reason}` (skip/covered, defer/backoff,
+  contact/new|changed|resolved|due|retry|fallback) and
+  `alertmanager_oscar_native_ledger_invalidations_total{cause}` (lease, config, revision,
+  confirmed_contact). A read-only `GET /api/v2/oscar/ledger?fingerprint=<fp>` returns one alert's
+  entries (lifecycle, label hash, next due time, retry backoff, lease epoch, invalidation version).
 
 ## Unreleased — Native lease isolation and capacity metrics (OSC-139)
 

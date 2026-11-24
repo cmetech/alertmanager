@@ -73,13 +73,16 @@ type deliveryLedger struct {
 	mu      sync.Mutex
 	epoch   uint64
 	size    int
-	version uint64 // bumped by every invalidation and epoch change
+	version uint64                  // bumped by every invalidation, epoch change or lapse
+	floor   uint64                  // stamps below it are stale for every target
+	stamps  map[ledgerTarget]uint64 // version of each target's last invalidation
 	entries map[ledgerTarget]map[string]*ledgerEntry
 	now     func() time.Time
+	metrics *ledgerMetrics
 }
 
 func newDeliveryLedger() *deliveryLedger {
-	return &deliveryLedger{entries: make(map[ledgerTarget]map[string]*ledgerEntry), now: time.Now}
+	return &deliveryLedger{entries: make(map[ledgerTarget]map[string]*ledgerEntry), stamps: make(map[ledgerTarget]uint64), now: time.Now}
 }
 
 func ledgerKeyFor(ctx context.Context, receiver, integration string, index int, m *alert.Alert) ledgerKey {
@@ -119,15 +122,60 @@ func (l *deliveryLedger) clock() time.Time {
 // lease decides and records nothing (false).
 func (l *deliveryLedger) lockedAt(epoch uint64) bool {
 	if epoch == ledgerLapsed {
-		l.version++ // a deadline read before the lapse is not recorded after it
+		l.lockedStaleAll() // a deadline read before the lapse is not recorded after it
 		return false
 	}
 	if epoch != l.epoch {
+		l.metrics.invalidated("lease", l.size)
 		clear(l.entries)
 		l.epoch, l.size = epoch, 0
-		l.version++
+		l.lockedStaleAll()
 	}
 	return true
+}
+
+// Caller holds l.mu.
+func (l *deliveryLedger) lockedStaleAll() {
+	l.version++
+	l.floor = l.version
+	clear(l.stamps)
+}
+
+// decide classifies one member before any call: "skip" (OSCAR would answer
+// covered), "defer" (inside its backoff) or "contact", with the reason.
+// Skips are allowed only for unprepared integrations.
+func (l *deliveryLedger) decide(k ledgerKey, epoch uint64, s ledgerSnap, allowSkip bool) (decision, reason string) {
+	defer func() { l.metrics.decided(decision, reason) }()
+	if l == nil {
+		return "contact", "fallback"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.lockedAt(epoch) {
+		return "contact", "fallback"
+	}
+	now := l.now()
+	e := l.lockedGet(k)
+	switch {
+	case e != nil && e.attempts > 0 && e.failed == s && now.Before(e.nextAttempt):
+		return "defer", "backoff"
+	case s.terminal:
+		return "contact", "resolved"
+	case e == nil:
+		return "contact", "new"
+	case e.attempts > 0:
+		return "contact", "retry"
+	case !allowSkip || e.nextEligible.IsZero():
+		return "contact", "fallback"
+	case e.covered != s:
+		if e.covered.ref != s.ref || e.covered.severity != s.severity || e.covered.lifecycle != s.lifecycle {
+			l.metrics.invalidated("revision", 1)
+		}
+		return "contact", "changed"
+	case now.Before(e.nextEligible):
+		return "skip", "covered"
+	}
+	return "contact", "due"
 }
 
 // stamp returns the invalidation version; take it before the call whose
@@ -151,13 +199,8 @@ func (l *deliveryLedger) covered(k ledgerKey, epoch uint64, s ledgerSnap) bool {
 	if l == nil || s.terminal {
 		return false
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.lockedAt(epoch) {
-		return false
-	}
-	e := l.lockedGet(k)
-	return e != nil && e.covered == s && l.now().Before(e.nextEligible)
+	decision, _ := l.decide(k, epoch, s, true)
+	return decision == "skip"
 }
 
 // deferred reports whether this unchanged member is still inside its backoff.
@@ -184,14 +227,21 @@ func (l *deliveryLedger) invalidate(t ledgerTarget, epoch uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_ = l.lockedAt(epoch)
+	l.metrics.invalidated("confirmed_contact", len(l.entries[t]))
 	l.size -= len(l.entries[t])
 	delete(l.entries, t)
 	l.version++
+	if len(l.stamps) >= ledgerMaxEntries {
+		// ponytail: bound the stamp map by making every older stamp stale at once.
+		clear(l.stamps)
+		l.floor = l.version
+	}
+	l.stamps[t] = l.version
 }
 
 // cover records proven coverage until a local deadline and clears any backoff.
-// A terminal member forgets its entry. The deadline is dropped if any target
-// was invalidated since since (a concurrent confirm may have lowered it).
+// A terminal member forgets its entry. The deadline is dropped if its target
+// was invalidated after since (a concurrent confirm may have lowered it).
 func (l *deliveryLedger) cover(k ledgerKey, epoch uint64, s ledgerSnap, until time.Time, since uint64) {
 	if l == nil {
 		return
@@ -201,7 +251,7 @@ func (l *deliveryLedger) cover(k ledgerKey, epoch uint64, s ledgerSnap, until ti
 	if !l.lockedAt(epoch) {
 		return
 	}
-	if s.terminal || l.version != since {
+	if s.terminal || since < l.floor || l.stamps[k.target] > since {
 		l.lockedDelete(k)
 		return
 	}

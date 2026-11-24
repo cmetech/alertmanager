@@ -78,7 +78,13 @@ asks OSCAR as before. Any contact entered on the same OSCAR target key
 because its confirmation can lower `next_eligible`; a deadline read before such
 an invalidation is not recorded. Failed calls back off per member while it is unchanged;
 a deferred resolved member holds its group. A lease epoch change or reload
-clears the ledger. Entries are bounded at 100,000.
+clears the ledger; a lapsed lease decides and records nothing until it renews.
+Entries are bounded at 100,000 (tens of MB). There is no management UI: the
+ledger is rebuildable memory and OSCAR stays the source of truth. The
+`alertmanager_oscar_native_ledger_*` metrics report entries, decisions and
+invalidations, and `GET /api/v2/oscar/ledger?fingerprint=<fp>` (read-only,
+alongside the other unauthenticated `/api/v2/oscar` reads) returns one alert's
+entries. The alerts page is unaffected: a skip removes only the OSCAR call.
 
 ## Journal connections and observability
 
