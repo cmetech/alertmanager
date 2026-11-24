@@ -223,7 +223,9 @@ func (api *API) scopedPageRoutes(next http.Handler, key []byte) http.Handler {
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		// Do not drain an untrusted or incomplete body before returning a rejection.
-		w.Header().Set("Connection", "close")
+		if r.ProtoMajor == 1 {
+			w.Header().Set("Connection", "close")
+		}
 		setDeadline, ok := r.Context().Value(scopedReadDeadlineKey{}).(func(time.Time) error)
 		if !ok {
 			setDeadline = http.NewResponseController(w).SetReadDeadline
@@ -290,7 +292,9 @@ func (api *API) scopedPageRoutes(next http.Handler, key []byte) http.Handler {
 			w.WriteHeader(503)
 			return
 		}
-		w.Header().Del("Connection")
+		if r.ProtoMajor == 1 {
+			w.Header().Del("Connection")
+		}
 		if sec < time.Now().Unix()-60 {
 			w.WriteHeader(401)
 			return

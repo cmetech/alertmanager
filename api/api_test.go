@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -382,5 +383,30 @@ func TestScopedPageStalledHTTPBodyIsBounded(t *testing.T) {
 			require.Equal(t, "no-store", response.Header.Get("Cache-Control"))
 			require.Empty(t, response.Header.Get("X-Oscar-Scoped-Page-Version"))
 		})
+	}
+}
+
+func TestScopedPageRejectedHTTP2StreamKeepsConnection(t *testing.T) {
+	api := newScopedPageTestAPI(t, "12345678901234567890123456789012")
+	server := httptest.NewUnstartedServer(api.Register(route.New(), "/am"))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	client := server.Client()
+	for i := range 2 {
+		reused := false
+		ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused }})
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/am/api/v2/oscar/alerts/scoped-page", strings.NewReader("{}"))
+		require.NoError(t, err)
+		response, err := client.Do(request)
+		require.NoError(t, err)
+		require.Equal(t, 2, response.ProtoMajor)
+		require.Equal(t, http.StatusUnauthorized, response.StatusCode)
+		_, err = io.Copy(io.Discard, response.Body)
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		if i > 0 {
+			require.True(t, reused, "rejected stream must not drain the HTTP/2 connection")
+		}
 	}
 }
