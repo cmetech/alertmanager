@@ -63,6 +63,9 @@ type Alerts struct {
 	actionObserver                         func(string, *alert.Alert, bool)
 	observer                               StateObserver
 	heartbeatProbe                         atomic.Bool
+	keptCount, keptOldest                  atomic.Int64
+	passKept                               int
+	passOldest                             time.Time
 	putWait, putHold, gcHold, snapshotHold prometheus.Histogram
 	heartbeatContention                    prometheus.Counter
 
@@ -107,6 +110,31 @@ func (a *Alerts) SetActionObserver(fn func(string, *alert.Alert, bool)) {
 			}
 		}
 	}
+}
+
+// SetGCRetain keeps a resolved alert past GC while keep returns true. The
+// predicate runs under the provider mutex and must not block or acquire it.
+func (a *Alerts) SetGCRetain(keep func(*alert.Alert) bool) {
+	a.alerts.SetGCRetain(func(s *alert.Alert) bool {
+		if !keep(s) {
+			return false
+		}
+		a.passKept++
+		if a.passOldest.IsZero() || s.EndsAt.Before(a.passOldest) {
+			a.passOldest = s.EndsAt
+		}
+		return true
+	})
+}
+
+// KeptResolves returns how many resolved alerts the last GC pass kept and the
+// resolution time of the oldest (zero when none).
+func (a *Alerts) KeptResolves() (int, time.Time) {
+	n, oldest := int(a.keptCount.Load()), a.keptOldest.Load()
+	if n == 0 {
+		return 0, time.Time{}
+	}
+	return n, time.Unix(0, oldest)
 }
 
 // ReadActionSource hands a current, provider-owned member to a bounded local reader.
@@ -338,7 +366,10 @@ func (a *Alerts) gcAlerts() []*alert.Alert {
 	a.mtx.Lock()
 	start := time.Now()
 	defer func() { observeDuration(a.gcHold, start); a.mtx.Unlock() }()
+	a.passKept, a.passOldest = 0, time.Time{}
 	deleted := a.alerts.GC()
+	a.keptCount.Store(int64(a.passKept))
+	a.keptOldest.Store(a.passOldest.UnixNano())
 	for _, old := range deleted {
 		fp := old.Fingerprint()
 		owner := a.owners[fp]

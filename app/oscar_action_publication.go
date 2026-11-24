@@ -252,6 +252,24 @@ func (a *nativeActions) retired(g *actionGraph, member *alert.Alert) bool {
 	return a.graph == g && (r == nil || r.source != s)
 }
 
+// keepResolved is the provider GC predicate. It keeps a resolved source until
+// the current graph has routed it and its group no longer holds it; a group
+// drops a resolved member only after a successful flush. Without a recovery
+// journal routing is not tracked and GC is unchanged.
+func (a *nativeActions) keepResolved(s *alert.Alert) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	r := a.residents[residentKey(s.ActionOwner(), s)]
+	if a.recovery == nil || r == nil || r.source != s {
+		return false
+	}
+	g := a.graph
+	if g == nil || r.unknown || r.epoch != g.epoch || r.routed == nil || r.routedGeneration != g.generation {
+		return true
+	}
+	return g.dispatcher.HoldsProjection(r.routed)
+}
+
 // graphView is used by each subscription with its originating graph. Its use
 // callback only updates that graph's local caches.
 func (a *nativeActions) graphView(g *actionGraph, s *alert.Alert, routing bool, use func(*alert.Alert)) {

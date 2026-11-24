@@ -403,6 +403,10 @@ func (a *App) setup(dial api.ActionDialer) error {
 	}
 
 	actionOwner, actions := configureNativeActions(opts, alerts.ReadActionSource, logger)
+	if actions != nil {
+		alerts.SetGCRetain(actions.keepResolved)
+		registerKeptResolveMetrics(reg, alerts)
+	}
 	apih, err := api.NewWithActionDialer(api.Options{
 		Alerts:                     alerts,
 		Silences:                   silences,

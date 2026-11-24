@@ -1715,3 +1715,27 @@ func TestRouteLabelsPerGroupOverride(t *testing.T) {
 	require.Equal(t, model.LabelValue("A"), parentLabels["team"])
 	require.Equal(t, model.LabelValue("team is A"), parentLabels["description"])
 }
+
+// OSC-137: a group holds a resolved member until a flush succeeds.
+func TestDispatcherHoldsProjectionUntilSuccessfulFlush(t *testing.T) {
+	r := prometheus.NewRegistry()
+	alerts, err := mem.NewAlerts(context.Background(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), r, nil)
+	require.NoError(t, err)
+	route := &Route{RouteOpts: RouteOpts{GroupBy: map[model.LabelName]struct{}{"alertname": {}}, GroupInterval: 5 * time.Minute}}
+	timeout := func(d time.Duration) time.Duration { return d }
+	d := NewDispatcher(alerts, route, &recordStage{alerts: make(map[string]map[model.Fingerprint]*alert.Alert)}, nil, timeout, testMaintenanceInterval, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), NewDispatcherMetrics(false, r, nil), nil)
+	d.routeGroupsSlice = []routeAggrGroups{{route: route}}
+	labels := model.LabelSet{"alertname": "1"}
+	ag := newAggrGroup(context.Background(), labels, route, timeout, eventrecorder.NopRecorder(), promslog.NewNopLogger(), nil)
+	d.routeGroupsSlice[0].groups.Store(ag.fingerprint(), ag)
+	resolved := alert.New(model.Alert{Labels: labels, StartsAt: time.Now().Add(-time.Hour), EndsAt: time.Now().Add(-time.Minute)}, time.Now(), false)
+	other := alert.New(model.Alert{Labels: model.LabelSet{"alertname": "2"}, StartsAt: time.Now().Add(-time.Hour), EndsAt: time.Now().Add(-time.Minute)}, time.Now(), false)
+	ag.insert(context.Background(), resolved)
+
+	require.True(t, d.HoldsProjection(resolved))
+	require.False(t, d.HoldsProjection(other))
+	ag.flush(func(...*alert.Alert) bool { return false })
+	require.True(t, d.HoldsProjection(resolved), "a failed flush keeps the unconfirmed resolve")
+	ag.flush(func(...*alert.Alert) bool { return true })
+	require.False(t, d.HoldsProjection(resolved), "a successful flush releases it")
+}

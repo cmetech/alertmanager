@@ -42,6 +42,7 @@ type Alerts struct {
 	sync.Mutex
 	alerts        map[model.Fingerprint]*alert.Alert
 	gcCallback    func([]*alert.Alert)
+	gcRetain      func(*alert.Alert) bool
 	limits        map[string]*limit.Bucket[model.Fingerprint]
 	perAlertLimit int
 	destroyed     bool
@@ -75,6 +76,15 @@ func (a *Alerts) SetGCCallback(cb func([]*alert.Alert)) {
 	defer a.Unlock()
 
 	a.gcCallback = cb
+}
+
+// SetGCRetain installs a predicate that keeps a resolved alert past GC while
+// it returns true. It runs under the store lock.
+func (a *Alerts) SetGCRetain(keep func(*alert.Alert) bool) {
+	a.Lock()
+	defer a.Unlock()
+
+	a.gcRetain = keep
 }
 
 // Run starts the GC loop. The interval must be greater than zero; if not, the function will panic.
@@ -113,7 +123,7 @@ func (a *Alerts) gcAlerts() (deleted []*alert.Alert) {
 	a.Lock()
 	defer a.Unlock()
 	for fp, alrt := range a.alerts {
-		if alrt.Resolved() && (alrt.ManualEpisode == "" || alrt.ManualTerminal) {
+		if alrt.Resolved() && (alrt.ManualEpisode == "" || alrt.ManualTerminal) && (a.gcRetain == nil || !a.gcRetain(alrt)) {
 			deleted = append(deleted, alrt)
 			delete(a.alerts, fp)
 		}
