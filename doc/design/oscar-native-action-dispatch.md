@@ -63,6 +63,29 @@ up to the episode bound of exact keys with a counted hash-bucket hold on
 overflow. An ambiguous pre-enrollment contact remains local to the process.
 
 
+## Ordinary delivery ledger
+
+Each configuration graph keeps an in-memory ledger keyed by aggregation group,
+receiver integration and provider fingerprint. A tracked firing member of an
+unprepared integration skips its admission only while its episode reference,
+severity revision, lifecycle, outgoing labels and non-terminal state equal the
+recorded entry and the local deadline has not passed. Deadlines come from this
+process's own confirmed full-scope ordinary settle (taken before the settle
+request, so never later than OSCAR's `next_eligible`) or from a covered row's
+optional `next_eligible`, mapped through the lease clock anchor. Anything else
+asks OSCAR as before. Any contact entered on the same OSCAR target key
+(ordinary or explicit, any scope or route) drops every entry for that target,
+because its confirmation can lower `next_eligible`; a deadline read before such
+an invalidation is not recorded. Failed calls back off per member while it is unchanged;
+a deferred resolved member holds its group. A lease epoch change or reload
+clears the ledger; a lapsed lease decides and records nothing until it renews.
+Entries are bounded at 100,000 (tens of MB). There is no management UI: the
+ledger is rebuildable memory and OSCAR stays the source of truth. The
+`alertmanager_oscar_native_ledger_*` metrics report entries, decisions and
+invalidations, and `GET /api/v2/oscar/ledger?fingerprint=<fp>` (read-only,
+alongside the other unauthenticated `/api/v2/oscar` reads) returns one alert's
+entries. The alerts page is unaffected: a skip removes only the OSCAR call.
+
 ## Journal connections and observability
 
 Lease acquire and renew run on their own two-connection client with a fixed

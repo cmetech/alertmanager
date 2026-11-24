@@ -406,6 +406,7 @@ func (a *App) setup(dial api.ActionDialer) error {
 	if actions != nil {
 		alerts.SetGCRetain(actions.keepResolved)
 		registerKeptResolveMetrics(reg, alerts)
+		registerLedgerMetrics(reg, actions)
 	}
 	apih, err := api.NewWithActionDialer(api.Options{
 		Alerts:                     alerts,

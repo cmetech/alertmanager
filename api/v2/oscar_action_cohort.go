@@ -40,7 +40,10 @@ type OrdinaryAdmission struct {
 	TargetKey string
 	Covered   bool
 	Completed bool
-	Err       error
+	// CoveredUntil is OSCAR's next_eligible for a covered row, mapped
+	// conservatively to the local clock; zero when OSCAR did not return it.
+	CoveredUntil time.Time
+	Err          error
 }
 type OrdinaryReceipt struct {
 	Entry             Entry
@@ -75,6 +78,8 @@ type cohortResult struct {
 	Lease    time.Time      `json:"lease_expires_at"`
 	Permit   time.Time      `json:"permit_expires_at"`
 	Evidence string         `json:"evidence"`
+	// NextEligible is optional on covered rows (older stores omit it).
+	NextEligible *time.Time `json:"next_eligible,omitempty"`
 }
 
 type cohortChunk struct {
@@ -258,6 +263,9 @@ func (o *nativeActionOwner) AdmitCohort(ctx context.Context, candidates []Ordina
 			if err == nil && len(rows) == len(chunk) && (terminal == nil && row.State == "covered" || terminal != nil && row.State == "completed") {
 				if terminal == nil || stamps[index].Load() && o.live(ctx) && o.CohortSupported() && terminalWireMatches(c.Member, terminal.WireResolved) {
 					out[index] = OrdinaryAdmission{Covered: row.State == "covered", Completed: row.State == "completed"}
+					if row.State == "covered" && row.NextEligible != nil {
+						out[index].CoveredUntil = o.conservativeDeadline(*row.NextEligible)
+					}
 				}
 				continue
 			}

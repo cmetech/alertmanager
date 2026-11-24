@@ -1082,7 +1082,26 @@ func exerciseCommissionedProvider(t *testing.T, scenario string) {
 		mu.Unlock()
 		require.Equal(t, before, siblingTiming())
 	}
-	require.Positive(t, earlyCovered.Load(), "a native group interval before next eligibility must be covered")
+	// A native group interval before next eligibility is covered: since OSC-136 the
+	// delivery ledger answers it locally, or OSCAR answers it when the ledger cannot.
+	ledgerSkips := 0.0
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, f := range families {
+		if f.GetName() != "alertmanager_oscar_native_ledger_decisions_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["decision"] == "skip" && labels["reason"] == "covered" {
+				ledgerSkips += m.GetCounter().GetValue()
+			}
+		}
+	}
+	require.True(t, earlyCovered.Load() > 0 || ledgerSkips > 0, "a native group interval before next eligibility must be covered")
 	require.Less(t, admissions.Load(), int32(160), "4109 members use bounded private chunks per physical notification")
 	// The same tracked 4109 keep their original journal guards after moving
 	// to a direct-only receiver. It requires no signed callback consumer.
