@@ -14,8 +14,15 @@
 package api
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -29,6 +36,10 @@ import (
 
 	apiconnect "github.com/prometheus/alertmanager/api/connect"
 	apiv2 "github.com/prometheus/alertmanager/api/v2"
+	"github.com/prometheus/alertmanager/config"
+	"github.com/prometheus/alertmanager/eventrecorder"
+	"github.com/prometheus/alertmanager/labelset"
+	"github.com/prometheus/alertmanager/provider/mem"
 )
 
 func TestConcurrencyLimitHandler(t *testing.T) {
@@ -222,4 +233,46 @@ func TestInstrumentConnectHandlerBoundsCardinality(t *testing.T) {
 			}, handlers)
 		})
 	}
+}
+
+type scopedDeadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (w *scopedDeadlineRecorder) SetReadDeadline(t time.Time) error {
+	w.deadlines = append(w.deadlines, t)
+	return nil
+}
+
+func TestScopedPageRegisteredWithWebTimeout(t *testing.T) {
+	const path = "/api/v2/oscar/alerts/scoped-page"
+	const key = "12345678901234567890123456789012"
+	const body = `{"version":1,"scope":{"unrestricted":false,"allow":[],"deny":[]},"query":{}}`
+	logger := promslog.NewNopLogger()
+	store, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, logger, eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	t.Cleanup(store.Close)
+	v2, err := apiv2.NewAPI(store, nil, nil, nil, logger, prometheus.NewRegistry())
+	require.NoError(t, err)
+	keyfile := filepath.Join(t.TempDir(), "operator")
+	require.NoError(t, os.WriteFile(keyfile, []byte(key), 0600))
+	require.NoError(t, v2.InstallActionOwner(apiv2.ActionOwnerConfig{OperatorKeyFile: keyfile}))
+	cfg, err := config.Load("route:\n  receiver: team\nreceivers:\n- name: team\n")
+	require.NoError(t, err)
+	v2.Update(cfg, func(context.Context, labelset.LabelSet) {})
+	api := API{v2: v2, timeout: time.Minute, connect: apiconnect.NewAPI(apiconnect.Options{}), deprecationRouter: NewV1DeprecationRouter(logger), requestDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_duration"}, []string{"handler", "method", "code"})}
+	req := httptest.NewRequest(http.MethodPost, "/am"+path, strings.NewReader(body))
+	stamp := fmt.Sprint(time.Now().Unix())
+	mac := hmac.New(sha256.New, []byte(key))
+	fmt.Fprintf(mac, "native-scoped-page-v1\nPOST\n%s\noperator\nv1\n%s\nYWxpY2U\nread:alerts\n%x", path, stamp, sha256.Sum256([]byte(body)))
+	for name, value := range map[string]string{"Sender": "operator", "Key-Id": "v1", "Time": stamp, "Subject": "YWxpY2U", "Grant": "read:alerts", "Signature": hex.EncodeToString(mac.Sum(nil))} {
+		req.Header.Set("X-Oscar-Read-"+name, value)
+	}
+	w := &scopedDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	api.Register(route.New(), "/am").ServeHTTP(w, req)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.Len(t, w.deadlines, 2)
+	require.False(t, w.deadlines[0].IsZero())
+	require.True(t, w.deadlines[1].IsZero())
 }

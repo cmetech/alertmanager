@@ -265,8 +265,25 @@ done:
 		sort.Slice(h.rows, func(i, j int) bool { return h.better(h.rows[i], h.rows[j]) })
 		end := min(start+per, len(h.rows))
 		selected = h.rows[start:end]
+		var visible map[string]bool
+		if scope != nil && (!scope.unrestricted || len(scope.deny) > 0) {
+			visible = make(map[string]bool, len(selected))
+			for _, c := range selected {
+				visible[c.fingerprint] = true
+			}
+		}
 		for _, c := range selected {
-			records = append(records, AlertToOpenAPIAlert(c.a, c.status, c.receivers, nil))
+			record := AlertToOpenAPIAlert(c.a, c.status, c.receivers, nil)
+			if visible != nil && len(c.status.InhibitedBy) > 0 {
+				// An inhibitor outside the authorized page has no independently established scope.
+				record.Status.InhibitedBy = []string{}
+				for _, fp := range c.status.InhibitedBy {
+					if visible[fp] {
+						record.Status.InhibitedBy = append(record.Status.InhibitedBy, fp)
+					}
+				}
+			}
+			records = append(records, record)
 			source := strings.ToLower(string(c.a.ProviderSource().Labels["severity"]))
 			effective := strings.ToLower(string(c.a.Labels["severity"]))
 			if firingRanks[source] > 0 && firingRanks[effective] > firingRanks[source] {

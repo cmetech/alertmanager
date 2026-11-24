@@ -4,6 +4,7 @@
 package v2
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -12,12 +13,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/go-openapi/runtime"
@@ -28,6 +32,76 @@ import (
 )
 
 const scopedPagePath = "/api/v2/oscar/alerts/scoped-page"
+
+type scopedReadDeadlineKey struct{}
+
+// WithScopedPageReadDeadline preserves the transport deadline across http.TimeoutHandler.
+func WithScopedPageReadDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != scopedPagePath {
+			next.ServeHTTP(w, r)
+			return
+		}
+		controller := http.NewResponseController(w)
+		var mu sync.Mutex
+		var reading bool
+		set := func(t time.Time) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if controller == nil {
+				return http.ErrHandlerTimeout
+			}
+			err := controller.SetReadDeadline(t)
+			if err == nil {
+				reading = !t.IsZero()
+			}
+			return err
+		}
+		defer func() {
+			mu.Lock()
+			defer mu.Unlock()
+			// TimeoutHandler may return while its handler is still reading the body.
+			if reading {
+				_ = controller.SetReadDeadline(time.Now())
+			}
+			controller = nil
+		}()
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), scopedReadDeadlineKey{}, set)))
+	})
+}
+
+// encoding/json replaces isolated UTF-16 surrogates with U+FFFD before typed validation.
+func validScopeEscapes(raw []byte) bool {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(raw) || raw[i] != 'u' {
+			continue
+		}
+		if len(raw)-i < 5 {
+			return false
+		}
+		value, err := strconv.ParseUint(string(raw[i+1:i+5]), 16, 16)
+		if err != nil {
+			return false
+		}
+		i += 4
+		if !utf16.IsSurrogate(rune(value)) {
+			continue
+		}
+		if value >= 0xdc00 || len(raw)-i < 7 || raw[i+1] != '\\' || raw[i+2] != 'u' {
+			return false
+		}
+		low, err := strconv.ParseUint(string(raw[i+3:i+7]), 16, 16)
+		if err != nil || low < 0xdc00 || low > 0xdfff {
+			return false
+		}
+		i += 6
+	}
+	return true
+}
 
 type scopeGroup struct {
 	Items []struct {
@@ -174,6 +248,12 @@ func (api *API) scopedPageRoutes(next http.Handler, key []byte) http.Handler {
 			w.WriteHeader(401)
 			return
 		}
+		sec, err := strconv.ParseInt(stamp, 10, 64)
+		now := time.Now()
+		if err != nil || strconv.FormatInt(sec, 10) != stamp || sec < now.Unix()-60 || sec > now.Unix()+5 {
+			w.WriteHeader(401)
+			return
+		}
 		select {
 		case inFlight <- struct{}{}:
 			defer func() { <-inFlight }()
@@ -181,14 +261,34 @@ func (api *API) scopedPageRoutes(next http.Handler, key []byte) http.Handler {
 			w.WriteHeader(503)
 			return
 		}
+		setDeadline, ok := r.Context().Value(scopedReadDeadlineKey{}).(func(time.Time) error)
+		if !ok {
+			setDeadline = http.NewResponseController(w).SetReadDeadline
+		}
+		deadline := now.Add(5 * time.Second)
+		if end, ok := r.Context().Deadline(); ok && end.Before(deadline) {
+			deadline = end
+		}
+		if err := setDeadline(deadline); err != nil {
+			w.WriteHeader(503)
+			return
+		}
 		raw, err := io.ReadAll(io.LimitReader(r.Body, actionBodyLimit+1))
+		clearErr := setDeadline(time.Time{})
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			w.WriteHeader(http.StatusRequestTimeout)
+			return
+		}
+		if clearErr != nil {
+			w.WriteHeader(503)
+			return
+		}
 		if err != nil || len(raw) > actionBodyLimit {
 			w.WriteHeader(413)
 			return
 		}
-		sec, err := strconv.ParseInt(stamp, 10, 64)
-		now := time.Now().Unix()
-		if err != nil || strconv.FormatInt(sec, 10) != stamp || sec < now-60 || sec > now+5 {
+		if sec < time.Now().Unix()-60 {
 			w.WriteHeader(401)
 			return
 		}
@@ -205,7 +305,7 @@ func (api *API) scopedPageRoutes(next http.Handler, key []byte) http.Handler {
 			Scope   scopeWire  `json:"scope"`
 			Query   url.Values `json:"query"`
 		}
-		if !decodeAction(raw, &body) || body.Version != 1 || body.Query == nil {
+		if !validScopeEscapes(raw) || !decodeAction(raw, &body) || body.Version != 1 || body.Query == nil {
 			w.WriteHeader(400)
 			return
 		}

@@ -131,11 +131,14 @@ no surrounding whitespace. Equality takes a string. Membership takes 1–100
 strings. Empty strings match only existing labels with an empty value.
 Each literal may occupy up to 4096 UTF-8 bytes. Limits are 32 groups and
 100 items across both lists, 65536 bytes per compiled group, a 256 KiB
-envelope and eight concurrent signed-page requests per native process.
+envelope and eight concurrent signed-page requests per native process. The body
+read deadline is five seconds or the remaining web request timeout, whichever is
+shorter. An expired body read returns HTTP 408.
 
 Match persisted provider label names and values using the existing grid
 Unicode case fold, including Cherokee's uppercase stable form. Preserve
-accents, normalization form, trailing whitespace and full label lengths.
+accents, normalization form, trailing whitespace and full label lengths. An
+escaped UTF-16 surrogate must be paired. Literal U+FFFD is a valid value.
 Each rule is existential over all matching folded names. A missing label
 never matches. Duplicate case-equivalent label names may satisfy different
 rules independently. OSC-104's Python and SQL implementations must consume
@@ -150,6 +153,8 @@ correlation metadata are evaluated independently. This endpoint reads only
 native Active data. It applies the existing signed query's narrowing filters
 and search to the effective action view, preserving provider fingerprints and
 source severity. Counts, timing and severity maps contain authorized rows only.
+On a restricted page, a suppressed row keeps its state and lists inhibitor
+fingerprints only for sources present on that same authorized page.
 
 Successful responses carry `X-Oscar-Scoped-Page-Version: 1` and the usual
 `contract_version: 2` page. All scoped responses specify `Cache-Control: no-store`.

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,6 +46,16 @@ func scopedRequest(body, audience string, now time.Time) *http.Request {
 	return r
 }
 
+type scopedRecorder struct {
+	*httptest.ResponseRecorder
+	deadline func(time.Time) error
+}
+
+func newScopedRecorder() *scopedRecorder {
+	return &scopedRecorder{ResponseRecorder: httptest.NewRecorder(), deadline: func(time.Time) error { return nil }}
+}
+func (w *scopedRecorder) SetReadDeadline(t time.Time) error { return w.deadline(t) }
+
 func TestScopedPage(t *testing.T) {
 	now := time.Now()
 	store, err := mem.NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
@@ -60,12 +71,12 @@ func TestScopedPage(t *testing.T) {
 	require.NoError(t, api.InstallActionOwner(ActionOwnerConfig{OperatorKeyFile: key}))
 	require.Nil(t, api.actionOwner)
 	handle := func(r *http.Request) *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
+		w := newScopedRecorder()
 		api.Handler.ServeHTTP(w, r)
-		return w
+		return w.ResponseRecorder
 	}
 	for _, labels := range []model.LabelSet{
-		{"alertname": "aaa", "team": "other"}, {"alertname": "bbb", "team": "a", "env": "dev"}, {"alertname": "ccc", "team": "a", "env": "prod"},
+		{"alertname": "aaa", "team": "other", "unicode": "�", "astral": "😀"}, {"alertname": "bbb", "team": "a", "env": "dev"}, {"alertname": "ccc", "team": "a", "env": "prod"},
 		{"alertname": "ddd", "team": "b", "oscar_correlation_role": "child", "oscar_correlation_rule_id": "12", "oscar_correlation_parent_fingerprint": "abcd"}, {"alertname": "eee", "team": "b", "correlation_parent_identity": "partial"},
 	} {
 		require.NoError(t, store.Put(t.Context(), alert.New(model.Alert{Labels: labels, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)))
@@ -106,11 +117,33 @@ func TestScopedPage(t *testing.T) {
 		if tc.first != "" {
 			require.Len(t, page.Records, 1)
 			require.Equal(t, tc.first, page.Records[0].Labels["alertname"])
+			if tc.first == "ddd" {
+				require.Equal(t, "abcd", page.Records[0].Labels["oscar_correlation_parent_fingerprint"])
+			}
 			require.Len(t, page.Timing, 1)
 			require.Contains(t, page.Timing, page.Records[0].Fingerprint)
 		}
 		require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 		require.Equal(t, "1", w.Header().Get("X-Oscar-Scoped-Page-Version"))
+	}
+	for _, tc := range []struct {
+		literal, key string
+		code, total  int
+	}{
+		{`\ud800`, "unicode", 400, 0}, {`\udc00`, "unicode", 400, 0},
+		{`\ud800\u0061`, "unicode", 400, 0}, {`\ud83d\ude00`, "astral", 200, 1},
+		{"�", "unicode", 200, 1}, {`\\ud800`, "unicode", 200, 0},
+	} {
+		wire := envelope(fmt.Sprintf(`{"unrestricted":false,"allow":[%s],"deny":[]}`, group(tc.key, tc.literal)), `{}`)
+		w := handle(scopedRequest(wire, domain, now))
+		require.Equal(t, tc.code, w.Code, tc.literal)
+		if tc.code == 200 {
+			var page struct {
+				Total int `json:"total_records"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+			require.Equal(t, tc.total, page.Total)
+		}
 	}
 	mutation := httptest.NewRequest("POST", actionPath, strings.NewReader(actionBody))
 	stamp := fmt.Sprint(now.Unix())
@@ -157,6 +190,31 @@ func TestScopedPage(t *testing.T) {
 	} {
 		require.Equal(t, 400, handle(scopedRequest(invalid, domain, now)).Code, invalid)
 	}
+	t.Run("body read deadline releases admission", func(t *testing.T) {
+		// Exercise more sequential expirations than the eight-slot budget, with peers still open.
+		for range 9 {
+			server, peer := net.Pipe()
+			t.Cleanup(func() { server.Close(); peer.Close() })
+			require.NoError(t, server.SetReadDeadline(time.Now().Add(time.Second)))
+			req := scopedRequest(body, domain, time.Now())
+			req.Body = server
+			w := newScopedRecorder()
+			var deadlines []time.Time
+			w.deadline = func(d time.Time) error {
+				deadlines = append(deadlines, d)
+				if !d.IsZero() {
+					d = time.Now().Add(time.Millisecond)
+				}
+				return server.SetReadDeadline(d)
+			}
+			api.Handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusRequestTimeout, w.Code)
+			require.Len(t, deadlines, 2)
+			require.WithinDuration(t, time.Now().Add(5*time.Second), deadlines[0], time.Second)
+			require.True(t, deadlines[1].IsZero())
+		}
+		require.Equal(t, 200, handle(scopedRequest(body, domain, time.Now())).Code)
+	})
 	require.Equal(t, 413, handle(scopedRequest(strings.Repeat(" ", actionBodyLimit+1), domain, now)).Code)
 }
 

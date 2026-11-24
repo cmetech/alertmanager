@@ -275,12 +275,14 @@ paths:
           description: Invalid read assertion or operator key unavailable
         '405':
           description: Method must be POST
+        '408':
+          description: Request body read deadline expired
         '413':
           description: Body exceeds the read limit
         '500':
           $ref: '#/responses/InternalServerError'
         '503':
-          description: Concurrent read limit reached
+          description: Concurrent read limit reached or transport read deadline unavailable
   /oscar/alerts/page:
     get:
       tags:
