@@ -133,7 +133,8 @@ Each literal may occupy up to 4096 UTF-8 bytes. Limits are 32 groups and
 100 items across both lists, 65536 bytes per compiled group, a 256 KiB
 envelope and eight concurrent signed-page requests per native process. The body
 read deadline is five seconds or the remaining web request timeout, whichever is
-shorter. An expired body read returns HTTP 408.
+shorter. If the body read times out first, the scoped handler returns HTTP 408.
+If the overall web request times out first, the server returns HTTP 503.
 
 Match persisted provider label names and values using the existing grid
 Unicode case fold, including Cherokee's uppercase stable form. Preserve

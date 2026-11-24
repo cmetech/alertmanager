@@ -276,3 +276,27 @@ func TestScopedPageRegisteredWithWebTimeout(t *testing.T) {
 	require.False(t, w.deadlines[0].IsZero())
 	require.True(t, w.deadlines[1].IsZero())
 }
+
+func TestScopedPageOuterTimeoutHeaders(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		defer close(release)
+		inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-Oscar-Scoped-Page-Version", "1")
+			<-release
+		})
+		api := API{
+			v2:                &apiv2.API{Handler: inner},
+			timeout:           time.Second,
+			connect:           apiconnect.NewAPI(apiconnect.Options{}),
+			deprecationRouter: NewV1DeprecationRouter(promslog.NewNopLogger()),
+			requestDuration:   prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_timeout_duration"}, []string{"handler", "method", "code"}),
+		}
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/am/api/v2/oscar/alerts/scoped-page", nil)
+		api.Register(route.New(), "/am").ServeHTTP(w, req)
+		require.Equal(t, http.StatusServiceUnavailable, w.Code)
+		require.Equal(t, "no-store", w.Result().Header.Get("Cache-Control"))
+		require.Empty(t, w.Result().Header.Values("X-Oscar-Scoped-Page-Version"))
+	})
+}

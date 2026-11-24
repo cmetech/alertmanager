@@ -42,6 +42,7 @@ func WithScopedPageReadDeadline(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		controller := http.NewResponseController(w)
 		var mu sync.Mutex
 		var reading bool

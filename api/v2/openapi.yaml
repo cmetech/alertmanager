@@ -282,7 +282,7 @@ paths:
         '500':
           $ref: '#/responses/InternalServerError'
         '503':
-          description: Concurrent read limit reached or transport read deadline unavailable
+          description: Overall request timeout expired, concurrent read limit reached, or transport read deadline unavailable
   /oscar/alerts/page:
     get:
       tags:
