@@ -1,0 +1,28 @@
+elm-generated-type-after.log
+Compiling ...
+             
+Success!
+
+
+elm-roundtrip-after.log
+Compiling
+Compiling > Starting tests
+
+elm-test 0.19.1-revision6
+-------------------------
+
+Running 3 tests. To reproduce these results, run: elm-test --fuzz 100 --seed 350546235994283 tests/OscarScopedPageWire.elm
+
+
+TEST RUN PASSED
+
+Duration: 101 ms
+Passed:   3
+Failed:   0
+
+
+
+go-final-focused-race.log
+ok  	github.com/prometheus/alertmanager/api	1.620s
+ok  	github.com/prometheus/alertmanager/api/v2	1.756s
+

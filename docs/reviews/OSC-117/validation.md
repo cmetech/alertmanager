@@ -1,37 +1,36 @@
 # OSC-117 validation and handoff
 
-Product source candidate: `0be3dbd1ce37812a43cee8542a33dbe7d6596b6c`.
+Latest product candidate: `98a0bfcfc4ae5162507ff72c22dae0b44857fd37`.
 Base: `b3cf31d9db656f34c442e321cd06f71a551d65c7`.
+Corey explicitly authorized Elm/asset generation and focused Go tests on 2026-11-24.
 
-## Completed source checks
+## Completed checks
 
-- Pinned Go OpenAPI generator: `bash scripts/swagger.sh`, exit 0. Generated Go server/client/models and both embedded specifications are included. Generated files were not hand-edited. The parsed-operation fallback denies requests independently of the authenticated outer route.
-- `gofmt` on changed handwritten Go files; formatting check emitted no paths.
-- `git diff b3cf31d9db656f34c442e321cd06f71a551d65c7 HEAD --check`, exit 0.
-- Parsed source OpenAPI YAML; compared the generated embedded operation, response codes and parameters with source.
-- Parsed shared JSON fixtures and checked Python casefold expectations as an offline fixture sanity check. This is not SQL/Go implementation parity evidence.
-- Conventional commit/issue-reference checks passed for all four product commits. Git author/committer is Corey Ellis.
+| Check | Result |
+| --- | --- |
+| Pinned Go OpenAPI generation, `bash scripts/swagger.sh` | Passed; generated client/server/models and embedded specs included |
+| `fnm exec --using=24.19.0 make assets` | Passed; local container-based Elm generation, formatting, Elm and Mantine builds |
+| Explicit `elm make src/Data/OscarScopedPageRequest.elm --output=/dev/null` from ui/app | Passed; new generated types compile even though the current UI does not import them |
+| `elm-test tests/OscarScopedPageWire.elm` under pinned Node | Passed: 3 tests, 0 failures |
+| `go test -race ./api ./api/v2 -run 'TestScopedPage\|TestScopeParityFixture\|TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming' -count=1` | Passed both packages; shell alternation uses plain pipes |
+| Formatting, whitespace, OpenAPI structure and embedded-source checks | Passed |
 
-Independent discovery and closure evidence is preserved in round-1, round-2 and round-3. The reviewed revisions are explicit; later evidence-only commits do not change the product source.
+Captured final focused output is in round-4/validation-output.txt. Independent source discovery/closure evidence remains in rounds 1–3; the generated Elm correction is reviewed in round 4. Later evidence-only commits do not change product behavior. Generated files were not hand-edited.
 
-## Authored runtime coverage — not executed
+## Failures reproduced and corrected
 
-`TestScopedPage`, `TestScopeParityFixture`, `TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming`, generated-operation fallback coverage, `TestScopedPageRegisteredWithWebTimeout`, and `TestScopedPageOuterTimeoutHeaders` cover the signed boundary, role groups, metadata, parent/child visibility, read-only key enrollment, malformed Unicode and timeout behavior. These tests have no recorded runtime pass or failure.
+The first v2 test invocation could not compile because the fresh worktree lacked embedded ui/app/dist assets. Asset generation supplied the prerequisite; subsequent focused runs passed.
 
-After execution authorization, run focused suites including:
+The ordinary UI build passed while the new unused request type contained an undefined Object reference. Compiling that module explicitly reproduced the failure. The source schema now opts its polymorphic filter value into Elm's native JSON value type, preserving strings and arrays. A second focused regression exposed absent logicOperator being encoded as null; a property-specific generation annotation now omits it. Both fixes are in source templates/schema, with regenerated output. Scalar/list values and omitted/explicit AND/OR logic all pass round-trip checks. Existing generated Elm models had no changes.
 
-```sh
-go test ./api/v2 -run 'TestScopedPage|TestScopeParityFixture|TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming'
-go test ./api -run 'TestScopedPage'
-```
+The scoped Go tests exercise signed boundaries, role groups, parent/child visibility, inhibitor references, read-only key enrollment, malformed Unicode and timeout behavior, including race checking. This is focused evidence, not a claim that the entire repository or deployment has passed.
 
-Then complete applicable repository lint/tests, Elm generated types and asset checks. The Elm generator invokes a container and `make assets` builds the frontend. No service build, runtime test, service/container start, live probe or CI was performed during this work.
+## Remaining gates
 
-## Release gates
+- Repository-wide tests/lint, actual HTTP connection/deadline reuse and generated-client signing through the registered server still need qualification.
+- OSC-104: fresh grouped authority, trusted signing, read-key provisioning with mutations disabled, SQL normalization parity and full read/action/report enforcement.
+- OSC-105: native-console/alternate route gates and scoped UI behavior.
+- Complete activation coverage and rollout checks, including artifact downloads and Grafana separation. This native PR does not activate restrictions.
+- GitHub Actions remain disabled. This checkout has no GitLab remote or pipeline file; no hosted CI ran. A GitHub push is not CI evidence.
 
-- OSC-104: fresh grouped authority, trusted signing, read-key provisioning with mutations disabled, History/SQL normalization parity and full read/action/report enforcement.
-- OSC-105: native-console/alternate route gates and the complete scoped UI contract.
-- Complete the original activation coverage and rollout checks, including artifact downloads and Grafana separation. This native PR does not activate restrictions.
-- GitHub Actions are disabled. This checkout has no GitLab remote or pipeline file; a GitHub push/PR is not CI proof. Do not claim hosted checks without a deliberate configured run and matching SHA.
-
-Retain the isolated worktree and feature branch for review. No merge or deployment is authorized by this handoff.
+The isolated worktree/branch remain for draft PR review. No live OSCAR service restart, deployment or merge was performed or authorized by this validation work.
