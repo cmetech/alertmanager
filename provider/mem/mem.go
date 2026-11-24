@@ -63,7 +63,7 @@ type Alerts struct {
 	actionObserver                         func(string, *alert.Alert, bool)
 	observer                               StateObserver
 	heartbeatProbe                         atomic.Bool
-	keptCount, keptOldest                  atomic.Int64
+	kept                                   atomic.Pointer[keptResolves]
 	passKept                               int
 	passOldest                             time.Time
 	putWait, putHold, gcHold, snapshotHold prometheus.Histogram
@@ -127,14 +127,18 @@ func (a *Alerts) SetGCRetain(keep func(*alert.Alert) bool) {
 	})
 }
 
+type keptResolves struct {
+	n      int
+	oldest time.Time
+}
+
 // KeptResolves returns how many resolved alerts the last GC pass kept and the
 // resolution time of the oldest (zero when none).
 func (a *Alerts) KeptResolves() (int, time.Time) {
-	n, oldest := int(a.keptCount.Load()), a.keptOldest.Load()
-	if n == 0 {
-		return 0, time.Time{}
+	if k := a.kept.Load(); k != nil {
+		return k.n, k.oldest
 	}
-	return n, time.Unix(0, oldest)
+	return 0, time.Time{}
 }
 
 // ReadActionSource hands a current, provider-owned member to a bounded local reader.
@@ -368,13 +372,7 @@ func (a *Alerts) gcAlerts() []*alert.Alert {
 	defer func() { observeDuration(a.gcHold, start); a.mtx.Unlock() }()
 	a.passKept, a.passOldest = 0, time.Time{}
 	deleted := a.alerts.GC()
-	// Publish oldest before count; KeptResolves reads them in reverse.
-	oldest := int64(0)
-	if a.passKept > 0 {
-		oldest = a.passOldest.UnixNano()
-	}
-	a.keptOldest.Store(oldest)
-	a.keptCount.Store(int64(a.passKept))
+	a.kept.Store(&keptResolves{a.passKept, a.passOldest})
 	for _, old := range deleted {
 		fp := old.Fingerprint()
 		owner := a.owners[fp]
