@@ -1,6 +1,6 @@
 elm-generated-type-after.log
 Compiling ...
-             
+
 Success!
 
 
@@ -25,4 +25,3 @@ Failed:   0
 go-final-focused-race.log
 ok  	github.com/prometheus/alertmanager/api	1.620s
 ok  	github.com/prometheus/alertmanager/api/v2	1.756s
-

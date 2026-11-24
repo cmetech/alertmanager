@@ -256,7 +256,7 @@ func TestScopedPageRegisteredWithWebTimeout(t *testing.T) {
 	v2, err := apiv2.NewAPI(store, nil, nil, nil, logger, prometheus.NewRegistry())
 	require.NoError(t, err)
 	keyfile := filepath.Join(t.TempDir(), "operator")
-	require.NoError(t, os.WriteFile(keyfile, []byte(key), 0600))
+	require.NoError(t, os.WriteFile(keyfile, []byte(key), 0o600))
 	require.NoError(t, v2.InstallActionOwner(apiv2.ActionOwnerConfig{OperatorKeyFile: keyfile}))
 	cfg, err := config.Load("route:\n  receiver: team\nreceivers:\n- name: team\n")
 	require.NoError(t, err)

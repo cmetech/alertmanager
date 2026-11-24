@@ -31,8 +31,10 @@ import (
 	"github.com/prometheus/alertmanager/provider/mem"
 )
 
-const scopeTestKey = "12345678901234567890123456789012"
-const scopeTestPath = "/api/v2/oscar/alerts/scoped-page"
+const (
+	scopeTestKey  = "12345678901234567890123456789012"
+	scopeTestPath = "/api/v2/oscar/alerts/scoped-page"
+)
 
 func scopedRequest(body, audience string, now time.Time) *http.Request {
 	r := httptest.NewRequest("POST", scopeTestPath, strings.NewReader(body))
@@ -67,7 +69,7 @@ func TestScopedPage(t *testing.T) {
 	require.NoError(t, err)
 	api.Update(cfg, func(context.Context, labelset.LabelSet) {})
 	key := filepath.Join(t.TempDir(), "operator")
-	require.NoError(t, os.WriteFile(key, []byte(scopeTestKey), 0600))
+	require.NoError(t, os.WriteFile(key, []byte(scopeTestKey), 0o600))
 	require.NoError(t, api.InstallActionOwner(ActionOwnerConfig{OperatorKeyFile: key}))
 	require.Nil(t, api.actionOwner)
 	handle := func(r *http.Request) *httptest.ResponseRecorder {
@@ -76,8 +78,11 @@ func TestScopedPage(t *testing.T) {
 		return w.ResponseRecorder
 	}
 	for _, labels := range []model.LabelSet{
-		{"alertname": "aaa", "team": "other", "unicode": "�", "astral": "😀"}, {"alertname": "bbb", "team": "a", "env": "dev"}, {"alertname": "ccc", "team": "a", "env": "prod"},
-		{"alertname": "ddd", "team": "b", "oscar_correlation_role": "child", "oscar_correlation_rule_id": "12", "oscar_correlation_parent_fingerprint": "abcd"}, {"alertname": "eee", "team": "b", "correlation_parent_identity": "partial"},
+		{"alertname": "aaa", "team": "other", "unicode": "�", "astral": "😀"},
+		{"alertname": "bbb", "team": "a", "env": "dev"},
+		{"alertname": "ccc", "team": "a", "env": "prod"},
+		{"alertname": "ddd", "team": "b", "oscar_correlation_role": "child", "oscar_correlation_rule_id": "12", "oscar_correlation_parent_fingerprint": "abcd"},
+		{"alertname": "eee", "team": "b", "correlation_parent_identity": "partial"},
 	} {
 		require.NoError(t, store.Put(t.Context(), alert.New(model.Alert{Labels: labels, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)))
 	}
@@ -98,7 +103,8 @@ func TestScopedPage(t *testing.T) {
 	}{
 		{envelope(grouped, `{"order":["asc"],"column":["alertname"],"perPage":["1"]}`), 2, "ccc"},
 		{envelope(`{"unrestricted":true,"allow":[],"deny":[{"items":[{"field":"label:env","operator":"isAnyOf","value":["DEV","qa"]}]}]}`, `{}`), 3, ""},
-		{body, 2, "ccc"}, {envelope(scope, `{"quick_search":["ddd"]}`), 1, "ddd"},
+		{body, 2, "ccc"},
+		{envelope(scope, `{"quick_search":["ddd"]}`), 1, "ddd"},
 		{envelope(`{"unrestricted":true,"allow":[],"deny":[]}`, `{}`), 5, ""},
 		{envelope(`{"unrestricted":false,"allow":[],"deny":[]}`, `{}`), 0, ""},
 	} {
@@ -130,9 +136,12 @@ func TestScopedPage(t *testing.T) {
 		literal, key string
 		code, total  int
 	}{
-		{`\ud800`, "unicode", 400, 0}, {`\udc00`, "unicode", 400, 0},
-		{`\ud800\u0061`, "unicode", 400, 0}, {`\ud83d\ude00`, "astral", 200, 1},
-		{"�", "unicode", 200, 1}, {`\\ud800`, "unicode", 200, 0},
+		{`\ud800`, "unicode", 400, 0},
+		{`\udc00`, "unicode", 400, 0},
+		{`\ud800\u0061`, "unicode", 400, 0},
+		{`\ud83d\ude00`, "astral", 200, 1},
+		{"�", "unicode", 200, 1},
+		{`\\ud800`, "unicode", 200, 0},
 	} {
 		wire := envelope(fmt.Sprintf(`{"unrestricted":false,"allow":[%s],"deny":[]}`, group(tc.key, tc.literal)), `{}`)
 		w := handle(scopedRequest(wire, domain, now))
