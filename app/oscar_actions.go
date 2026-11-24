@@ -89,6 +89,7 @@ type nativeActions struct {
 	read                 func(string, string, func(*alert.Alert))
 	key                  []byte
 	logger               *slog.Logger
+	countHeld            func(error, bool) // journal metrics; nil when unbound
 }
 
 func newNativeActions(read func(string, string, func(*alert.Alert)), key []byte, logger *slog.Logger) *nativeActions {
@@ -103,6 +104,10 @@ func (a *nativeActions) Bind(j v2.ActionJournal) error {
 	a.recipientKey = nil
 	if owner, ok := j.(interface{ RecipientKey() []byte }); ok {
 		a.recipientKey = owner.RecipientKey
+	}
+	a.countHeld = nil
+	if owner, ok := j.(interface{ CountHeld(error, bool) }); ok {
+		a.countHeld = owner.CountHeld
 	}
 	return nil
 }
@@ -600,6 +605,9 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 	hold := func(m *alert.Alert, err error) {
 		held = errors.Join(held, err)
 		heldResolved = heldResolved || m.Resolved()
+		if a.countHeld != nil {
+			a.countHeld(err, m.Resolved())
+		}
 	}
 	contacts := make(map[*alert.Alert]ordinaryContact, len(members))
 	for _, m := range members {

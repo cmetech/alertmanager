@@ -1624,7 +1624,11 @@ type mixedCohortFixture struct {
 	states   map[string]string
 	issued   map[v2.Entry]v2.OrdinaryCandidate
 	receipts []v2.OrdinaryReceipt
+	held     []error
 }
+
+// CountHeld receives the native reader's held-member accounting (OSC-139 AC-3).
+func (j *mixedCohortFixture) CountHeld(err error, _ bool) { j.held = append(j.held, err) }
 
 func (*mixedCohortFixture) CohortReady() bool     { return true }
 func (*mixedCohortFixture) CohortSupported() bool { return true }
@@ -1755,6 +1759,10 @@ func TestOscarTerminalCohortPreparedSubsetAfterAdmissionRace(t *testing.T) {
 			require.Equal(t, "firing", body.Alerts[1].Status)
 			logged, held := batch.LogMembers()
 			require.Error(t, held)
+			require.NotEmpty(t, j.held, "each held member reaches the journal's held-reason counter")
+			for _, err := range j.held {
+				require.ErrorIs(t, held, err)
+			}
 			require.ElementsMatch(t, []*alert.Alert{members[0], members[3], members[4]}, logged)
 			batch, err = a.prepare(ctx, g, "team", "webhook", 0, members, func([]*alert.Alert) bool { return true })
 			require.NoError(t, err)

@@ -116,6 +116,7 @@ func (o *nativeActionOwner) obtainSlot(ctx context.Context, key string, try func
 		return nil, reconcile
 	}
 	if backPressure {
+		o.metrics.handoffBackpressure()
 		return nil, unavailable
 	}
 	select {
@@ -214,6 +215,7 @@ func (o *nativeActionOwner) bufferLocked(key string, previous, source *alert.Ale
 			h.events = append(h.events, event)
 		} else {
 			h.overflow = true
+			o.metrics.handoffOverflow()
 			o.gaps[bucket] |= bit
 		}
 	}

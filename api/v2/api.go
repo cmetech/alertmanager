@@ -69,6 +69,7 @@ var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/api/v2")
 // API represents an Alertmanager API v2.
 type API struct {
 	managedOwner    *managedOwner
+	registry        prometheus.Registerer
 	actionOwner     *nativeActionOwner
 	actionForbidden map[string][]byte
 	peer            cluster.ClusterPeer
@@ -126,6 +127,7 @@ func NewAPI(
 		silences:    silences,
 		logger:      l,
 		m:           metrics.NewAlerts(r),
+		registry:    r,
 		uptime:      time.Now(),
 	}
 	if r != nil {

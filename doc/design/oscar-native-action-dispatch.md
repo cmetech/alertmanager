@@ -63,6 +63,22 @@ up to the episode bound of exact keys with a counted hash-bucket hold on
 overflow. An ambiguous pre-enrollment contact remains local to the process.
 
 
+## Journal connections and observability
+
+Lease acquire and renew run on their own two-connection client with a fixed
+3-second timeout. Admissions, settlements, lookups and recovery share the
+delivery pool, sized by `--oscar.action-store-max-conns` (default 16: two
+in-flight calls per OSCAR alertmanager API worker at the tested eight workers)
+and `--oscar.action-store-timeout` (default 3s, including the pool wait).
+Revisit the default when OSCAR sizes dedicated native-action workers.
+`alertmanager_oscar_native_calls_total` and `_call_duration_seconds` report
+each call by command and outcome; `_pool_wait_seconds` reports connection
+waits per pool. `_held_total` counts held members by reason code and state,
+`_lease_ready` shows whether delivery may proceed, and `_resident_slots` and
+`_handoff_overflow_total` (per-alert transition overflow) and
+`_handoff_backpressure_total` (enrollments refused at the hand-off bound) show
+episode capacity.
+
 ## Firing member identity and entry
 
 The app adapter binds the A3 journal. It plans native routes with immutable

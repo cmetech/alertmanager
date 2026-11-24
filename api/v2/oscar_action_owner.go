@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"reflect"
 	"regexp"
@@ -24,6 +25,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"github.com/prometheus/alertmanager/alert"
 )
@@ -58,6 +61,11 @@ type ActionOwnerConfig struct {
 	// and in-flight manual sources); MaxHandoffs is the hand-off back-pressure
 	// threshold. Zero selects the default.
 	MaxEpisodes, MaxHandoffs int
+	// MaxConns bounds concurrent delivery and recovery connections to the journal
+	// (zero: DefaultActionMaxConns). Lease renewal uses its own connections.
+	MaxConns int
+	// Timeout bounds each delivery and recovery call (zero: DefaultActionTimeout).
+	Timeout time.Duration
 }
 
 func (c ActionOwnerConfig) bounds() (episodes, handoffs int, err error) {
@@ -67,67 +75,136 @@ func (c ActionOwnerConfig) bounds() (episodes, handoffs int, err error) {
 	return cmp.Or(c.MaxEpisodes, defaultActionEpisodes), cmp.Or(c.MaxHandoffs, defaultActionHandoffs), nil
 }
 
+const (
+	// DefaultActionMaxConns keeps two in-flight calls per OSCAR alertmanager API
+	// worker at the tested eight workers (OSC-140), today's pool size.
+	DefaultActionMaxConns = 16
+	// DefaultActionTimeout is the per-call journal timeout.
+	DefaultActionTimeout = 3 * time.Second
+	leaseConns           = 2
+	leaseTimeout         = 3 * time.Second
+)
+
 type actionRPC interface {
 	call(context.Context, string, map[string]any, any) error
 }
-type actionClient struct{ *managedClient }
+type actionClient struct {
+	*managedClient
+	lease   *http.Client // acquire/renew only, so delivery cannot exhaust it
+	metrics *actionMetrics
+}
+
+// newActionClient builds the delivery client and a separate lease client on a
+// cloned transport (after any dialer is installed) with its own connections.
+func newActionClient(c ActionOwnerConfig, dial ActionDialer, m *actionMetrics) (actionClient, error) {
+	if c.MaxConns == 0 {
+		c.MaxConns = DefaultActionMaxConns
+	}
+	if c.Timeout == 0 {
+		c.Timeout = DefaultActionTimeout
+	}
+	if c.MaxConns < 0 || c.Timeout < 0 {
+		return actionClient{}, errors.New("invalid native action pool configuration")
+	}
+	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
+	if err != nil {
+		return actionClient{}, err
+	}
+	transport := client.http.Transport.(*http.Transport)
+	if dial != nil {
+		transport.DialContext = dial
+	}
+	lease := transport.Clone()
+	lease.MaxConnsPerHost, lease.MaxIdleConnsPerHost = leaseConns, leaseConns
+	transport.MaxConnsPerHost, transport.MaxIdleConnsPerHost = c.MaxConns, c.MaxConns
+	transport.ResponseHeaderTimeout = c.Timeout * 2 / 3
+	client.http.Timeout = c.Timeout
+	return actionClient{
+		managedClient: client, metrics: m,
+		lease: &http.Client{Transport: lease, Timeout: leaseTimeout, CheckRedirect: client.http.CheckRedirect},
+	}, nil
+}
 
 var privateCommandTooLarge = fmt.Errorf("private native action command exceeds its byte limit: %w", conflict)
 
 var incompatibleLease = errors.New("incompatible native authority lease response")
 
 func (c actionClient) call(ctx context.Context, cmd string, args map[string]any, out any) error {
+	start := time.Now()
+	outcome, err := c.send(ctx, cmd, args, out)
+	c.metrics.observeCall(cmd, outcome, time.Since(start))
+	return err
+}
+
+// send returns the call outcome label alongside the unchanged error contract.
+func (c actionClient) send(ctx context.Context, cmd string, args map[string]any, out any) (string, error) {
 	b, err := json.Marshal(args)
 	if err != nil {
-		return conflict
+		return "rejected", conflict
 	}
 	if len(b) > actionBodyLimit {
 		if cmd == "admit-cohort" || cmd == "inspect-cohort" {
-			return privateCommandTooLarge
+			return "rejected", privateCommandTooLarge
 		}
-		return conflict
+		return "rejected", conflict
 	}
+	lease := cmd == "acquire-authority" || cmd == "renew-authority"
+	client, pool := c.http, "delivery"
+	if lease && c.lease != nil {
+		client, pool = c.lease, "lease"
+	}
+	var asked time.Time
+	var got bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GetConn: func(string) { asked = time.Now() },
+		GotConn: func(httptrace.GotConnInfo) { got = true; c.metrics.observePoolWait(pool, time.Since(asked)) },
+	})
 	r, err := http.NewRequestWithContext(ctx, "POST", c.scheme+"://alertmanager-middleware:9400/api/v1/internal/native-actions/"+cmd, bytes.NewReader(b))
 	if err != nil {
-		return err
+		return "rejected", err
 	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(r)
+	resp, err := client.Do(r)
+	if !got && !asked.IsZero() {
+		c.metrics.observePoolWait(pool, time.Since(asked)) // gave up waiting for a connection
+	}
 	if err != nil {
-		return unavailable
+		return transportOutcome(err), unavailable
 	}
 	defer resp.Body.Close()
-	lease := cmd == "acquire-authority" || cmd == "renew-authority"
 	if lease {
 		code := resp.StatusCode
 		permanentRedirect := code == http.StatusMovedPermanently || code == http.StatusPermanentRedirect
 		if permanentRedirect || code > http.StatusOK && code < 300 || code >= 400 && code < 500 &&
 			code != http.StatusRequestTimeout && code != http.StatusTooEarly && code != http.StatusTooManyRequests {
-			return incompatibleLease
+			return "incompatible", incompatibleLease
 		}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
 	if lease && resp.StatusCode == http.StatusOK && len(raw) > 2<<20 {
-		return incompatibleLease
+		return "incompatible", incompatibleLease
 	}
-	if err != nil || len(raw) > 2<<20 {
-		return unavailable
+	if err != nil {
+		return transportOutcome(err), unavailable
+	}
+	if len(raw) > 2<<20 {
+		return "unavailable", unavailable
 	}
 	if resp.StatusCode != 200 {
 		var e struct{ Detail string }
 		if resp.StatusCode == 409 && json.Unmarshal(raw, &e) == nil && len(e.Detail) > 0 && len(e.Detail) <= 255 {
-			return actionError{409, e.Detail}
+			return "conflict", actionError{409, e.Detail}
 		}
-		return unavailable
+		return "unavailable", unavailable
 	}
 	if err = json.Unmarshal(raw, out); err != nil {
 		if lease {
-			return incompatibleLease
+			return "incompatible", incompatibleLease
 		}
-		return unavailable
+		return "unavailable", unavailable
 	}
-	return nil
+	return "ok", nil
 }
 
 type sourceOwner struct {
@@ -261,6 +338,7 @@ type nativeActionOwner struct {
 	policySlots      chan struct{}
 	maxEpisodes      int // Resident slots, detached direct entries and in-flight manual sources.
 	maxHandoffs      int // Enrollment back-pressure threshold; hand-offs always queue.
+	metrics          *actionMetrics
 }
 
 func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *nativeActionOwner {
@@ -1032,6 +1110,7 @@ func (s *episodeSlot) currentLocked(p EpisodeProjection, source *alert.Alert, ac
 	}
 	return nil
 }
+
 func (s *episodeSlot) latest() *alert.Alert { s.local.Lock(); defer s.local.Unlock(); return s.source }
 
 // Project returns a journaled lifecycle for the exact current provider member.
@@ -1553,13 +1632,16 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 	if err != nil {
 		return err
 	}
-	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
+	var dialer ActionDialer
+	if len(dial) > 0 {
+		dialer = dial[0]
+	}
+	metrics := newActionMetrics(api.registry)
+	rpc, err := newActionClient(c, dialer, metrics)
 	if err != nil {
 		return err
 	}
-	if len(dial) > 0 && dial[0] != nil {
-		client.http.Transport.(*http.Transport).DialContext = dial[0]
-	}
+	client := rpc.managedClient
 	keys := map[string][]byte{}
 	used := map[string]bool{client.token: true}
 	forbidden := append([][]byte{}, api.conversionCallbackKey, api.silenceMutationKey)
@@ -1593,8 +1675,22 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 	if !managedUUID.MatchString(c.AuthorityID) {
 		return errors.New("invalid native action namespace")
 	}
-	o := newNativeActionOwner(c.AuthorityID, actionClient{client}, c.Dispatch)
+	o := newNativeActionOwner(c.AuthorityID, rpc, c.Dispatch)
 	o.maxEpisodes, o.maxHandoffs = episodes, handoffs
+	o.metrics = metrics
+	promauto.With(api.registry).NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "alertmanager_oscar_native_resident_slots",
+		Help: "Resident mutable native episode slots.",
+	}, func() float64 { o.mu.Lock(); defer o.mu.Unlock(); return float64(len(o.byKey)) })
+	promauto.With(api.registry).NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "alertmanager_oscar_native_lease_ready",
+		Help: "1 while the native owner holds a live, recovered lease and may deliver; 0 holds every tracked member.",
+	}, func() float64 {
+		if o.ready() {
+			return 1
+		}
+		return 0
+	})
 	api.actionOwner = o
 	o.callbackReady = func() bool { return api.callbacksReadyFor(client, true) }
 	ready := o.ready

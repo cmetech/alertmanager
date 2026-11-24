@@ -1,3 +1,15 @@
+## Unreleased — Native lease isolation and capacity metrics (OSC-139)
+
+- Lease acquire and renew use a dedicated two-connection client, so delivery and recovery calls
+  can no longer starve renewal and hold every native member.
+- New flags `--oscar.action-store-max-conns` (default 16, today's pool) and
+  `--oscar.action-store-timeout` (default 3s) size the delivery pool. Zero uses the default.
+- New metrics: `alertmanager_oscar_native_calls_total{command,outcome}`,
+  `alertmanager_oscar_native_call_duration_seconds{command}`,
+  `alertmanager_oscar_native_pool_wait_seconds{pool}`, `alertmanager_oscar_native_held_total{reason,state}`,
+  `alertmanager_oscar_native_resident_slots`, `alertmanager_oscar_native_handoff_overflow_total`,
+  `alertmanager_oscar_native_handoff_backpressure_total` and `alertmanager_oscar_native_lease_ready`. Wire formats are unchanged; no OSCAR change is required.
+
 ## Unreleased — Native capacity back-pressure
 
 - Lifecycle edges of evicted native episodes are no longer discarded when the handoff queue is

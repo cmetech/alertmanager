@@ -1413,7 +1413,7 @@ func TestWireRenewalReadiness(t *testing.T) {
 			}
 			return &http.Response{StatusCode: tc.status, Header: header, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
 		})
-		rpc := actionClient{client}
+		rpc := actionClient{managedClient: client}
 		o := newNativeActionOwner(defaultActionAuthority, rpc, testActionDispatch{})
 		o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
 		o.recovered = true

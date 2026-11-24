@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -60,6 +61,8 @@ func run() int {
 		actionPolicy                = kingpin.Flag("oscar.action-policy-key-file", "Middleware policy assertion verification key.").String()
 		actionMaxEpisodes           = kingpin.Flag("oscar.action-max-episodes", "Resident native episode slots; also caps detached direct entries and in-flight manual sources. Idle slots are evicted past it.").Default("65536").Int()
 		actionMaxHandoffs           = kingpin.Flag("oscar.action-max-handoffs", "Queued native lifecycle hand-offs above which new enrollments are retried instead of evicting a resident. Hand-offs are never dropped for capacity.").Default("65536").Int()
+		actionMaxConns              = kingpin.Flag("oscar.action-store-max-conns", "Maximum concurrent delivery and recovery connections to the native action journal. Lease renewal uses its own two connections. The default keeps two in-flight calls per OSCAR alertmanager API worker at the tested eight workers.").Default(strconv.Itoa(api.DefaultActionMaxConns)).Int()
+		actionTimeout               = kingpin.Flag("oscar.action-store-timeout", "Timeout of each native action journal delivery or recovery call, including the wait for a pooled connection.").Default(api.DefaultActionTimeout.String()).Duration()
 		managedOwnerScheme          = kingpin.Flag("oscar.managed-owner-scheme", "Configured internal transport to the private managed receiver owner.").Default("https").Enum("http", "https")
 		managedOwnerCA              = kingpin.Flag("oscar.managed-owner-ca-file", "CA of the private managed receiver owner.").String()
 		managedOwnerKey             = kingpin.Flag("oscar.managed-owner-key-file", "Distinct managed receiver owner credential.").String()
@@ -271,7 +274,7 @@ func run() int {
 		ConnectSendMaxBytes:        *connectSendMaxBytes,
 		ConnectMaxRequestBodyBytes: *connectMaxRequestBodyBytes,
 		SilenceMutationKey:         oscarSilenceKey,
-		ActionOwner:                api.ActionOwnerConfig{Enabled: *actionEnabled, Scheme: *actionScheme, CAFile: *actionCA, StoreKeyFile: *actionKey, OperatorKeyFile: *actionOperator, PolicyKeyFile: *actionPolicy, MaxEpisodes: *actionMaxEpisodes, MaxHandoffs: *actionMaxHandoffs},
+		ActionOwner:                api.ActionOwnerConfig{Enabled: *actionEnabled, Scheme: *actionScheme, CAFile: *actionCA, StoreKeyFile: *actionKey, OperatorKeyFile: *actionOperator, PolicyKeyFile: *actionPolicy, MaxEpisodes: *actionMaxEpisodes, MaxHandoffs: *actionMaxHandoffs, MaxConns: *actionMaxConns, Timeout: *actionTimeout},
 		ManagedOwnerScheme:         *managedOwnerScheme,
 		ManagedOwnerCA:             *managedOwnerCA, ManagedOwnerKeyFile: *managedOwnerKey,
 		ConversionAdmissionKeys: conversionKeys,
