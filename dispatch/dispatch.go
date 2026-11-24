@@ -322,6 +322,19 @@ func (d *Dispatcher) RetireProjection(old *alert.Alert) {
 	}
 }
 
+// HoldsProjection reports whether a group still holds the member's source.
+// A group drops a resolved member only after a successful flush.
+func (d *Dispatcher) HoldsProjection(m *alert.Alert) bool {
+	for _, route := range d.route.Match(m.Labels) {
+		if el, ok := d.routeGroupsSlice[route.Idx].groups.Load(getGroupLabels(m, route).Fingerprint()); ok {
+			if _, err := el.(*aggrGroup).alerts.Get(m.ProviderSource().Fingerprint()); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (d *Dispatcher) routeMember(ctx context.Context, alrt *alert.Alert) {
 	d.logger.Debug("Received alert", "alert", alrt)
 

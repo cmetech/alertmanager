@@ -804,3 +804,39 @@ func TestOSCARFeedStoreLimitPublishesOnlySuccess(t *testing.T) {
 	}
 	require.Equal(t, []string{"upsert"}, o.events)
 }
+
+// OSC-137 AC-1/AC-2/AC-3 at the provider seam: GC keeps a resolved alert while
+// the retention predicate holds it, reports it, and deletes it on the next
+// pass after the predicate releases it.
+func TestGCRetainKeepsResolvedUntilReleased(t *testing.T) {
+	p, err := NewAlerts(t.Context(), time.Hour, 0, nil, promslog.NewNopLogger(), eventrecorder.NopRecorder(), prometheus.NewRegistry(), nil)
+	require.NoError(t, err)
+	var closed []*alert.Alert
+	p.SetActionObserver(func(_ string, s *alert.Alert, c bool) {
+		if c {
+			closed = append(closed, s)
+		}
+	})
+	keep := true
+	p.SetGCRetain(func(*alert.Alert) bool { return keep })
+	now := time.Now()
+	s := alert.New(model.Alert{Labels: model.LabelSet{"osc": "137"}, StartsAt: now.Add(-time.Hour), EndsAt: now.Add(-time.Minute)}, now, false)
+	require.NoError(t, p.Put(t.Context(), s))
+
+	p.gc()
+	_, err = p.Get(s.Fingerprint())
+	require.NoError(t, err, "AC-1: a retained resolve survives GC")
+	require.Empty(t, closed, "AC-1: a retained resolve is not closed")
+	n, oldest := p.KeptResolves()
+	require.Equal(t, 1, n, "AC-3")
+	require.True(t, oldest.Equal(s.EndsAt), "AC-3")
+
+	keep = false
+	p.gc()
+	_, err = p.Get(s.Fingerprint())
+	require.ErrorIs(t, err, store.ErrNotFound, "AC-2: a released resolve is collected on the next pass")
+	require.Len(t, closed, 1)
+	n, oldest = p.KeptResolves()
+	require.Zero(t, n)
+	require.True(t, oldest.IsZero())
+}
