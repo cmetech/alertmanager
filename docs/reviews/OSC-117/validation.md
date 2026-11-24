@@ -1,6 +1,6 @@
 # OSC-117 validation and handoff
 
-Latest product candidate: HTTP deadline correction following `504b43ed` (commit linked by subsequent review).
+Latest product candidate: `d947d1fb`, followed by test-only lint cleanup and evidence commits.
 Base: `b3cf31d9db656f34c442e321cd06f71a551d65c7`.
 Corey explicitly authorized Elm/asset generation and focused Go tests on 2026-11-24.
 
@@ -42,3 +42,5 @@ The generated Go client now runs against the registered `/am` server over TCP. S
 `go test -race ./api ./api/v2 -run 'TestScopedPage|TestScopeParityFixture' -count=1` passed after the correction (api 6.880s, api/v2 1.940s). The net.Pipe regression asserts that failed reads retain the bounded deadline; it still exercises nine sequential expirations against the eight-slot budget and a subsequent successful request. Independent review follows this frozen change.
 
 Independent HTTP review found that Connection: close also causes HTTP/2 GOAWAY. The close header is now limited to HTTP/1.x, and a TLS/HTTP2 server regression proves a rejected stream keeps its connection reusable. That regression failed on the unguarded implementation and passes with the guard. The API docs now describe the transport-cancellation 408/503 outcome. Final focused race run: api6.732s, api/v2 1.795s. The broad qualification below targets its earlier frozen candidate; this subsequent narrow change has separate focused and independent-review evidence.
+
+Broader test and baseline-reproduction results are recorded in [qualification/broad-suite.md](qualification/broad-suite.md), with [compact output](qualification/results.txt) and [independent HTTP review](qualification/http-review.md). The final pinned Go lint run matches all 98 baseline findings with no introduced findings; it does not constitute a globally passing lint run. Three separately bounded long app cases are now being qualified after the earlier suite timeout.

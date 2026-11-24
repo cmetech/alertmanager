@@ -1,0 +1,9 @@
+--- FAIL: TestScopedPageRejectedHTTP2StreamKeepsConnection (0.03s)
+    api_test.go:409: 
+        	Error Trace:	/Users/coreyellis/code/github.com/cmetech/oscar_app/.worktrees/osc-117/alertmanager/api/api_test.go:409
+        	Error:      	Should be true
+        	Test:       	TestScopedPageRejectedHTTP2StreamKeepsConnection
+        	Messages:   	rejected stream must not drain the HTTP/2 connection
+FAIL
+FAIL	github.com/prometheus/alertmanager/api	0.377s
+FAIL

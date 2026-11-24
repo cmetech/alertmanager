@@ -1,0 +1,129 @@
+panic: test timed out after 7s
+	running tests:
+		TestScopedPageStalledHTTPBodyRecovers (7s)
+
+goroutine 82 [running]:
+testing.(*M).startAlarm.func1()
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2802 +0x2cc
+created by time.goFunc
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/time/sleep.go:215 +0x38
+
+goroutine 1 [chan receive]:
+testing.(*T).Run(0x229ba218c488, {0x100fd31e8?, 0x3390d6100072efa0?}, 0x101ce62c8)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2109 +0x3bc
+testing.runTests.func1(0x229ba218c488)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2585 +0x40
+testing.tRunner(0x229ba218c488, 0x229ba221fc48)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2036 +0xc4
+testing.runTests({0x100fcebb9, 0x22}, {0x100fd4ba3, 0x26}, 0x229ba1a5bab8, {0x101deb1c0, 0x8, 0x8}, {0x80803c6641092125?, 0x100fb4890?, ...})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2583 +0x3f0
+testing.(*M).Run(0x229ba21a2460)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2443 +0x578
+main.main()
+	_testmain.go:60 +0x80
+
+goroutine 30 [IO wait]:
+internal/poll.runtime_pollWait(0x12f5bd000, 0x72)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/runtime/netpoll.go:351 +0xa0
+internal/poll.(*pollDesc).wait(0x229ba1d6d200?, 0x229ba2516000?, 0x0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_poll_runtime.go:84 +0x28
+internal/poll.(*pollDesc).waitRead(...)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0x229ba1d6d200, {0x229ba2516000, 0x1000, 0x1000})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_unix.go:165 +0x234
+net.(*netFD).Read(0x229ba1d6d200, {0x229ba2516000?, 0x229ba2443b28?, 0x10060f1f4?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/fd_posix.go:68 +0x28
+net.(*conn).Read(0x229ba1f835e0, {0x229ba2516000?, 0x229ba2443b80?, 0x10063597c?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/net.go:196 +0x34
+bufio.(*Reader).fill(0x229ba25050e0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/bufio/bufio.go:113 +0xe0
+bufio.(*Reader).ReadSlice(0x229ba25050e0, 0xa)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/bufio/bufio.go:377 +0x30
+bufio.(*Reader).ReadLine(0x229ba25050e0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/bufio/bufio.go:406 +0x24
+net/textproto.(*Reader).readLineSlice(0x229ba2443d88, 0xffffffffffffffff)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/textproto/reader.go:64 +0x8c
+net/textproto.(*Reader).ReadLine(...)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/textproto/reader.go:44
+net/http.ReadResponse(0x229ba25050e0, 0x229ba21a4140)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/response.go:161 +0x80
+github.com/prometheus/alertmanager/api.TestScopedPageStalledHTTPBodyRecovers(0x229ba218c6c8)
+	/Users/coreyellis/code/github.com/cmetech/oscar_app/.worktrees/osc-117/alertmanager/api/api_test.go:367 +0x40c
+testing.tRunner(0x229ba218c6c8, 0x101ce62c8)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2036 +0xc4
+created by testing.(*T).Run in goroutine 1
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/testing/testing.go:2101 +0x3a8
+
+goroutine 55 [select]:
+github.com/prometheus/alertmanager/provider/mem.(*Alerts).gcLoop(0x229ba21a5680, {0x101d03ff0, 0x229ba21a05f0}, 0x229ba1d30f50?)
+	/Users/coreyellis/code/github.com/cmetech/oscar_app/.worktrees/osc-117/alertmanager/provider/mem/mem.go:307 +0xac
+created by github.com/prometheus/alertmanager/provider/mem.NewAlerts in goroutine 30
+	/Users/coreyellis/code/github.com/cmetech/oscar_app/.worktrees/osc-117/alertmanager/provider/mem/mem.go:298 +0x3b4
+
+goroutine 66 [IO wait]:
+internal/poll.runtime_pollWait(0x12f5bd200, 0x72)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/runtime/netpoll.go:351 +0xa0
+internal/poll.(*pollDesc).wait(0x229ba1d6d180?, 0x1005f5b20?, 0x0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_poll_runtime.go:84 +0x28
+internal/poll.(*pollDesc).waitRead(...)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Accept(0x229ba1d6d180)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_unix.go:613 +0x214
+net.(*netFD).accept(0x229ba1d6d180)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/fd_unix.go:150 +0x28
+net.(*TCPListener).accept(0x229ba24f1dc0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/tcpsock_posix.go:159 +0x24
+net.(*TCPListener).Accept(0x229ba24f1dc0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/tcpsock.go:387 +0x2c
+net/http.(*Server).Serve(0x229ba1d09500, {0x101cfae50, 0x229ba24f1dc0})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/server.go:3434 +0x244
+net/http/httptest.(*Server).goServe.func1()
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/httptest/server.go:341 +0x54
+created by net/http/httptest.(*Server).goServe in goroutine 30
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/httptest/server.go:339 +0x6c
+
+goroutine 67 [IO wait]:
+internal/poll.runtime_pollWait(0x12f5bce00, 0x72)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/runtime/netpoll.go:351 +0xa0
+internal/poll.(*pollDesc).wait(0x229ba1d6d280?, 0x229ba2517000?, 0x0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_poll_runtime.go:84 +0x28
+internal/poll.(*pollDesc).waitRead(...)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0x229ba1d6d280, {0x229ba2517000, 0x1000, 0x1000})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/internal/poll/fd_unix.go:165 +0x234
+net.(*netFD).Read(0x229ba1d6d280, {0x229ba2517000?, 0x229ba1aa4ce8?, 0x100951a1c?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/fd_posix.go:68 +0x28
+net.(*conn).Read(0x229ba1f835e8, {0x229ba2517000?, 0x229ba1aa4d68?, 0xaf554a?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/net.go:196 +0x34
+net/http.(*connReader).Read(0x229ba24f1e00, {0x229ba2517000, 0x1000, 0x1000})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/server.go:812 +0x22c
+bufio.(*Reader).Read(0x229ba2505140, {0x229ba235a000, 0x63, 0x12f565548?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/bufio/bufio.go:245 +0x188
+io.(*LimitedReader).Read(0x229ba1bff620, {0x229ba235a000?, 0x229ba1aa4e08?, 0x100676d20?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/io/io.go:479 +0x48
+net/http.(*body).readLocked(0x229ba24f1ec0, {0x229ba235a000?, 0x229ba1aa4e01?, 0x1006862a4?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/transfer.go:845 +0x34
+net/http.(*body).Read(0x1019a8b61?, {0x229ba235a000?, 0x0?, 0x0?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/transfer.go:837 +0x104
+io.(*LimitedReader).Read(0x229ba20d0078, {0x229ba235a000?, 0x229ba1aa4ee8?, 0x10060e518?})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/io/io.go:479 +0x48
+io.discard.ReadFrom({}, {0x101cf0428, 0x229ba20d0078})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/io/io.go:666 +0x70
+io.copyBuffer({0x101cf0820, 0x101e28a40}, {0x101cf0428, 0x229ba20d0078}, {0x0, 0x0, 0x0})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/io/io.go:415 +0x14c
+io.Copy(...)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/io/io.go:388
+io.CopyN({0x101cf0820, 0x101e28a40}, {0x12f79a620, 0x229ba24f1ec0}, 0x40001)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/io/io.go:364 +0x98
+net/http.(*chunkWriter).writeHeader(0x229ba1c7b3f0, {0x0, 0x0, 0x0})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/server.go:1418 +0x1748
+net/http.(*chunkWriter).close(0x229ba1c7b3f0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/server.go:410 +0x34
+net/http.(*response).finishRequest(0x229ba1c7b3b0)
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/server.go:1673 +0x60
+net/http.(*conn).serve(0x229ba25121b0, {0x101d03fb8, 0x229ba2340120})
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/server.go:2080 +0x544
+created by net/http.(*Server).Serve in goroutine 66
+	/opt/homebrew/Cellar/go/1.26.5/libexec/src/net/http/server.go:3464 +0x37c
+FAIL	github.com/prometheus/alertmanager/api	7.358s
+FAIL

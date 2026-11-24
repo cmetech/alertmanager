@@ -35,7 +35,6 @@ import (
 	"time"
 
 	"github.com/go-openapi/runtime"
-	"github.com/go-openapi/swag"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/promslog"
 	"github.com/prometheus/common/route"
@@ -327,10 +326,10 @@ func TestScopedPageGeneratedClientOverHTTP(t *testing.T) {
 	defer transport.CloseIdleConnections()
 	httpClient := &http.Client{Transport: transport}
 	for i, rule := range []*models.OscarPageScopeGroupItemsItems0{
-		{Field: swag.String("label:service"), Operator: swag.String("equals"), Value: "Straße <ops> "},
-		{Field: swag.String("label:service"), Operator: swag.String("isAnyOf"), Value: []string{"é", "billing"}},
+		{Field: new("label:service"), Operator: new("equals"), Value: "Straße <ops> "},
+		{Field: new("label:service"), Operator: new("isAnyOf"), Value: []string{"é", "billing"}},
 	} {
-		payload := &models.OscarScopedPageRequest{Version: swag.Int64(1), Query: map[string][]string{}, Scope: &models.OscarScopedPageRequestScope{Unrestricted: swag.Bool(false), Allow: []*models.OscarPageScopeGroup{{Items: []*models.OscarPageScopeGroupItemsItems0{rule}}}, Deny: []*models.OscarPageScopeGroup{}}}
+		payload := &models.OscarScopedPageRequest{Version: new(int64(1)), Query: map[string][]string{}, Scope: &models.OscarScopedPageRequestScope{Unrestricted: new(false), Allow: []*models.OscarPageScopeGroup{{Items: []*models.OscarPageScopeGroupItemsItems0{rule}}}, Deny: []*models.OscarPageScopeGroup{}}}
 		var wire bytes.Buffer
 		require.NoError(t, runtime.JSONProducer().Produce(&wire, payload))
 		stamp := fmt.Sprint(time.Now().Unix())
