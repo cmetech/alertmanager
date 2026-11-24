@@ -44,15 +44,22 @@ An ambiguous floor write holds its own and dependent entries while the original
 CAS is reconciled. The selected and ordinary paths reevaluate dependencies after
 blocking preparation. The existing entry token remains sufficient for late settlement.
 
-Up to 4,096 mutable episode coordinators are resident at once. A clock evicts
-quiescent journaled slots, keeps their live projection and claim witness, and
-rehydrates through indexed selectors. Ordered lifecycle handoffs are separately
-bounded; loss of intermediate evidence conservatively holds the affected source
-bucket. A missing provider pointer cannot close an unseen interval. Resident
-direct passes pin local ownership until conclusive settlement, including across
-provider replacement. Detached direct entries use up to 4,096 exact keys with a
-counted hash-bucket hold on overflow. An ambiguous pre-enrollment contact remains
-local to the process.
+Up to `--oscar.action-max-episodes` (default 65,536) mutable episode
+coordinators are resident at once. The default covers 10 alerts/s with
+30-minute lifetimes, including resolved alerts awaiting provider GC. A clock
+evicts quiescent journaled slots, keeps their live projection and claim witness,
+and rehydrates through indexed selectors. An evicted key's lifecycle edges queue
+as ordered handoffs, at most one per key, and are never discarded for capacity;
+a queued handoff holds its source like an unresolved summary. While the queue is
+at `--oscar.action-max-handoffs` (default 65,536), only the handoff drain may
+evict a resident: other enrollments fail fast and retry on their existing path,
+so new first contacts stay held until saturation or the queue clears. Loss of
+intermediate evidence beyond a key's transition limit conservatively holds the
+affected source bucket. A missing provider pointer cannot close an unseen
+interval. Resident direct passes pin local ownership until conclusive
+settlement, including across provider replacement. Detached direct entries use
+up to the episode bound of exact keys with a counted hash-bucket hold on
+overflow. An ambiguous pre-enrollment contact remains local to the process.
 
 
 ## Firing member identity and entry

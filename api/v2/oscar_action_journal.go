@@ -534,7 +534,7 @@ func (o *nativeActionOwner) InspectOrdinary(ctx context.Context, source *alert.A
 				(candidate && o.enrollments == enrollments || !candidate && o.membership[bucket]&bit == 0) {
 				if pub, production := o.dispatch.(ActionPublication); production {
 					ok = pub.ChangeDirectContact(key, nil, token)
-				} else if len(o.untracked) < maxActionEpisodes {
+				} else if len(o.untracked) < o.maxEpisodes {
 					o.untracked[key] = 1
 					ok = true
 				}

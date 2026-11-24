@@ -1,3 +1,19 @@
+## Unreleased — Native capacity back-pressure
+
+- Lifecycle edges of evicted native episodes are no longer discarded when the handoff queue is
+  full. Each key queues at most one handoff, so a GC close or resolve reaches the journal instead of
+  leaving the OSCAR episode firing. While handoffs are at their bound and slots are saturated, new
+  enrollments fail fast and retry (held until saturation or the queue clears) so queued edges drain
+  first.
+- New flags `--oscar.action-max-episodes` and `--oscar.action-max-handoffs`, both default 65,536
+  (previously a fixed 4,096), sized for 10 alerts/s with 30-minute lifetimes. The episode bound
+  also caps detached direct entries and in-flight manual sources. Zero selects the default;
+  negative values fail startup.
+- No OSCAR, wire or schema change; existing deployments pick up the new defaults. Episodes already
+  left firing by earlier drops are not repaired. Per-alert backoff (OSC-136) is not included:
+  callers refused a slot retry on the existing hold and next-flush paths. Operator qualification
+  is pending.
+
 ## Unreleased — Route policy escalations on the effective severity
 
 - The native policy command accepts an empty destination scope for escalation. Pending destinations
