@@ -469,9 +469,14 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 	api.Update(cfg, func(ctx context.Context, l labelset.LabelSet) { i.Mutes(ctx, l) })
 	api.PublishTiming(cfg, map[string][]TimingIntegration{"team": {{Name: "webhook"}}}, timingMuter{}, nil)
 	require.True(t, i.HasInhibitor(target.Labels, target.ProviderSource().Fingerprint()))
-	for _, path := range []string{"/api/v2/alerts", "/api/v2/alerts/groups", "/api/v2/oscar/alerts/page"} {
+	api.Handler = api.scopedPageRoutes(api.Handler, []byte(scopeTestKey))
+	for _, path := range []string{"/api/v2/alerts", "/api/v2/alerts/groups", "/api/v2/oscar/alerts/page", scopeTestPath} {
 		w := httptest.NewRecorder()
-		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		req := httptest.NewRequest("GET", path, nil)
+		if path == scopeTestPath {
+			req = scopedRequest(`{"version":1,"scope":{"unrestricted":true,"allow":[],"deny":[]},"query":{}}`, "native-scoped-page-v1", time.Now())
+		}
+		api.Handler.ServeHTTP(w, req)
 		require.Equal(t, 200, w.Code)
 		var body any
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
@@ -499,7 +504,7 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 		}
 		walk(body)
 		require.True(t, found, path)
-		if strings.HasSuffix(path, "/page") {
+		if strings.HasSuffix(path, "/page") || path == scopeTestPath {
 			var page struct {
 				SourceSeverity map[string]string `json:"source_severity_by_fingerprint"`
 				Timing         map[string]struct {
@@ -514,4 +519,23 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 			require.Equal(t, "suppressed", steps[0].State)
 		}
 	}
+	body := `{"version":1,"scope":{"unrestricted":false,"allow":[{"items":[{"field":"label:severity","operator":"equals","value":"minor"}]}],"deny":[]},"query":{"severity":["major"]}}`
+	w := httptest.NewRecorder()
+	api.Handler.ServeHTTP(w, scopedRequest(body, "native-scoped-page-v1", time.Now()))
+	require.Equal(t, 200, w.Code)
+	var scoped struct {
+		Total   int `json:"total_records"`
+		Records []struct {
+			Fingerprint string
+			Labels      map[string]string
+		}
+		Source map[string]string `json:"source_severity_by_fingerprint"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &scoped))
+	require.Equal(t, 1, scoped.Total)
+	require.Len(t, scoped.Records, 1)
+	fp := target.ProviderSource().Fingerprint().String()
+	require.Equal(t, fp, scoped.Records[0].Fingerprint)
+	require.Equal(t, "major", scoped.Records[0].Labels["severity"])
+	require.Equal(t, map[string]string{fp: "minor"}, scoped.Source)
 }

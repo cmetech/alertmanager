@@ -245,6 +245,42 @@ paths:
         '409': {description: Native lifecycle or operation conflict}
         '413': {description: Request too large}
         '503': {description: Native authority unavailable}
+  /oscar/alerts/scoped-page:
+    post:
+      tags: [alert]
+      operationId: getOscarScopedAlertsPage
+      description: Read a native page under an operator-signed authority. See docs/alerts_api.md for the HMAC transcript and limits.
+      parameters:
+        - {in: header, name: X-Oscar-Read-Sender, type: string, required: true, description: 'operator'}
+        - {in: header, name: X-Oscar-Read-Key-Id, type: string, required: true, description: 'v1'}
+        - {in: header, name: X-Oscar-Read-Time, type: string, required: true, description: 'Unix timestamp in seconds'}
+        - {in: header, name: X-Oscar-Read-Subject, type: string, required: true, description: 'Unpadded base64url of the acting operator ID'}
+        - {in: header, name: X-Oscar-Read-Grant, type: string, required: true, description: 'read:alerts'}
+        - {in: header, name: X-Oscar-Read-Signature, type: string, required: true, description: 'Hex HMAC-SHA256 over the scoped read transcript'}
+        - in: body
+          name: request
+          required: true
+          schema:
+            $ref: '#/definitions/oscarScopedPageRequest'
+      responses:
+        '200':
+          description: Authorized native page with contract version 2
+          headers:
+            X-Oscar-Scoped-Page-Version: {type: string, description: Signed scope contract version 1}
+          schema:
+            $ref: '#/definitions/oscarAlertPage'
+        '400':
+          description: Invalid envelope, policy or paging parameters
+        '401':
+          description: Invalid read assertion or operator key unavailable
+        '405':
+          description: Method must be POST
+        '413':
+          description: Body exceeds the read limit
+        '500':
+          $ref: '#/responses/InternalServerError'
+        '503':
+          description: Concurrent read limit reached
   /oscar/alerts/page:
     get:
       tags:
@@ -479,6 +515,53 @@ parameters:
       type: string
 
 definitions:
+  oscarScopedPageRequest:
+    type: object
+    additionalProperties: false
+    required: [version, scope, query]
+    properties:
+      version: {type: integer, enum: [1]}
+      query:
+        type: object
+        description: Existing OSCAR GET page parameters, each represented as an array of strings.
+        additionalProperties:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: {type: string}
+      scope:
+        type: object
+        additionalProperties: false
+        required: [unrestricted, allow, deny]
+        properties:
+          unrestricted: {type: boolean}
+          allow:
+            type: array
+            maxItems: 32
+            items: {$ref: '#/definitions/oscarPageScopeGroup'}
+          deny:
+            type: array
+            maxItems: 32
+            items: {$ref: '#/definitions/oscarPageScopeGroup'}
+  oscarPageScopeGroup:
+    type: object
+    additionalProperties: false
+    required: [items]
+    properties:
+      logicOperator: {type: string, enum: [and, or]}
+      items:
+        type: array
+        minItems: 1
+        maxItems: 100
+        items:
+          type: object
+          additionalProperties: false
+          required: [field, operator, value]
+          properties:
+            field: {type: string, pattern: '^label:.+'}
+            operator: {type: string, enum: [equals, isAnyOf]}
+            value:
+              description: A string for equals or an array of 1 through 100 strings for isAnyOf.
   oscarEpisodeRef:
     x-elm-natural-fields: true
     type: object

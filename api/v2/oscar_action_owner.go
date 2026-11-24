@@ -1526,19 +1526,8 @@ func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) 
 type ActionDialer = func(context.Context, string, string) (net.Conn, error)
 
 func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) error {
-	if !c.Enabled {
-		api.Handler = actionRoutes(api.Handler, nil, nil, func() bool { return false })
-		return nil
-	}
-	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
-	if err != nil {
-		return err
-	}
-	if len(dial) > 0 && dial[0] != nil {
-		client.http.Transport.(*http.Transport).DialContext = dial[0]
-	}
 	keys := map[string][]byte{}
-	used := map[string]bool{client.token: true}
+	used := map[string]bool{}
 	forbidden := append([][]byte{}, api.conversionCallbackKey, api.silenceMutationKey)
 	if api.managedOwner != nil {
 		forbidden = append(forbidden, []byte(api.managedOwner.client.token))
@@ -1547,12 +1536,12 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 		forbidden = append(forbidden, k)
 	}
 	for _, k := range forbidden {
-		if string(k) == client.token {
-			return errors.New("reused native action store credential")
-		}
 		used[string(k)] = true
 	}
 	for sender, file := range map[string]string{"operator": c.OperatorKeyFile, "policy": c.PolicyKeyFile} {
+		if !c.Enabled && (c.OperatorKeyFile == "" || file == "") {
+			continue
+		}
 		raw, e := os.ReadFile(file)
 		if e != nil {
 			return e
@@ -1564,6 +1553,30 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 		used[string(k)] = true
 		keys[sender] = k
 	}
+	if !c.Enabled {
+		// The operator may also read with actions offline; reject a shared configured store key.
+		if len(keys["operator"]) != 0 && c.StoreKeyFile != "" {
+			storeKey, err := os.ReadFile(c.StoreKeyFile)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(bytes.TrimSpace(storeKey), keys["operator"]) {
+				return errors.New("reused native action store credential")
+			}
+		}
+		api.Handler = api.scopedPageRoutes(actionRoutes(api.Handler, nil, nil, func() bool { return false }), keys["operator"])
+		return nil
+	}
+	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
+	if err != nil {
+		return err
+	}
+	if len(dial) > 0 && dial[0] != nil {
+		client.http.Transport.(*http.Transport).DialContext = dial[0]
+	}
+	if used[client.token] {
+		return errors.New("reused native action store credential")
+	}
 	if c.AuthorityID == "" {
 		c.AuthorityID = defaultActionAuthority
 	}
@@ -1574,7 +1587,7 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 	api.actionOwner = o
 	o.callbackReady = func() bool { return api.callbacksReadyFor(client, true) }
 	ready := o.ready
-	api.Handler = actionRoutes(api.Handler, keys, o, ready)
+	api.Handler = api.scopedPageRoutes(actionRoutes(api.Handler, keys, o, ready), keys["operator"])
 	if c.Dispatch == nil {
 		return nil
 	}
