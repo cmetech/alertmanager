@@ -633,6 +633,14 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			p = a.publishedFiring(g, m)
 		}
 		if p == nil {
+			// An inspection refused for capacity or a failed call backs off this member alone.
+			if g.ledger.deferred(ledgerKeyFor(ctx, receiver, name, index, m), epoch, snapOf(v2.EpisodeProjection{}, m, start)) {
+				if m.Resolved() || source.Resolved() {
+					heldResolved = true
+					backoff = errors.Join(backoff, errRetryBackoff)
+				}
+				continue
+			}
 			p, pass, err = a.journal.InspectOrdinary(ctx, source)
 			if v2.TransientActionError(err) {
 				retry(m, v2.EpisodeProjection{})

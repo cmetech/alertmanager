@@ -127,6 +127,10 @@ func (o *nativeActionOwner) conservativeDeadline(db time.Time) time.Time {
 	return o.localDeadline(db)
 }
 
+// ErrActionUnavailable is the retryable refusal of a native journal call:
+// a transport failure, a timeout or capacity back-pressure.
+var ErrActionUnavailable error = unavailable
+
 // TransientActionError reports a native journal call that failed or timed out.
 func TransientActionError(err error) bool {
 	var e actionError

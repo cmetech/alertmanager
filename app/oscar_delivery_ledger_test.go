@@ -510,8 +510,10 @@ func TestLedgerBackoffScheduleAndBound(t *testing.T) {
 	}
 	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute}, got)
 	require.True(t, l.deferred(k, 0, snap))
-	require.False(t, l.deferred(k, 0, ledgerSnap{severity: 2}), "a changed member is not deferred")
-	require.False(t, l.deferred(k, 0, snap), "and its backoff restarts")
+	changed := ledgerSnap{severity: 2}
+	require.False(t, l.deferred(k, 0, changed), "a changed member is not deferred")
+	l.fail(k, 0, changed, now)
+	require.Equal(t, 30*time.Second, l.lockedGet(k).nextAttempt.Sub(now), "and its next failure restarts the schedule")
 	l.fail(k, 0, snap, now)
 	l.settled(k, 0, false)
 	require.False(t, l.deferred(k, 0, snap))
@@ -565,4 +567,34 @@ func TestLedgerExplicitConfirmInvalidatesOrdinaryEntry(t *testing.T) {
 	_, _, _ = h.a.invoke(ctx, h.g, h.integration, []*alert.Alert{m}, []ordinaryContact{c}, 0)
 	require.EqualValues(t, 2, h.posts.Load(), "the explicit contact was delivered")
 	require.False(t, h.g.ledger.covered(h.key(s), 0, snap), "and the ordinary skip is gone")
+}
+
+// OSC-138 back-pressure surfaces as a retryable NATIVE_UNAVAILABLE from the
+// journal; it backs off that member instead of retrying every tick.
+func TestLedgerBackPressureBacksOffPerAlert(t *testing.T) {
+	h := newLedgerHarness(t, 0, "[alertname]")
+	refused, sibling := h.add("G", "refused"), h.add("G", "ok")
+	var inspections int
+	h.j.inspectSource = func(s *alert.Alert) error {
+		if s == refused {
+			inspections++
+			return v2.ErrActionUnavailable
+		}
+		return nil
+	}
+	require.Error(t, h.flush(refused, sibling))
+	require.Equal(t, 1, inspections)
+	require.Equal(t, 2, h.calls(sibling), "the sibling is delivered")
+	h.clock = h.clock.Add(10 * time.Second)
+	_ = h.flush(refused, sibling)
+	require.Equal(t, 1, inspections, "no retry inside the 30 s backoff")
+	require.Equal(t, 2, h.calls(sibling), "and the confirmed sibling is not re-checked")
+	h.clock = h.clock.Add(20 * time.Second)
+	_ = h.flush(refused, sibling)
+	require.Equal(t, 2, inspections, "retried when the backoff falls due")
+	h.clock = h.clock.Add(5 * time.Second)
+	resolved := h.resolve(refused)
+	h.j.inspectSource = func(*alert.Alert) error { inspections++; return nil }
+	_ = h.flush(resolved)
+	require.Equal(t, 3, inspections, "a resolve during the backoff is inspected on the next tick")
 }

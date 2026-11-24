@@ -47,7 +47,7 @@ type ledgerSnap struct {
 	ref                 v2.EpisodeRef
 	severity, lifecycle uint64
 	labels              model.Fingerprint
-	terminal            bool
+	terminal, wire      bool // wire: resolved on the wire or at the source, or a managed clear
 }
 
 type ledgerEntry struct {
@@ -89,8 +89,8 @@ func ledgerKeyFor(ctx context.Context, receiver, integration string, index int, 
 
 func snapOf(p v2.EpisodeProjection, m *alert.Alert, now time.Time) ledgerSnap {
 	s := m.ProviderSource()
-	terminal := p.State != "firing" || m.ResolvedAt(now) || s.ResolvedAt(now) || s.ManagedOperationKind == "clear"
-	return ledgerSnap{ref: p.EpisodeRef, severity: p.SeverityRevision, lifecycle: p.LifecycleSeq, labels: m.Labels.Fingerprint(), terminal: terminal}
+	wire := m.ResolvedAt(now) || s.ResolvedAt(now) || s.ManagedOperationKind == "clear"
+	return ledgerSnap{ref: p.EpisodeRef, severity: p.SeverityRevision, lifecycle: p.LifecycleSeq, labels: m.Labels.Fingerprint(), terminal: p.State != "firing" || wire, wire: wire}
 }
 
 func (a *nativeActions) ledgerEpoch() uint64 {
@@ -154,14 +154,9 @@ func (l *deliveryLedger) deferred(k ledgerKey, epoch uint64, s ledgerSnap) bool 
 	defer l.mu.Unlock()
 	l.lockedAt(epoch)
 	e := l.lockedGet(k)
-	if e == nil || e.attempts == 0 {
-		return false
-	}
-	if e.failed != s { // new, changed or resolved since the failure: contact now
-		e.attempts, e.nextAttempt = 0, time.Time{}
-		return false
-	}
-	return l.now().Before(e.nextAttempt)
+	// A member that is new, changed or resolved since the failure is contacted
+	// now; its next failure restarts the schedule (see fail).
+	return e != nil && e.attempts > 0 && e.failed == s && l.now().Before(e.nextAttempt)
 }
 
 // invalidate drops every entry for a target after any confirmed contact on it.
