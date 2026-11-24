@@ -122,7 +122,7 @@ func (o *nativeActionOwner) applyManual(ctx context.Context, m manualPublication
 func (o *nativeActionOwner) enterManual(owner string) (func(), error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.manualInflight[owner] || len(o.manualInflight) >= maxActionEpisodes {
+	if o.manualInflight[owner] || len(o.manualInflight) >= o.maxEpisodes {
 		return nil, unavailable
 	}
 	if o.manualInflight == nil {
