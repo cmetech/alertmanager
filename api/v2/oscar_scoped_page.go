@@ -222,6 +222,20 @@ func (api *API) scopedPageRoutes(next http.Handler, key []byte) http.Handler {
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
+		// Do not drain an untrusted or incomplete body before returning a rejection.
+		w.Header().Set("Connection", "close")
+		setDeadline, ok := r.Context().Value(scopedReadDeadlineKey{}).(func(time.Time) error)
+		if !ok {
+			setDeadline = http.NewResponseController(w).SetReadDeadline
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		if end, ok := r.Context().Deadline(); ok && end.Before(deadline) {
+			deadline = end
+		}
+		if err := setDeadline(deadline); err != nil {
+			w.WriteHeader(503)
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
 			w.WriteHeader(405)
@@ -262,33 +276,21 @@ func (api *API) scopedPageRoutes(next http.Handler, key []byte) http.Handler {
 			w.WriteHeader(503)
 			return
 		}
-		setDeadline, ok := r.Context().Value(scopedReadDeadlineKey{}).(func(time.Time) error)
-		if !ok {
-			setDeadline = http.NewResponseController(w).SetReadDeadline
-		}
-		deadline := now.Add(5 * time.Second)
-		if end, ok := r.Context().Deadline(); ok && end.Before(deadline) {
-			deadline = end
-		}
-		if err := setDeadline(deadline); err != nil {
-			w.WriteHeader(503)
-			return
-		}
 		raw, err := io.ReadAll(io.LimitReader(r.Body, actionBodyLimit+1))
-		clearErr := setDeadline(time.Time{})
 		var timeout net.Error
 		if errors.As(err, &timeout) && timeout.Timeout() {
 			w.WriteHeader(http.StatusRequestTimeout)
-			return
-		}
-		if clearErr != nil {
-			w.WriteHeader(503)
 			return
 		}
 		if err != nil || len(raw) > actionBodyLimit {
 			w.WriteHeader(413)
 			return
 		}
+		if err := setDeadline(time.Time{}); err != nil {
+			w.WriteHeader(503)
+			return
+		}
+		w.Header().Del("Connection")
 		if sec < time.Now().Unix()-60 {
 			w.WriteHeader(401)
 			return

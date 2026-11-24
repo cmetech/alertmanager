@@ -218,9 +218,8 @@ func TestScopedPage(t *testing.T) {
 			}
 			api.Handler.ServeHTTP(w, req)
 			require.Equal(t, http.StatusRequestTimeout, w.Code)
-			require.Len(t, deadlines, 2)
+			require.Len(t, deadlines, 1)
 			require.WithinDuration(t, time.Now().Add(5*time.Second), deadlines[0], time.Second)
-			require.True(t, deadlines[1].IsZero())
 		}
 		require.Equal(t, 200, handle(scopedRequest(body, domain, time.Now())).Code)
 	})

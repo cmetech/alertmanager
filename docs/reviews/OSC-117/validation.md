@@ -1,6 +1,6 @@
 # OSC-117 validation and handoff
 
-Latest product candidate: `98a0bfcfc4ae5162507ff72c22dae0b44857fd37`.
+Latest product candidate: HTTP deadline correction following `504b43ed` (commit linked by subsequent review).
 Base: `b3cf31d9db656f34c442e321cd06f71a551d65c7`.
 Corey explicitly authorized Elm/asset generation and focused Go tests on 2026-11-24.
 
@@ -27,10 +27,16 @@ The scoped Go tests exercise signed boundaries, role groups, parent/child visibi
 
 ## Remaining gates
 
-- Repository-wide tests/lint, actual HTTP connection/deadline reuse and generated-client signing through the registered server still need qualification.
+- Repository-wide tests/lint qualification is in progress; baseline failures are recorded separately.
 - OSC-104: fresh grouped authority, trusted signing, read-key provisioning with mutations disabled, SQL normalization parity and full read/action/report enforcement.
 - OSC-105: native-console/alternate route gates and scoped UI behavior.
 - Complete activation coverage and rollout checks, including artifact downloads and Grafana separation. This native PR does not activate restrictions.
 - GitHub Actions remain disabled. This checkout has no GitLab remote or pipeline file; no hosted CI ran. A GitHub push is not CI evidence.
 
 The isolated worktree/branch remain for draft PR review. No live OSCAR service restart, deployment or merge was performed or authorized by this validation work.
+
+## Real HTTP qualification — 2026-11-24
+
+The generated Go client now runs against the registered `/am` server over TCP. Signing uses the actual JSON producer (including its trailing newline), scalar/list Unicode rules, both response contract versions, and a reused connection. An incomplete authenticated TCP upload reproduced a ten-second response stall; a seven-second goroutine capture showed net/http draining the body in chunkWriter.writeHeader after the scoped handler had cleared its deadline. The handler now preserves the deadline for incomplete bodies and closes rejected unread requests. Complete bodies clear the deadline and retain keep-alive. Early unauthenticated incomplete requests return 401 within the two-second test bound; authenticated stalled requests return 408 or the surrounding TimeoutHandler's 503 at the five-second body deadline, without a success-version header and with no-store.
+
+`go test -race ./api ./api/v2 -run 'TestScopedPage|TestScopeParityFixture' -count=1` passed after the correction (api 6.880s, api/v2 1.940s). The net.Pipe regression asserts that failed reads retain the bounded deadline; it still exercises nine sequential expirations against the eight-slot budget and a subsequent successful request. Independent review follows this frozen change.
