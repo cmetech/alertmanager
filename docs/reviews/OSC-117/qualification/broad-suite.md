@@ -36,3 +36,19 @@ The later HTTP candidate `0dfd107e` adds real generated-client and stalled-body 
 Formatter commit `504b43ed` corrected both introduced gofumpt findings and captured-output whitespace. Product commits `0dfd107e` and `d947d1fb` add real generated-client HTTP/1.1 and TLS HTTP/2 coverage, bound incomplete bodies through teardown, and preserve healthy connections. Independent narrow review closed both HTTP findings. A low OpenAPI-description omission (503 may also result from HTTP/1.x context cancellation) remains; the API guide documents the behavior and generated clients already accept 503. The test-only pointer helpers use native new expressions required by the pinned linter. Focused client/HTTP2 race tests passed (1.652s). Final golangci-lint 2.14.0 comparison reports exactly the same 98 baseline findings, with zero added or removed findings.
 
 Full-suite results remain an explicit failure, with base reproductions rather than a clean CI claim. Three long app scenarios and MailDev cases remain unexecuted. No merge/deployment/production service restart.
+
+## Isolated long app scenarios at d947d1fb
+
+Frozen source `d947d1fbc1dbf10989b88c129dc1ec9dcd7818f7`. Go 1.27.0 on darwin/arm64. The setup log records the source archive, assets and versioned local binaries. See `long-app-setup.log`. Each run uses the pattern below with the exact test name in the table.
+
+```sh
+GOTOOLCHAIN=go1.27.0 go test -race -count=1 -timeout=35m -json -run '^TEST_NAME$' ./app
+```
+
+| Scenario | Result | Log |
+| --- | --- | --- |
+| `TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome` | Exit 0. Both accepted and rejected outcome subtests passed. Package 6.162s. | `long-app-direct-excluded.log` |
+| `TestOscarTerminalGroupShortIndividualPermitThroughAppAndProvider` | Exit 0. Test 161.80s, package 163.767s. | `long-app-short-permit.log` |
+| `TestOscarActionLargeTerminalGroupThroughAppAndProvider` | Exit 0. Test 1082.45s, package 1084.841s. | `long-app-large-terminal.log` |
+
+The previously timed-out commissioning scenario and the full repository suite were excluded from this follow-up. Local fixture listeners used ephemeral loopback ports.

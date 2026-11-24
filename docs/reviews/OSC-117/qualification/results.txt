@@ -187,3 +187,17 @@ FAIL	github.com/prometheus/alertmanager/app	55.069s
 baseline-app-first-long-fixture.log
 panic: test timed out after 10m0s
 fail github.com/prometheus/alertmanager/app  600.537
+
+long-app-direct-excluded.log
+pass github.com/prometheus/alertmanager/app TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome/accepted 2.42
+pass github.com/prometheus/alertmanager/app TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome/rejected 2.18
+pass github.com/prometheus/alertmanager/app TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome 4.61
+pass github.com/prometheus/alertmanager/app  7.547
+
+long-app-short-permit.log
+pass github.com/prometheus/alertmanager/app TestOscarTerminalGroupShortIndividualPermitThroughAppAndProvider 161.8
+pass github.com/prometheus/alertmanager/app  163.772
+
+long-app-large-terminal.log
+pass github.com/prometheus/alertmanager/app TestOscarActionLargeTerminalGroupThroughAppAndProvider 1082.45
+pass github.com/prometheus/alertmanager/app  1084.841
