@@ -612,9 +612,12 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		}
 	}
 	epoch, start := a.ledgerEpoch(), g.ledger.clock()
-	// retry backs off a member whose OSCAR call failed, timed out or was held by OSCAR.
-	retry := func(m *alert.Alert, p v2.EpisodeProjection) {
-		g.ledger.fail(ledgerKeyFor(ctx, receiver, name, index, m), epoch, snapOf(p, m, start), start)
+	// retry backs off a member whose OSCAR call failed, timed out or was held by
+	// OSCAR. Proven-untracked direct members (pass) keep upstream per-tick retries.
+	retry := func(m *alert.Alert, c ordinaryContact) {
+		if c.pass == nil {
+			g.ledger.fail(ledgerKeyFor(ctx, receiver, name, index, m), epoch, snapOf(c.p, m, start), start)
+		}
 	}
 	contacts := make(map[*alert.Alert]ordinaryContact, len(members))
 	for _, m := range members {
@@ -643,7 +646,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			}
 			p, pass, err = a.journal.InspectOrdinary(ctx, source)
 			if v2.TransientActionError(err) {
-				retry(m, v2.EpisodeProjection{})
+				retry(m, ordinaryContact{})
 			}
 		}
 		if err != nil {
@@ -685,7 +688,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 		if g.ledger.deferred(k, epoch, snap) {
 			// Per-alert backoff: no call. A terminal member fails the flush so the dispatcher keeps it.
 			delete(contacts, m)
-			if snap.terminal {
+			if snap.wire || c.p.State == "resolved" {
 				heldResolved = true
 				backoff = errors.Join(backoff, errRetryBackoff)
 			}
@@ -783,7 +786,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				c, err := a.planOrdinary(ctx, g, m, contacts[m])
 				if err != nil {
 					if v2.TransientActionError(err) {
-						retry(m, contacts[m].p)
+						retry(m, contacts[m])
 					}
 					hold(m, err)
 					delete(contacts, m)
@@ -803,7 +806,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			for n, request := range requests {
 				m := request.Member
 				if n >= len(admissions) || admissions[n].Err != nil || !admissions[n].Covered && !admissions[n].Completed && admissions[n].Entry == nil {
-					retry(m, request.Projection)
+					retry(m, contacts[m])
 					hold(m, actionHeld)
 					delete(contacts, m)
 					continue
@@ -857,7 +860,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			if err != nil {
 				if err.Error() != "NATIVE_SUPPRESSED" {
 					if v2.TransientActionError(err) {
-						retry(m, c.p)
+						retry(m, contacts[m]) // the planned contact: a failed reserve returns a zero one
 					}
 					hold(m, err)
 				}
@@ -929,7 +932,7 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 			}
 			if v.Err() != nil {
 				for x, c := range entries {
-					retry(pending[x], c.p)
+					retry(pending[x], c)
 				}
 				return v
 			}
@@ -1047,7 +1050,7 @@ func (a *nativeActions) reserve(ctx context.Context, member *alert.Alert, p v2.E
 	if len(r.Targets) != 1 || r.Targets[0].State != "pending" || r.Targets[0].SuccessorID != nil {
 		return ordinaryContact{}, actionHeld
 	}
-	return ordinaryContact{operation: id, target: r.Targets[0], contact: t, p: p}, nil
+	return ordinaryContact{ordinary: true, operation: id, target: r.Targets[0], contact: t, p: p}, nil
 }
 
 // planOrdinary matches an exact outgoing cohort without reserving its contacts.

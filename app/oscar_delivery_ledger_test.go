@@ -598,3 +598,20 @@ func TestLedgerBackPressureBacksOffPerAlert(t *testing.T) {
 	_ = h.flush(resolved)
 	require.Equal(t, 3, inspections, "a resolve during the backoff is inspected on the next tick")
 }
+
+func TestLedgerKeepsEntriesAcrossLeaseLapse(t *testing.T) {
+	l := newDeliveryLedger()
+	now := time.Now()
+	l.now = func() time.Time { return now }
+	k := ledgerKey{target: ledgerTarget{receiver: "team"}, group: "g"}
+	snap := ledgerSnap{severity: 1}
+	l.covered(k, 7, snap) // the lease epoch is established
+	l.cover(k, 7, snap, now.Add(time.Hour), l.stamp())
+	since := l.stamp()
+	require.False(t, l.covered(k, ledgerLapsed, snap), "a lapsed lease decides nothing")
+	require.True(t, l.covered(k, 7, snap), "the same epoch resumes its entries")
+	l.cover(k, 7, snap, now.Add(2*time.Hour), since)
+	require.False(t, l.covered(k, 7, snap), "a deadline read before the lapse is discarded, conservatively")
+	l.cover(k, 7, snap, now.Add(time.Hour), l.stamp())
+	require.False(t, l.covered(k, 8, snap), "a new epoch clears the ledger")
+}

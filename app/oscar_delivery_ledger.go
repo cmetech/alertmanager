@@ -93,11 +93,18 @@ func snapOf(p v2.EpisodeProjection, m *alert.Alert, now time.Time) ledgerSnap {
 	return ledgerSnap{ref: p.EpisodeRef, severity: p.SeverityRevision, lifecycle: p.LifecycleSeq, labels: m.Labels.Fingerprint(), terminal: p.State != "firing" || wire, wire: wire}
 }
 
+// ledgerLapsed marks a lapsed lease: nothing is decided or recorded, and the
+// ledger is kept for a renewal of the same epoch (a new epoch clears it).
+const ledgerLapsed = ^uint64(0)
+
 func (a *nativeActions) ledgerEpoch() uint64 {
 	if a.recovery == nil {
 		return 0
 	}
 	epoch, _ := a.recovery.RecoveryState()
+	if epoch == 0 {
+		return ledgerLapsed
+	}
 	return epoch
 }
 
@@ -108,13 +115,19 @@ func (l *deliveryLedger) clock() time.Time {
 	return l.now()
 }
 
-// Caller holds l.mu. A lease epoch change discards every entry.
-func (l *deliveryLedger) lockedAt(epoch uint64) {
+// Caller holds l.mu. A lease epoch change discards every entry; a lapsed
+// lease decides and records nothing (false).
+func (l *deliveryLedger) lockedAt(epoch uint64) bool {
+	if epoch == ledgerLapsed {
+		l.version++ // a deadline read before the lapse is not recorded after it
+		return false
+	}
 	if epoch != l.epoch {
 		clear(l.entries)
 		l.epoch, l.size = epoch, 0
 		l.version++
 	}
+	return true
 }
 
 // stamp returns the invalidation version; take it before the call whose
@@ -140,7 +153,9 @@ func (l *deliveryLedger) covered(k ledgerKey, epoch uint64, s ledgerSnap) bool {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lockedAt(epoch)
+	if !l.lockedAt(epoch) {
+		return false
+	}
 	e := l.lockedGet(k)
 	return e != nil && e.covered == s && l.now().Before(e.nextEligible)
 }
@@ -152,7 +167,9 @@ func (l *deliveryLedger) deferred(k ledgerKey, epoch uint64, s ledgerSnap) bool 
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lockedAt(epoch)
+	if !l.lockedAt(epoch) {
+		return false
+	}
 	e := l.lockedGet(k)
 	// A member that is new, changed or resolved since the failure is contacted
 	// now; its next failure restarts the schedule (see fail).
@@ -166,7 +183,7 @@ func (l *deliveryLedger) invalidate(t ledgerTarget, epoch uint64) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lockedAt(epoch)
+	_ = l.lockedAt(epoch)
 	l.size -= len(l.entries[t])
 	delete(l.entries, t)
 	l.version++
@@ -181,7 +198,9 @@ func (l *deliveryLedger) cover(k ledgerKey, epoch uint64, s ledgerSnap, until ti
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lockedAt(epoch)
+	if !l.lockedAt(epoch) {
+		return
+	}
 	if s.terminal || l.version != since {
 		l.lockedDelete(k)
 		return
@@ -196,7 +215,9 @@ func (l *deliveryLedger) settled(k ledgerKey, epoch uint64, forget bool) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lockedAt(epoch)
+	if !l.lockedAt(epoch) {
+		return
+	}
 	if forget {
 		l.lockedDelete(k)
 	} else if e := l.lockedGet(k); e != nil {
@@ -211,7 +232,9 @@ func (l *deliveryLedger) fail(k ledgerKey, epoch uint64, s ledgerSnap, at time.T
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lockedAt(epoch)
+	if !l.lockedAt(epoch) {
+		return
+	}
 	e := l.lockedEntry(k)
 	if e.failed != s {
 		e.attempts = 0
