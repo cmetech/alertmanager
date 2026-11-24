@@ -1628,7 +1628,8 @@ func init() {
                 ]
               },
               "value": {
-                "description": "A string for equals or an array of 1 through 100 strings for isAnyOf."
+                "description": "A string for equals or an array of 1 through 100 strings for isAnyOf.",
+                "x-elm-json-value": true
               }
             },
             "additionalProperties": false
@@ -1642,7 +1643,8 @@ func init() {
           ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "x-elm-omit-absent": "logicOperator"
     },
     "oscarPolicyBinding": {
       "type": "object",
@@ -2983,7 +2985,8 @@ func init() {
           ]
         },
         "value": {
-          "description": "A string for equals or an array of 1 through 100 strings for isAnyOf."
+          "description": "A string for equals or an array of 1 through 100 strings for isAnyOf.",
+          "x-elm-json-value": true
         }
       },
       "additionalProperties": false
@@ -3786,7 +3789,8 @@ func init() {
           ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "x-elm-omit-absent": "logicOperator"
     },
     "oscarPolicyBinding": {
       "type": "object",

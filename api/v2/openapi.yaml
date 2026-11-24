@@ -546,6 +546,7 @@ definitions:
             maxItems: 32
             items: {$ref: '#/definitions/oscarPageScopeGroup'}
   oscarPageScopeGroup:
+    x-elm-omit-absent: logicOperator
     type: object
     additionalProperties: false
     required: [items]
@@ -563,6 +564,7 @@ definitions:
             field: {type: string, pattern: '^label:.+'}
             operator: {type: string, enum: [equals, isAnyOf]}
             value:
+              x-elm-json-value: true
               description: A string for equals or an array of 1 through 100 strings for isAnyOf.
   oscarEpisodeRef:
     x-elm-natural-fields: true

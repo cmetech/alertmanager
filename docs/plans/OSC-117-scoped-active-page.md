@@ -27,4 +27,4 @@ Update native contract documentation and AC-to-test evidence. Self-review and co
 
 ## Generation status
 
-The controller ran the repository's pinned native Swagger source generator. Go server, client, models and embedded Swagger now include the scoped operation. The handwritten generated-operation fallback returns 401 when the private read guard has not verified the original request. Elm Data generation requires a container and the assets target builds the frontend. Those steps, runtime tests and companion integration remain pending.
+The controller ran the repository's pinned native Swagger source generator. Go server, client, models and embedded Swagger now include the scoped operation. The handwritten generated-operation fallback returns 401 when the private read guard has not verified the original request. After execution was authorized, the pinned Elm generator and frontend assets completed, the generated scoped request compiled directly, and its three wire round-trip tests passed. The focused native API tests passed with race detection. Companion integration and repository-wide validation remain pending.
