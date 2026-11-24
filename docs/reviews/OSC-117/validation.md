@@ -1,5 +1,7 @@
 # OSC-117 validation and handoff
 
+Current paired action implementation, independent review, broad race qualification and baseline limitations are recorded in [action-scope validation](action-scope-validation.md). The sections below retain the earlier scoped-read evidence at their named revisions.
+
 Latest product candidate: `d947d1fb`, followed by test-only lint cleanup and evidence commits.
 Base: `b3cf31d9db656f34c442e321cd06f71a551d65c7`.
 Corey explicitly authorized Elm/asset generation and focused Go tests on 2026-11-24.
