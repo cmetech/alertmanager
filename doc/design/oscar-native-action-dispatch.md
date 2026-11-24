@@ -51,8 +51,9 @@ evicts quiescent journaled slots, keeps their live projection and claim witness,
 and rehydrates through indexed selectors. An evicted key's lifecycle edges queue
 as ordered handoffs, at most one per key, and are never discarded for capacity;
 a queued handoff holds its source like an unresolved summary. While the queue is
-at `--oscar.action-max-handoffs` (default 65,536), only the handoff drain may
-evict a resident: other enrollments fail fast and retry on their existing path,
+at `--oscar.action-max-handoffs` (default 65,536), only an enrollment that
+absorbs a queued handoff (normally the drain) may evict a resident: other
+enrollments fail fast and retry on their existing path,
 so new first contacts stay held until saturation or the queue clears. Loss of
 intermediate evidence beyond a key's transition limit conservatively holds the
 affected source bucket. A missing provider pointer cannot close an unseen

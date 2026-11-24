@@ -59,7 +59,7 @@ func run() int {
 		actionOperator              = kingpin.Flag("oscar.action-operator-key-file", "Middleware operator assertion verification key.").String()
 		actionPolicy                = kingpin.Flag("oscar.action-policy-key-file", "Middleware policy assertion verification key.").String()
 		actionMaxEpisodes           = kingpin.Flag("oscar.action-max-episodes", "Resident native episode slots; also caps detached direct entries and in-flight manual sources. Idle slots are evicted past it.").Default("65536").Int()
-		actionMaxHandoffs           = kingpin.Flag("oscar.action-max-handoffs", "Queued native lifecycle hand-offs above which new enrollments are retried instead of evicting a resident. Hand-offs are never dropped.").Default("65536").Int()
+		actionMaxHandoffs           = kingpin.Flag("oscar.action-max-handoffs", "Queued native lifecycle hand-offs above which new enrollments are retried instead of evicting a resident. Hand-offs are never dropped for capacity.").Default("65536").Int()
 		managedOwnerScheme          = kingpin.Flag("oscar.managed-owner-scheme", "Configured internal transport to the private managed receiver owner.").Default("https").Enum("http", "https")
 		managedOwnerCA              = kingpin.Flag("oscar.managed-owner-ca-file", "CA of the private managed receiver owner.").String()
 		managedOwnerKey             = kingpin.Flag("oscar.managed-owner-key-file", "Distinct managed receiver owner credential.").String()

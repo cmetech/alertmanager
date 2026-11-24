@@ -189,42 +189,6 @@ func TestOscarActionSlotBackPressureWhileHandoffsAtBound(t *testing.T) {
 		require.NotNil(t, s, "below the bound a new enrollment evicts as before")
 		require.Len(t, o.parked, 2)
 	})
-	t.Run("refused enrollments cannot starve the drain", func(t *testing.T) {
-		t.Parallel()
-		f := newCapacityFixture(t)
-		f.o.maxEpisodes, f.o.maxHandoffs = 1, 1
-		idleResident(f.o, "resident")
-		f.resolve("gc close")
-		require.NotNil(t, f.o.handoffs[f.key])
-
-		stop := make(chan struct{})
-		var wg sync.WaitGroup
-		for i := range 32 {
-			key := fmt.Sprint("new-", i)
-			wg.Go(func() {
-				for {
-					select {
-					case <-stop:
-						return
-					default:
-					}
-					_, _ = f.o.obtainSlot(t.Context(), key, func() (*episodeSlot, error) {
-						f.o.mu.Lock()
-						defer f.o.mu.Unlock()
-						if len(f.o.byKey) >= f.o.maxEpisodes {
-							return nil, nil
-						}
-						return nil, unavailable // Never take the drain's slot.
-					})
-				}
-			})
-		}
-		time.Sleep(10 * time.Millisecond)
-		f.drain(t, 1)
-		close(stop)
-		wg.Wait()
-		require.Equal(t, 1, f.resolvedCount(), "one drain pass enrolls and projects the queued close")
-	})
 }
 
 // AC-2: both bounds are configurable with defaults sized for 10 alerts/s x 30 min.

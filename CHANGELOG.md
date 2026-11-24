@@ -8,7 +8,7 @@
 - New flags `--oscar.action-max-episodes` and `--oscar.action-max-handoffs`, both default 65,536
   (previously a fixed 4,096), sized for 10 alerts/s with 30-minute lifetimes. The episode bound
   also caps detached direct entries and in-flight manual sources. Zero selects the default;
-  negative values fail startup.
+  negative values fail startup when the native owner is enabled.
 - No OSCAR, wire or schema change; existing deployments pick up the new defaults. Episodes already
   left firing by earlier drops are not repaired. Per-alert backoff (OSC-136) is not included:
   callers refused a slot retry on the existing hold and next-flush paths. Operator qualification
