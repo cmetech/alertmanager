@@ -687,6 +687,11 @@ func (a *nativeActions) prepare(ctx context.Context, g *actionGraph, receiver, n
 				continue
 			}
 		}
+		if c.pass != nil {
+			// Proven-untracked direct member: no ledger state, upstream behaviour.
+			result.Members = append(result.Members, m)
+			continue
+		}
 		k, snap := ledgerKeyFor(ctx, receiver, name, index, m), snapOf(c.p, m, start)
 		switch decision, _ := g.ledger.decide(k, epoch, snap, i.prepared == nil); decision {
 		case "defer":
@@ -1155,6 +1160,7 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 		late, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		sentAt := g.ledger.clock() // before any settle request, so before OSCAR stamps next_eligible
+		since := g.ledger.stamp()  // and an invalidation by anyone else after this point drops our cover
 		var accepted []*alert.Alert
 		var settlement error
 		var cohortReceipts []v2.OrdinaryReceipt
@@ -1186,14 +1192,15 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 			settlement = errors.Join(settlement, a.journal.(v2.OrdinaryCohortJournal).SettleCohort(ctx, cohortReceipts))
 		}
 		epoch := a.ledgerEpoch()
+		own := map[ledgerTarget]uint64{}
 		for x, c := range contacts {
 			if entered[x] {
 				// Any contact that may have been confirmed on this target (ordinary or
 				// explicit, any scope) can lower OSCAR's deadline: forget every entry.
 				k := ledgerKeyFor(ctx, c.contact.ReceiverID, c.contact.integration.name, c.contact.integration.index, members[x])
-				g.ledger.invalidate(k.target, epoch)
+				own[k.target] = g.ledger.invalidate(k.target, epoch, since)
 				if current := a.snapshot(); current != nil && current != g {
-					current.ledger.invalidate(k.target, epoch) // entered before a reload, confirmed after it
+					current.ledger.invalidate(k.target, epoch, 0) // entered before a reload, confirmed after it
 				}
 			}
 		}
@@ -1208,8 +1215,9 @@ func (a *nativeActions) invoke(ctx context.Context, g *actionGraph, i *notify.In
 				}
 				k := ledgerKeyFor(ctx, c.contact.ReceiverID, c.contact.integration.name, c.contact.integration.index, members[x])
 				repeat := time.Duration(c.contact.RepeatIntervalUS) * time.Microsecond
-				// Our own invalidation above precedes this cover; only a later one would drop it.
-				g.ledger.cover(k, epoch, snapOf(c.p, members[x], sentAt), sentAt.Add(repeat), g.ledger.stamp())
+				// Covered under the stamp of our own invalidation; zero (someone else
+				// invalidated the target after since) or any later one drops it.
+				g.ledger.cover(k, epoch, snapOf(c.p, members[x], sentAt), sentAt.Add(repeat), own[k.target])
 			}
 		}
 		return v, accepted, bound.NoSend && v.Err() == nil

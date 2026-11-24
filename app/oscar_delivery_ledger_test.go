@@ -50,6 +50,7 @@ type ledgerJournal struct {
 	calls       map[string]int
 	total       atomic.Int64
 	settleErr   error
+	onSettle    func() // runs inside SettleCohort, after OSCAR stamped the coverage
 }
 
 type ledgerCoverage struct {
@@ -124,6 +125,9 @@ func (j *ledgerJournal) SettleCohort(_ context.Context, rows []v2.OrdinaryReceip
 			j.coverage[p.EpisodeRef.EpisodeID] = ledgerCoverage{j.now().Add(time.Duration(m.Target.RepeatIntervalUS) * time.Microsecond), p.EpisodeRef.VariantRevision, p.SeverityRevision}
 		}
 	}
+	if j.onSettle != nil {
+		j.onSettle()
+	}
 	return j.settleErr
 }
 
@@ -159,6 +163,7 @@ func (j *ledgerJournal) Settle(ctx context.Context, e v2.Entry, outcome, evidenc
 
 type ledgerHarness struct {
 	failPosts   atomic.Bool
+	onPost      atomic.Pointer[func()]
 	t           *testing.T
 	r           *reloader
 	a           *nativeActions
@@ -176,6 +181,9 @@ func newLedgerHarness(t *testing.T, n int, groupBy string) *ledgerHarness {
 	h := &ledgerHarness{t: t, clock: time.Now()}
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		h.posts.Add(1)
+		if f := h.onPost.Swap(nil); f != nil {
+			(*f)()
+		}
 		if h.failPosts.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
@@ -547,17 +555,17 @@ func TestLedgerInvalidatesTargetOnAnyConfirm(t *testing.T) {
 	for _, k := range []ledgerKey{a, b, other} {
 		l.cover(k, 0, snap, now.Add(time.Hour), l.stamp())
 	}
-	l.invalidate(target, 0)
+	l.invalidate(target, 0, 0)
 	require.False(t, l.covered(a, 0, snap))
 	require.False(t, l.covered(b, 0, snap))
 	require.True(t, l.covered(other, 0, snap), "another target keeps its entry")
 
 	since := l.stamp()
-	l.invalidate(target, 0) // a concurrent confirm on the same target lands while a covered reply is in flight
+	l.invalidate(target, 0, 0) // a concurrent confirm on the same target lands while a covered reply is in flight
 	l.cover(a, 0, snap, now.Add(time.Hour), since)
 	require.False(t, l.covered(a, 0, snap), "a deadline read before an invalidation of its target is not recorded")
 	since = l.stamp()
-	l.invalidate(other.target, 0) // C136-4: an unrelated target's confirm does not drop it
+	l.invalidate(other.target, 0, 0) // C136-4: an unrelated target's confirm does not drop it
 	l.cover(a, 0, snap, now.Add(time.Hour), since)
 	require.True(t, l.covered(a, 0, snap))
 }
@@ -751,4 +759,44 @@ func TestLedgerSkippedAlertsStayOnAlertsPage(t *testing.T) {
 	for _, s := range h.sources {
 		require.True(t, after[s.Fingerprint().String()], "skipped alert %s is on the page", s.Fingerprint())
 	}
+}
+
+// C136-5: another confirm on the same target that lands while our settle is in
+// flight (another route or an explicit resend, possibly with a shorter repeat)
+// drops our own deadline instead of recording one later than OSCAR's.
+func TestLedgerConcurrentConfirmDropsOwnDeadline(t *testing.T) {
+	h := newLedgerHarness(t, 2, "['...']")
+	s, other := h.sources[0], h.sources[1]
+	h.j.onSettle = func() {
+		h.j.onSettle = nil
+		h.g.ledger.invalidate(h.key(s).target, 0, 0) // B's finish invalidates the target first
+	}
+	require.NoError(t, h.flush(s))
+	e := h.g.ledger.lockedGet(h.key(s))
+	require.True(t, e == nil || e.nextEligible.IsZero(), "no deadline is recorded across a concurrent confirm")
+	require.NoError(t, h.flush(other))
+	require.NotNil(t, h.g.ledger.lockedGet(h.key(other)), "an uncontended confirm is still recorded")
+}
+
+// G2: a contact entered on a graph that a reload replaced before its finish
+// still invalidates the current graph's entries for the target.
+func TestLedgerReloadStraddlingConfirmInvalidatesCurrentGraph(t *testing.T) {
+	h := newLedgerHarness(t, 1, "['...']")
+	s := h.sources[0]
+	require.NoError(t, h.flush(s)) // confirmed: OSCAR coverage exists
+	h.clock = h.clock.Add(time.Hour)
+	var current *actionGraph
+	f := func() { // while the old graph's POST is in flight: reload and cover the target on the new graph
+		require.NoError(t, h.r.reload(h.cfg))
+		require.Eventually(t, func() bool { return h.a.snapshot() != h.g }, time.Second, time.Millisecond)
+		current = h.a.snapshot()
+		current.ledger.now = func() time.Time { return h.clock }
+		m := s.NotificationCopy(time.Now())
+		current.ledger.cover(ledgerKeyFor(h.ctxFor(m), "team", "webhook", 0, m), 0, snapOf(h.j.projections[s], m, h.clock), h.clock.Add(time.Hour), current.ledger.stamp())
+		require.NotNil(t, current.ledger.lockedGet(h.key(s)))
+	}
+	h.onPost.Store(&f)
+	require.NoError(t, h.flush(s)) // repeat due on the old graph
+	require.NotNil(t, current)
+	require.Nil(t, current.ledger.lockedGet(h.key(s)), "the current graph forgot the target")
 }

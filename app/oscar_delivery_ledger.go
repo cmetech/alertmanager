@@ -82,7 +82,7 @@ type deliveryLedger struct {
 }
 
 func newDeliveryLedger() *deliveryLedger {
-	return &deliveryLedger{entries: make(map[ledgerTarget]map[string]*ledgerEntry), stamps: make(map[ledgerTarget]uint64), now: time.Now}
+	return &deliveryLedger{entries: make(map[ledgerTarget]map[string]*ledgerEntry), stamps: make(map[ledgerTarget]uint64), now: time.Now, version: 1} // stamp 0 means "do not cover"
 }
 
 func ledgerKeyFor(ctx context.Context, receiver, integration string, index int, m *alert.Alert) ledgerKey {
@@ -145,10 +145,10 @@ func (l *deliveryLedger) lockedStaleAll() {
 // covered), "defer" (inside its backoff) or "contact", with the reason.
 // Skips are allowed only for unprepared integrations.
 func (l *deliveryLedger) decide(k ledgerKey, epoch uint64, s ledgerSnap, allowSkip bool) (decision, reason string) {
-	defer func() { l.metrics.decided(decision, reason) }()
 	if l == nil {
 		return "contact", "fallback"
 	}
+	defer func() { l.metrics.decided(decision, reason) }()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.lockedAt(epoch) {
@@ -168,9 +168,6 @@ func (l *deliveryLedger) decide(k ledgerKey, epoch uint64, s ledgerSnap, allowSk
 	case !allowSkip || e.nextEligible.IsZero():
 		return "contact", "fallback"
 	case e.covered != s:
-		if e.covered.ref != s.ref || e.covered.severity != s.severity || e.covered.lifecycle != s.lifecycle {
-			l.metrics.invalidated("revision", 1)
-		}
 		return "contact", "changed"
 	case now.Before(e.nextEligible):
 		return "skip", "covered"
@@ -220,13 +217,16 @@ func (l *deliveryLedger) deferred(k ledgerKey, epoch uint64, s ledgerSnap) bool 
 }
 
 // invalidate drops every entry for a target after any confirmed contact on it.
-func (l *deliveryLedger) invalidate(t ledgerTarget, epoch uint64) {
+// It returns a stamp under which the caller may cover its own confirmation,
+// or 0 when the target was invalidated by someone else (or the ledger went
+// stale) after since, the stamp the caller took before its settle request.
+func (l *deliveryLedger) invalidate(t ledgerTarget, epoch, since uint64) uint64 {
 	if l == nil {
-		return
+		return 0
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_ = l.lockedAt(epoch)
+	clean := l.lockedAt(epoch) && since >= l.floor && l.stamps[t] <= since
 	l.metrics.invalidated("confirmed_contact", len(l.entries[t]))
 	l.size -= len(l.entries[t])
 	delete(l.entries, t)
@@ -237,6 +237,10 @@ func (l *deliveryLedger) invalidate(t ledgerTarget, epoch uint64) {
 		l.floor = l.version
 	}
 	l.stamps[t] = l.version
+	if !clean {
+		return 0
+	}
+	return l.version
 }
 
 // cover records proven coverage until a local deadline and clears any backoff.
@@ -251,11 +255,15 @@ func (l *deliveryLedger) cover(k ledgerKey, epoch uint64, s ledgerSnap, until ti
 	if !l.lockedAt(epoch) {
 		return
 	}
-	if s.terminal || since < l.floor || l.stamps[k.target] > since {
+	if s.terminal || since == 0 || since < l.floor || l.stamps[k.target] > since {
 		l.lockedDelete(k)
 		return
 	}
-	*l.lockedEntry(k) = ledgerEntry{covered: s, nextEligible: until}
+	e := l.lockedEntry(k)
+	if old := e.covered; old != (ledgerSnap{}) && (old.ref != s.ref || old.severity != s.severity || old.lifecycle != s.lifecycle) {
+		l.metrics.invalidated("revision", 1) // a newer episode, variant, severity or lifecycle replaces the entry
+	}
+	*e = ledgerEntry{covered: s, nextEligible: until}
 }
 
 // settled clears the backoff after OSCAR answered covered (keep) or completed (forget).
