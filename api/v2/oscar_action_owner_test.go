@@ -36,6 +36,9 @@ import (
 	"github.com/prometheus/alertmanager/template"
 )
 
+// testActionEpisodes keeps capacity tests beyond the resident bound fast.
+const testActionEpisodes = 64
+
 type actionRPCFunc func(context.Context, string, map[string]any, any) error
 
 func (f actionRPCFunc) call(c context.Context, k string, p map[string]any, v any) error {
@@ -640,15 +643,16 @@ func TestOverflowGCAndDeferredRecoveryAtCapacity(t *testing.T) {
 	}), testActionDispatch{})
 	o.lease = actionLease{Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
 	o.recovered = true
+	o.maxEpisodes = testActionEpisodes
 	churn := *source
 	churn.Labels = model.LabelSet{"alertname": "churning"}
 	key := sourceKey("", churn.Fingerprint().String())
 	o.observe("", &churn, false)
-	for n := 1; n < maxActionEpisodes; n++ {
+	for n := 1; n < testActionEpisodes; n++ {
 		o.byKey[fmt.Sprint(n)] = &episodeSlot{}
 	}
 	require.NoError(t, o.recoverEpisodes(t.Context(), o.lease.Epoch))
-	require.Len(t, o.byKey, maxActionEpisodes)
+	require.Len(t, o.byKey, testActionEpisodes)
 	s := o.slot(key, false)
 	for n := 1; n <= maxTransitions*4; n++ {
 		a := churn
@@ -661,7 +665,7 @@ func TestOverflowGCAndDeferredRecoveryAtCapacity(t *testing.T) {
 	require.True(t, s.overflow)
 	require.Len(t, s.pending, maxTransitions)
 	o.sweepSlot(o.withEpoch(t.Context()), key, s)
-	require.Len(t, o.byKey, maxActionEpisodes-1)
+	require.Len(t, o.byKey, testActionEpisodes-1)
 	other := *source
 	other.StartsAt = other.StartsAt.Add(time.Nanosecond)
 	o.observe("", &other, false)
@@ -1509,7 +1513,7 @@ func TestOperatorReplayReturnsAcceptedIntentNoEffectReceipts(t *testing.T) {
 func TestOscarActionCanonicalEnrollmentAndRepeatBeyondSlotCapacity(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
-	members := make([]*alert.Alert, maxActionEpisodes+13)
+	members := make([]*alert.Alert, testActionEpisodes+13)
 	residents := make(map[string]*alert.Alert)
 	rows := make(map[string]EpisodeProjection)
 	var sourceReads int
@@ -1539,6 +1543,7 @@ func TestOscarActionCanonicalEnrollmentAndRepeatBeyondSlotCapacity(t *testing.T)
 	}), testActionDispatch{})
 	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
 	o.recovered = true
+	o.maxEpisodes = testActionEpisodes
 	o.readSource = func(_, fp string, use func(*alert.Alert)) {
 		if s := residents[fp]; s != nil {
 			use(s)
@@ -1564,7 +1569,7 @@ func TestOscarActionCanonicalEnrollmentAndRepeatBeyondSlotCapacity(t *testing.T)
 			d, err := o.Delivery(t.Context(), s, "canonical", fmt.Sprintf("00000000-1111-4111-8111-%012d", i), nil)
 			require.NoError(t, err)
 			require.Equal(t, rows[s.Fingerprint().String()].EpisodeRef, d.EpisodeRef)
-			require.LessOrEqual(t, len(o.byKey), maxActionEpisodes)
+			require.LessOrEqual(t, len(o.byKey), testActionEpisodes)
 		}
 	}
 	require.Len(t, rows, len(members))
@@ -1610,6 +1615,7 @@ func TestOscarActionDirectGroupBeyondSlotCapAndDetachedUnknownOverflow(t *testin
 	t.Parallel()
 	d := &directResidentFixture{current: map[string]*alert.Alert{}, contacts: map[string]*DirectContact{}}
 	o := newNativeActionOwner(defaultActionAuthority, nil, d) // Direct passes have no RPC client.
+	o.maxEpisodes = testActionEpisodes
 	now := time.Now()
 	o.recovered = true
 	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
@@ -1620,7 +1626,7 @@ func TestOscarActionDirectGroupBeyondSlotCapAndDetachedUnknownOverflow(t *testin
 	}
 	var sources []*alert.Alert
 	var passes []*OrdinaryPass
-	for i := range maxActionEpisodes + 12 {
+	for i := range testActionEpisodes + 12 {
 		s := alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(fmt.Sprint(i))}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 		o.observe("", s, false)
 		_, pass, err := o.InspectOrdinary(t.Context(), s)
@@ -1638,7 +1644,7 @@ func TestOscarActionDirectGroupBeyondSlotCapAndDetachedUnknownOverflow(t *testin
 		o.observe("", s, true)
 		require.False(t, passes[i].Valid())
 	}
-	require.Len(t, o.untracked, maxActionEpisodes)
+	require.Len(t, o.untracked, testActionEpisodes)
 	for i, s := range sources {
 		o.observe("", s, false)
 		_, _, err := o.InspectOrdinary(t.Context(), s)
@@ -1701,6 +1707,7 @@ func TestOscarActionInvalidSeverityCannotExhaustEnrollment(t *testing.T) {
 		return nil
 	}), testActionDispatch{})
 	o.recovered = true
+	o.maxEpisodes = testActionEpisodes
 	o.lease = actionLease{Epoch: 1, ExpiresAt: now.Add(time.Hour)}
 	o.readSource = func(_, fp string, read func(*alert.Alert)) {
 		if current.Fingerprint().String() == fp {
@@ -1708,23 +1715,23 @@ func TestOscarActionInvalidSeverityCannotExhaustEnrollment(t *testing.T) {
 		}
 	}
 	var residents []*alert.Alert
-	for i := range maxActionEpisodes + 1 {
+	for i := range testActionEpisodes + 1 {
 		severity := "high"
-		if i == maxActionEpisodes {
+		if i == testActionEpisodes {
 			severity = "major"
 		}
 		current = alert.New(model.Alert{Labels: model.LabelSet{"host": model.LabelValue(fmt.Sprint(i)), "severity": model.LabelValue(severity)}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 		residents = append(residents, current)
 		o.observe("", current, false)
 		_, err := o.Project(t.Context(), current)
-		if i < maxActionEpisodes {
+		if i < testActionEpisodes {
 			require.Error(t, err)
 			require.Empty(t, o.byKey)
 		} else {
 			require.NoError(t, err)
 		}
 	}
-	require.Len(t, residents, maxActionEpisodes+1)
+	require.Len(t, residents, testActionEpisodes+1)
 	require.Equal(t, 1, writes)
 }
 

@@ -30,7 +30,7 @@ type observationHandoff struct {
 
 func (o *nativeActionOwner) slotLocked(key string, create bool) *episodeSlot {
 	s := o.byKey[key]
-	if s != nil || !create || len(o.byKey) >= maxActionEpisodes || o.directHeldLocked(key) {
+	if s != nil || !create || len(o.byKey) >= o.maxEpisodes || o.directHeldLocked(key) {
 		return s
 	}
 	bucket, bit := membershipBit(key)
@@ -102,15 +102,21 @@ func (o *nativeActionOwner) evictOne() bool {
 
 // Call outside the provider turn. At saturation, bound both waiting callers
 // and their wait, serializing reclamation through the FIFO channel waiter queue.
+// While hand-offs are at their bound, only an enrollment that absorbs one may
+// reclaim; others fail fast and retry, so queued edges drain first.
 func (o *nativeActionOwner) obtainSlot(ctx context.Context, key string, try func() (*episodeSlot, error)) (*episodeSlot, error) {
 	if s, err := try(); s != nil || err != nil {
 		return s, err
 	}
 	o.mu.Lock()
 	held := o.directHeldLocked(key)
+	backPressure := len(o.handoffs) >= o.maxHandoffs && o.handoffs[key] == nil
 	o.mu.Unlock()
 	if held {
 		return nil, reconcile
+	}
+	if backPressure {
+		return nil, unavailable
 	}
 	select {
 	case o.waiters <- struct{}{}:
@@ -166,7 +172,8 @@ func (s *episodeSlot) invalidateLocked() {
 }
 
 // bufferLocked preserves observed lifecycle edges across mutable-slot eviction.
-// A lost edge latches conservative key membership; absence alone cannot repair it.
+// A lost intermediate edge (transition overflow) latches conservative key
+// membership; absence alone cannot repair it.
 func (o *nativeActionOwner) bufferLocked(key string, previous, source *alert.Alert, removed bool) {
 	bucket, bit := membershipBit(key)
 	park, parked := o.parked[key]
@@ -189,11 +196,8 @@ func (o *nativeActionOwner) bufferLocked(key string, previous, source *alert.Ale
 		if !parked && (previous == nil && !removed || o.recovered && o.membership[bucket]&bit == 0 && o.terminalMembership[bucket]&bit == 0) {
 			return
 		}
-		if len(o.handoffs) >= maxActionEpisodes {
-			o.gaps[bucket] |= bit
-			delete(o.parked, key)
-			return
-		}
+		// Never discard an edge at capacity: at most one hand-off per key, and
+		// obtainSlot applies back-pressure past maxHandoffs.
 		h = &observationHandoff{base: previous, work: o.work.PushBack(key)}
 		o.handoffs[key] = h
 	}
@@ -323,7 +327,7 @@ func (o *nativeActionOwner) directHeldLocked(key string) bool {
 
 func (o *nativeActionOwner) detachDirectLocked(key string, contact *DirectContact) {
 	contact.detached = true
-	if len(o.untracked) < maxActionEpisodes {
+	if len(o.untracked) < o.maxEpisodes {
 		o.untracked[key] = 1
 		return
 	}

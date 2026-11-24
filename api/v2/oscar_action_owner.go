@@ -5,6 +5,7 @@ package v2
 
 import (
 	"bytes"
+	"cmp"
 	"container/list"
 	"context"
 	"encoding/json"
@@ -29,8 +30,11 @@ import (
 
 const (
 	defaultActionAuthority = "64171238-3cc5-448e-bd12-7502a062ec63"
-	maxActionEpisodes      = 4096
-	maxTransitions         = 16
+	// Sized for 10 alerts/s with 30-minute lifetimes: 18k firing plus up to
+	// 18k resolved awaiting provider GC, with headroom.
+	defaultActionEpisodes = 1 << 16
+	defaultActionHandoffs = 1 << 16
+	maxTransitions        = 16
 )
 
 var nativeFingerprint = regexp.MustCompile("^[0-9a-f]{16}$")
@@ -50,7 +54,19 @@ type ActionOwnerConfig struct {
 	Enabled                                                                   bool
 	AuthorityID, Scheme, CAFile, StoreKeyFile, OperatorKeyFile, PolicyKeyFile string
 	Dispatch                                                                  ActionDispatch
+	// MaxEpisodes bounds resident episode slots (and detached direct entries
+	// and in-flight manual sources); MaxHandoffs is the hand-off back-pressure
+	// threshold. Zero selects the default.
+	MaxEpisodes, MaxHandoffs int
 }
+
+func (c ActionOwnerConfig) bounds() (episodes, handoffs int, err error) {
+	if c.MaxEpisodes < 0 || c.MaxHandoffs < 0 {
+		return 0, 0, errors.New("native action bounds must not be negative")
+	}
+	return cmp.Or(c.MaxEpisodes, defaultActionEpisodes), cmp.Or(c.MaxHandoffs, defaultActionHandoffs), nil
+}
+
 type actionRPC interface {
 	call(context.Context, string, map[string]any, any) error
 }
@@ -243,6 +259,8 @@ type nativeActionOwner struct {
 	deferredRecovery bool             // An omitted durable source must be checked on later enrollment.
 	slots            chan struct{}
 	policySlots      chan struct{}
+	maxEpisodes      int // Resident slots, detached direct entries and in-flight manual sources.
+	maxHandoffs      int // Enrollment back-pressure threshold; hand-offs always queue.
 }
 
 func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *nativeActionOwner {
@@ -250,6 +268,7 @@ func newNativeActionOwner(authority string, rpc actionRPC, d ActionDispatch) *na
 		parked: make(map[string]parkedEpisode), handoffs: make(map[string]*observationHandoff), waiters: make(chan struct{}, 32), admitter: make(chan struct{}, 1),
 		authority: authority, owner: uuid.NewString(), rpc: rpc, dispatch: d,
 		untracked: make(map[string]uint8), byKey: map[string]*episodeSlot{}, byID: map[string]*episodeSlot{}, slots: make(chan struct{}, 32), policySlots: make(chan struct{}, 4),
+		maxEpisodes: defaultActionEpisodes, maxHandoffs: defaultActionHandoffs,
 	}
 }
 
@@ -1530,6 +1549,10 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 		api.Handler = actionRoutes(api.Handler, nil, nil, func() bool { return false })
 		return nil
 	}
+	episodes, handoffs, err := c.bounds()
+	if err != nil {
+		return err
+	}
 	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
 	if err != nil {
 		return err
@@ -1571,6 +1594,7 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 		return errors.New("invalid native action namespace")
 	}
 	o := newNativeActionOwner(c.AuthorityID, actionClient{client}, c.Dispatch)
+	o.maxEpisodes, o.maxHandoffs = episodes, handoffs
 	api.actionOwner = o
 	o.callbackReady = func() bool { return api.callbacksReadyFor(client, true) }
 	ready := o.ready
