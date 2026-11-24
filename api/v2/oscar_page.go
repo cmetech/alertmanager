@@ -55,13 +55,18 @@ func (h *pageHeap) Push(x any)        { h.rows = append(h.rows, x.(pageCandidate
 func (h *pageHeap) Pop() any          { n := len(h.rows); x := h.rows[n-1]; h.rows = h.rows[:n-1]; return x }
 
 func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middleware.Responder {
+	q, err := url.ParseQuery(p.HTTPRequest.URL.RawQuery)
+	if err != nil {
+		return ops.NewGetOscarAlertsPageBadRequest().WithPayload(err.Error())
+	}
+	return api.oscarAlertsPage(p, q, nil)
+}
+
+func (api *API) oscarAlertsPage(p ops.GetOscarAlertsPageParams, q url.Values, scope *pageScope) middleware.Responder {
 	bad := func(err error) middleware.Responder {
 		return ops.NewGetOscarAlertsPageBadRequest().WithPayload(err.Error())
 	}
-	q, err := url.ParseQuery(p.HTTPRequest.URL.RawQuery)
-	if err != nil {
-		return bad(err)
-	}
+	var err error
 	allowed := map[string]bool{"page": true, "perPage": true, "column": true, "order": true, "active": true, "silenced": true, "inhibited": true, "unprocessed": true, "receiver": true, "severity": true, "quick_search": true, "filter": true, "receiver_matchers": true, "grid_filter": true, "base_filter": true}
 	for k, v := range q {
 		if !allowed[k] || ((k != "filter" && k != "receiver_matchers") && (len(v) != 1 || v[0] == "")) {
@@ -189,6 +194,9 @@ func (api *API) getOscarAlertsPageHandler(p ops.GetOscarAlertsPageParams) middle
 				}
 				goto done
 			}
+			if scope != nil && (item.Data == nil || !scope.matches(item.Data.ProviderSource(), fold)) {
+				continue
+			}
 			a := api.actionView(item.Data)
 			if a == nil {
 				continue
@@ -257,8 +265,25 @@ done:
 		sort.Slice(h.rows, func(i, j int) bool { return h.better(h.rows[i], h.rows[j]) })
 		end := min(start+per, len(h.rows))
 		selected = h.rows[start:end]
+		var visible map[string]bool
+		if scope != nil && (!scope.unrestricted || len(scope.deny) > 0) {
+			visible = make(map[string]bool, len(selected))
+			for _, c := range selected {
+				visible[c.fingerprint] = true
+			}
+		}
 		for _, c := range selected {
-			records = append(records, AlertToOpenAPIAlert(c.a, c.status, c.receivers, nil))
+			record := AlertToOpenAPIAlert(c.a, c.status, c.receivers, nil)
+			if visible != nil && len(c.status.InhibitedBy) > 0 {
+				// An inhibitor outside the authorized page has no independently established scope.
+				record.Status.InhibitedBy = []string{}
+				for _, fp := range c.status.InhibitedBy {
+					if visible[fp] {
+						record.Status.InhibitedBy = append(record.Status.InhibitedBy, fp)
+					}
+				}
+			}
+			records = append(records, record)
 			source := strings.ToLower(string(c.a.ProviderSource().Labels["severity"]))
 			effective := strings.ToLower(string(c.a.Labels["severity"]))
 			if firingRanks[source] > 0 && firingRanks[effective] > firingRanks[source] {

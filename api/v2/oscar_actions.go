@@ -302,6 +302,44 @@ func canonicalActionDigest(value any) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+type operatorScopeKey struct{}
+
+type operatorScope struct {
+	wire    json.RawMessage
+	subject string
+	expires int64
+	read    *pageScope
+	actions map[string]*pageScope
+}
+
+func parseOperatorScope(raw []byte, subject string, stamp, now int64) (*operatorScope, bool) {
+	var wire struct {
+		Version int                  `json:"version"`
+		Expires int64                `json:"expires_at"`
+		Read    scopeWire            `json:"read"`
+		Actions map[string]scopeWire `json:"actions"`
+	}
+	if !validScopeEscapes(raw) || !decodeAction(raw, &wire) || wire.Version != 1 || wire.Actions == nil || wire.Expires <= now || wire.Expires <= stamp || wire.Expires > stamp+15 || !managedUUID.MatchString(subject) {
+		return nil, false
+	}
+	read, err := wire.Read.compile()
+	if err != nil {
+		return nil, false
+	}
+	scope := &operatorScope{raw, subject, wire.Expires, read, map[string]*pageScope{}}
+	for kind, policy := range wire.Actions {
+		if _, ok := actionGrants[kind]; !ok {
+			return nil, false
+		}
+		scope.actions[kind], err = policy.compile()
+		if err != nil {
+			return nil, false
+		}
+	}
+	return scope, true
+}
+
 func actionRoutes(next http.Handler, keys map[string][]byte, owner ActionOwner, ready func() bool) http.Handler {
 	inFlight := make(chan struct{}, 32)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -312,12 +350,13 @@ func actionRoutes(next http.Handler, keys map[string][]byte, owner ActionOwner, 
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		read := path == actionPath+"/eligibility"
+		contact := path == actionPath+"/contact-check"
 		lookup := strings.TrimPrefix(path, actionPath+"/")
-		if path != actionPath && !read && !managedUUID.MatchString(lookup) {
+		if path != actionPath && !read && !contact && !managedUUID.MatchString(lookup) {
 			http.NotFound(w, r)
 			return
 		}
-		if (path == actionPath || read) && r.Method != "POST" || path != actionPath && !read && r.Method != "GET" {
+		if (path == actionPath || read || contact) && r.Method != "POST" || path != actionPath && !read && !contact && r.Method != "GET" {
 			w.WriteHeader(405)
 			return
 		}
@@ -359,6 +398,24 @@ func actionRoutes(next http.Handler, keys map[string][]byte, owner ActionOwner, 
 		hash := sha256.Sum256(body)
 		mac := hmac.New(sha256.New, key)
 		parts := []string{"native-action-v1", r.Method, path, sender, kid, stamp, subject, grant}
+		var scopeRaw []byte
+		if sender == "operator" {
+			encoded := hdr("Scope")
+			if encoded == "" || len(encoded) > base64.RawURLEncoding.EncodedLen(65536) {
+				w.WriteHeader(401)
+				return
+			}
+			scopeRaw, err = base64.RawURLEncoding.Strict().DecodeString(encoded)
+			if err != nil {
+				w.WriteHeader(401)
+				return
+			}
+			sum := sha256.Sum256(scopeRaw)
+			parts = append(parts, hex.EncodeToString(sum[:]))
+		} else if len(r.Header.Values("X-Oscar-Action-Scope")) != 0 {
+			w.WriteHeader(401)
+			return
+		}
 		var recovery *policyRecovery
 		extra := r.Header.Values("X-Oscar-Action-Recovery")
 		if grant == "recover:policy" {
@@ -393,6 +450,16 @@ func actionRoutes(next http.Handler, keys map[string][]byte, owner ActionOwner, 
 			w.WriteHeader(403)
 			return
 		}
+		var scope *operatorScope
+		if sender == "operator" {
+			var ok bool
+			scope, ok = parseOperatorScope(scopeRaw, string(id), sec, now)
+			if !ok || (lookup != "" && !read && !contact && path != actionPath && len(scope.actions) != 0) {
+				w.WriteHeader(403)
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), operatorScopeKey{}, scope))
+		}
 		var out any
 		status := 200
 		switch {
@@ -402,7 +469,7 @@ func actionRoutes(next http.Handler, keys map[string][]byte, owner ActionOwner, 
 				w.WriteHeader(400)
 				return
 			}
-			if req.Actor.ID != string(id) || req.Actor.Kind != sender || sender == "operator" && grant != actionGrants[req.Kind] || sender == "policy" && grant != "dispatch:policy" && grant != "recover:policy" || !dispatchKind(req.Kind) && len(req.TargetScope) > 0 {
+			if scope != nil && (len(scope.actions) != 1 || scope.actions[req.Kind] == nil) || req.Actor.ID != string(id) || req.Actor.Kind != sender || sender == "operator" && grant != actionGrants[req.Kind] || sender == "policy" && grant != "dispatch:policy" && grant != "recover:policy" || !dispatchKind(req.Kind) && len(req.TargetScope) > 0 {
 				w.WriteHeader(403)
 				return
 			}
@@ -421,6 +488,32 @@ func actionRoutes(next http.Handler, keys map[string][]byte, owner ActionOwner, 
 				status = 202
 			} else if result.State == "held" || result.State == "rejected" || result.State == "superseded_no_effect" {
 				status = 409
+			}
+		case contact:
+			var q contactCheck
+			checker, ok := owner.(interface {
+				checkContact(context.Context, contactCheck) error
+			})
+			if scope == nil || len(scope.actions) != 1 || grant != "read:alerts" {
+				w.WriteHeader(403)
+				return
+			}
+			if !decodeAction(body, &q) || !managedHash.MatchString(q.Nonce) {
+				w.WriteHeader(400)
+				return
+			}
+			if !ready() || !ok {
+				err = unavailable
+				break
+			}
+			err = checker.checkContact(r.Context(), q)
+			if err == nil {
+				reply := hmac.New(sha256.New, key)
+				fmt.Fprintf(reply, "native-contact-response-v1\n%x\n%x", signature, hash)
+				w.Header().Set("X-Oscar-Contact-Response", hex.EncodeToString(reply.Sum(nil)))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+				return
 			}
 		case read:
 			if grant != "read:alerts" {

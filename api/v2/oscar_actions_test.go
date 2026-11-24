@@ -29,7 +29,7 @@ import (
 	"github.com/prometheus/alertmanager/api/v2/models"
 )
 
-const actionBody = `{"version":1,"operation_id":"11111111-1111-4111-8111-111111111111","episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111112","episode_id":"11111111-1111-4111-8111-111111111113","generation":1,"variant_revision":1},"kind":"acknowledge","actor":{"kind":"operator","id":"alice"},"target_scope":[],"target_severity":null,"policy_binding":null}`
+const actionBody = `{"version":1,"operation_id":"11111111-1111-4111-8111-111111111111","episode_ref":{"authority_id":"11111111-1111-4111-8111-111111111112","episode_id":"11111111-1111-4111-8111-111111111113","generation":1,"variant_revision":1},"kind":"acknowledge","actor":{"kind":"operator","id":"11111111-1111-4111-8111-111111111114"},"target_scope":[],"target_severity":null,"policy_binding":null}`
 
 type admittedAction struct{ ActionOwner }
 
@@ -59,10 +59,15 @@ func TestOscarActionAssertionComposition(t *testing.T) {
 	} {
 		r := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(tc.body))
 		stamp := strconv.FormatInt(time.Now().Unix(), 10)
-		form := strings.Join([]string{"native-action-v1", "POST", actionPath, "operator", "v1", stamp, "YWxpY2U", tc.grant, fmt.Sprintf("%x", sha256.Sum256([]byte(tc.signedBody)))}, "\n")
+		subject := base64.RawURLEncoding.EncodeToString([]byte("11111111-1111-4111-8111-111111111114"))
+		policy := scopeWire{Unrestricted: true, Allow: []scopeGroup{}, Deny: []scopeGroup{}}
+		proof, err := json.Marshal(map[string]any{"version": 1, "expires_at": time.Now().Unix() + 15, "read": policy, "actions": map[string]scopeWire{"acknowledge": policy}})
+		require.NoError(t, err)
+		r.Header.Set("X-Oscar-Action-Scope", base64.RawURLEncoding.EncodeToString(proof))
+		form := strings.Join([]string{"native-action-v1", "POST", actionPath, "operator", "v1", stamp, subject, tc.grant, fmt.Sprintf("%x", sha256.Sum256(proof)), fmt.Sprintf("%x", sha256.Sum256([]byte(tc.signedBody)))}, "\n")
 		mac := hmac.New(sha256.New, key)
 		mac.Write([]byte(form))
-		for k, v := range map[string]string{"Sender": "operator", "Key-Id": "v1", "Time": stamp, "Subject": "YWxpY2U", "Grant": tc.grant, "Signature": fmt.Sprintf("%x", mac.Sum(nil))} {
+		for k, v := range map[string]string{"Sender": "operator", "Key-Id": "v1", "Time": stamp, "Subject": subject, "Grant": tc.grant, "Signature": fmt.Sprintf("%x", mac.Sum(nil))} {
 			r.Header.Set("X-Oscar-Action-"+k, v)
 		}
 		w := httptest.NewRecorder()
@@ -302,4 +307,41 @@ func TestPolicyEscalationAdmitsNormalRoutingScope(t *testing.T) {
 	require.True(t, validAction(req))
 	req.Kind, req.TargetSeverity = "resend", nil
 	require.False(t, validAction(req))
+}
+
+type contactFixture struct{ ActionOwner }
+
+func (contactFixture) checkContact(context.Context, contactCheck) error { return nil }
+
+func TestContactResponseIsSignedForExactProbe(t *testing.T) {
+	key := []byte(strings.Repeat("k", 32))
+	guard := actionRoutes(http.NotFoundHandler(), map[string][]byte{"operator": key}, contactFixture{}, func() bool { return true })
+	now := time.Now().Unix()
+	path := actionPath + "/contact-check"
+	subject := base64.RawURLEncoding.EncodeToString([]byte("11111111-1111-4111-8111-111111111114"))
+	policy := scopeWire{Unrestricted: true, Allow: []scopeGroup{}, Deny: []scopeGroup{}}
+	proof := mustRaw(t, map[string]any{"version": 1, "expires_at": now + 15, "read": policy, "actions": map[string]scopeWire{"resend": policy}})
+	previous := ""
+	for _, nonce := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64)} {
+		body := mustRaw(t, contactCheck{Nonce: nonce})
+		stamp := strconv.FormatInt(now, 10)
+		form := fmt.Sprintf("native-action-v1\nPOST\n%s\noperator\nv1\n%s\n%s\nread:alerts\n%x\n%x", path, stamp, subject, sha256.Sum256(proof), sha256.Sum256(body))
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(form))
+		sig := fmt.Sprintf("%x", mac.Sum(nil))
+		r := httptest.NewRequest("POST", path, bytes.NewReader(body))
+		for k, v := range map[string]string{"Sender": "operator", "Key-Id": "v1", "Time": stamp, "Subject": subject, "Grant": "read:alerts", "Scope": base64.RawURLEncoding.EncodeToString(proof), "Signature": sig} {
+			r.Header.Set("X-Oscar-Action-"+k, v)
+		}
+		w := httptest.NewRecorder()
+		guard.ServeHTTP(w, r)
+		require.Equal(t, 200, w.Code)
+		require.Equal(t, []byte(body), w.Body.Bytes())
+		mac.Reset()
+		fmt.Fprintf(mac, "native-contact-response-v1\n%s\n%x", sig, sha256.Sum256(w.Body.Bytes()))
+		response := w.Header().Get("X-Oscar-Contact-Response")
+		require.Equal(t, fmt.Sprintf("%x", mac.Sum(nil)), response)
+		require.NotEqual(t, previous, response)
+		previous = response
+	}
 }

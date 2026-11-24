@@ -6,7 +6,8 @@ encoder = Maybe.withDefault Encode.null << Maybe.map valueEncoder
 valueEncoder : {{classname}}Value -> Encode.Value
 valueEncoder {{/vendorExtensions.x-elm-nullable-record}}{{^vendorExtensions.x-elm-nullable-record}}encoder {{/vendorExtensions.x-elm-nullable-record}}{{#vendorExtensions.discriminatorName}}tag {{/vendorExtensions.discriminatorName}}model =
     Encode.object
-{{#allVars}}
+{{#vendorExtensions.x-elm-omit-absent}}        <| List.filter (\( key, _ ) -> key /= "{{.}}" || model.{{.}} /= Nothing)
+{{/vendorExtensions.x-elm-omit-absent}}{{#allVars}}
         {{#-first}}[{{/-first}}{{^-first}},{{/-first}} {{>recordFieldEncoder}}
 {{/allVars}}{{#vendorExtensions.discriminatorName}}        , ( "{{{vendorExtensions.discriminatorName}}}", Encode.string tag ){{/vendorExtensions.discriminatorName}}
         ]

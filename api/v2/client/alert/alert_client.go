@@ -70,6 +70,8 @@ type ClientOption func(*runtime.ClientOperation)
 
 // ClientService is the interface for Client methods
 type ClientService interface {
+	CheckOscarActionContact(params *CheckOscarActionContactParams, opts ...ClientOption) (*CheckOscarActionContactOK, error)
+
 	ExecuteOscarAction(params *ExecuteOscarActionParams, opts ...ClientOption) (*ExecuteOscarActionOK, *ExecuteOscarActionAccepted, error)
 
 	GetAlerts(params *GetAlertsParams, opts ...ClientOption) (*GetAlertsOK, error)
@@ -80,9 +82,54 @@ type ClientService interface {
 
 	GetOscarAlertsPage(params *GetOscarAlertsPageParams, opts ...ClientOption) (*GetOscarAlertsPageOK, error)
 
+	GetOscarScopedAlertsPage(params *GetOscarScopedAlertsPageParams, opts ...ClientOption) (*GetOscarScopedAlertsPageOK, error)
+
 	PostAlerts(params *PostAlertsParams, opts ...ClientOption) (*PostAlertsOK, error)
 
 	SetTransport(transport runtime.ClientTransport)
+}
+
+/*
+CheckOscarActionContact Private owner check for one frozen human worker contact. Performs no admission or settlement.
+*/
+func (a *Client) CheckOscarActionContact(params *CheckOscarActionContactParams, opts ...ClientOption) (*CheckOscarActionContactOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewCheckOscarActionContactParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "checkOscarActionContact",
+		Method:             "POST",
+		PathPattern:        "/oscar/actions/contact-check",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &CheckOscarActionContactReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*CheckOscarActionContactOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for checkOscarActionContact: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
 }
 
 /*
@@ -297,6 +344,49 @@ func (a *Client) GetOscarAlertsPage(params *GetOscarAlertsPageParams, opts ...Cl
 	//
 	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
 	msg := fmt.Sprintf("unexpected success response for getOscarAlertsPage: API contract not enforced by server. Client expected to get an error, but got: %T", result)
+	panic(msg)
+}
+
+/*
+GetOscarScopedAlertsPage Read a native page under an operator-signed authority. See docs/alerts_api.md for the HMAC transcript and limits.
+*/
+func (a *Client) GetOscarScopedAlertsPage(params *GetOscarScopedAlertsPageParams, opts ...ClientOption) (*GetOscarScopedAlertsPageOK, error) {
+	// NOTE: parameters are not validated before sending
+	if params == nil {
+		params = NewGetOscarScopedAlertsPageParams()
+	}
+	op := &runtime.ClientOperation{
+		ID:                 "getOscarScopedAlertsPage",
+		Method:             "POST",
+		PathPattern:        "/oscar/alerts/scoped-page",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &GetOscarScopedAlertsPageReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	}
+	for _, opt := range opts {
+		opt(op)
+	}
+	result, err := a.transport.Submit(op)
+	if err != nil {
+		return nil, err
+	}
+
+	// only one success response has to be checked
+	success, ok := result.(*GetOscarScopedAlertsPageOK)
+	if ok {
+		return success, nil
+	}
+
+	// unexpected success response.
+
+	// no default response is defined.
+	//
+	// safeguard: normally, in the absence of a default response, unknown success responses return an error above: so this is a codegen issue
+	msg := fmt.Sprintf("unexpected success response for getOscarScopedAlertsPage: API contract not enforced by server. Client expected to get an error, but got: %T", result)
 	panic(msg)
 }
 

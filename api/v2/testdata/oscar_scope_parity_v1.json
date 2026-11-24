@@ -1,0 +1,115 @@
+[
+  {
+    "name": "case",
+    "labels": {
+      "Svc": "ABC"
+    },
+    "group": {
+      "items": [
+        {
+          "field": "label:svc",
+          "operator": "equals",
+          "value": "abc"
+        }
+      ]
+    },
+    "match": true
+  },
+  {
+    "name": "accent",
+    "labels": {
+      "svc": "café"
+    },
+    "group": {
+      "items": [
+        {
+          "field": "label:svc",
+          "operator": "equals",
+          "value": "cafe"
+        }
+      ]
+    },
+    "match": false
+  },
+  {
+    "name": "expansion",
+    "labels": {
+      "svc": "Straße"
+    },
+    "group": {
+      "items": [
+        {
+          "field": "label:svc",
+          "operator": "equals",
+          "value": "STRASSE"
+        }
+      ]
+    },
+    "match": true
+  },
+  {
+    "name": "trailing space",
+    "labels": {
+      "svc": "prod "
+    },
+    "group": {
+      "items": [
+        {
+          "field": "label:svc",
+          "operator": "equals",
+          "value": "prod"
+        }
+      ]
+    },
+    "match": false
+  },
+  {
+    "name": "missing",
+    "labels": {
+      "other": ""
+    },
+    "group": {
+      "items": [
+        {
+          "field": "label:svc",
+          "operator": "equals",
+          "value": ""
+        }
+      ]
+    },
+    "match": false
+  },
+  {
+    "name": "long",
+    "labels": {
+      "svc": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+    },
+    "group": {
+      "items": [
+        {
+          "field": "label:svc",
+          "operator": "equals",
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"
+        }
+      ]
+    },
+    "match": false
+  },
+  {
+    "name": "duplicate folded name",
+    "labels": {
+      "Svc": "other",
+      "sVC": "Prod"
+    },
+    "group": {
+      "items": [
+        {
+          "field": "label:svc",
+          "operator": "equals",
+          "value": "prod"
+        }
+      ]
+    },
+    "match": true
+  }
+]

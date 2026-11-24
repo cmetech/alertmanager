@@ -153,8 +153,8 @@ func NewAPI(
 		return docui.ServeSpec(swaggerSpec.Raw(), swaggerContext.RoutesHandler(b), docui.WithSpecPath("/swagger.json"))
 	}
 
-	// actionRoutes authenticates the original request bytes before Swagger binding.
-	// A parsed operation has no authority to invoke the owner independently.
+	// Private OSCAR routes authenticate the original request bytes before Swagger binding.
+	// A parsed operation alone carries no caller authority.
 	openAPI.AlertExecuteOscarActionHandler = alert_ops.ExecuteOscarActionHandlerFunc(func(alert_ops.ExecuteOscarActionParams) middleware.Responder {
 		return alert_ops.NewExecuteOscarActionUnauthorized()
 	})
@@ -163,6 +163,12 @@ func NewAPI(
 	})
 	openAPI.AlertGetOscarActionEligibilityHandler = alert_ops.GetOscarActionEligibilityHandlerFunc(func(alert_ops.GetOscarActionEligibilityParams) middleware.Responder {
 		return alert_ops.NewGetOscarActionEligibilityUnauthorized()
+	})
+	openAPI.AlertCheckOscarActionContactHandler = alert_ops.CheckOscarActionContactHandlerFunc(func(alert_ops.CheckOscarActionContactParams) middleware.Responder {
+		return alert_ops.NewCheckOscarActionContactUnauthorized()
+	})
+	openAPI.AlertGetOscarScopedAlertsPageHandler = alert_ops.GetOscarScopedAlertsPageHandlerFunc(func(alert_ops.GetOscarScopedAlertsPageParams) middleware.Responder {
+		return alert_ops.NewGetOscarScopedAlertsPageUnauthorized()
 	})
 	openAPI.AlertGetOscarAlertsPageHandler = alert_ops.GetOscarAlertsPageHandlerFunc(api.getOscarAlertsPageHandler)
 	openAPI.AlertGetAlertsHandler = alert_ops.GetAlertsHandlerFunc(api.getAlertsHandler)

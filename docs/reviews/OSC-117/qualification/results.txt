@@ -1,0 +1,203 @@
+# Compact recorded qualification evidence
+Source2a967d97; baseb3cf31d9; local Go1.27.0 race suite.
+
+go-ci-standard-timeout.log
+pass github.com/prometheus/alertmanager/alert  7.944
+skip github.com/prometheus/alertmanager/api/metrics  0
+skip github.com/prometheus/alertmanager/api/status/v3alpha  0
+skip github.com/prometheus/alertmanager/api/status/v3alpha/statusv3alphaconnect  0
+pass github.com/prometheus/alertmanager/api  1.975
+pass github.com/prometheus/alertmanager/api/connect  3.02
+skip github.com/prometheus/alertmanager/api/v2/client  0
+skip github.com/prometheus/alertmanager/api/v2/client/alert  0
+skip github.com/prometheus/alertmanager/api/v2/client/alertgroup  0
+skip github.com/prometheus/alertmanager/api/v2/client/general  0
+skip github.com/prometheus/alertmanager/api/v2/client/receiver  0
+skip github.com/prometheus/alertmanager/api/v2/client/silence  0
+skip github.com/prometheus/alertmanager/api/v2/models  0
+skip github.com/prometheus/alertmanager/api/v2/restapi  0
+skip github.com/prometheus/alertmanager/api/v2/restapi/operations  0
+skip github.com/prometheus/alertmanager/api/v2/restapi/operations/alert  0
+skip github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroup  0
+skip github.com/prometheus/alertmanager/api/v2/restapi/operations/general  0
+skip github.com/prometheus/alertmanager/api/v2/restapi/operations/receiver  0
+skip github.com/prometheus/alertmanager/api/v2/restapi/operations/silence  0
+skip github.com/prometheus/alertmanager/cli/format  0
+skip github.com/prometheus/alertmanager/cluster/clusterpb  0.008
+skip github.com/prometheus/alertmanager/cmd/amtool  0
+skip github.com/prometheus/alertmanager/eventrecorder/events/v2  0.015
+skip github.com/prometheus/alertmanager/examples/webhook  0.015
+fail github.com/prometheus/alertmanager/cli TestDefaultConfigFilesOthersWithXDGConfigHome 0.01
+fail github.com/prometheus/alertmanager/cli  0.859
+skip github.com/prometheus/alertmanager/api/v2 TestManagedNativeJoinedOwner 0
+pass github.com/prometheus/alertmanager/cli/config  2.508
+pass github.com/prometheus/alertmanager/config  3.559
+pass github.com/prometheus/alertmanager/config/common  3.644
+pass github.com/prometheus/alertmanager/config/receiver  4.462
+pass github.com/prometheus/alertmanager/cluster  5.034
+pass github.com/prometheus/alertmanager/httpserver  5.039
+pass github.com/prometheus/alertmanager/cmd/oscarstate-probe  5.452
+pass github.com/prometheus/alertmanager/inhibit  5.674
+pass github.com/prometheus/alertmanager/eventrecorder  5.696
+pass github.com/prometheus/alertmanager/featurecontrol  5.814
+pass github.com/prometheus/alertmanager/nflog  6.075
+skip github.com/prometheus/alertmanager/notify/test  0
+pass github.com/prometheus/alertmanager/labelset  6.201
+pass github.com/prometheus/alertmanager/limit  6.396
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo='} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=`} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=\n} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=bar\n} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=\t} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=bar\t} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=bar\} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=bar\\} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=\"} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=bar\"} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/tricky=~~~ 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/trickier==\\=\=\" 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=bar}} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=bar}},} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=,bar=}} 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/job= 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo= 0
+skip github.com/prometheus/alertmanager/matcher/compliance TestCompliance/{foo=}b 0
+pass github.com/prometheus/alertmanager/kafka  6.748
+pass github.com/prometheus/alertmanager/matcher/parse  7.23
+pass github.com/prometheus/alertmanager/matcher/compliance  7.418
+pass github.com/prometheus/alertmanager/nflog/nflogpb  7.574
+pass github.com/prometheus/alertmanager/matcher/compat  7.755
+pass github.com/prometheus/alertmanager/notify  7.763
+skip github.com/prometheus/alertmanager/pkg/modtimevfs  0
+skip github.com/prometheus/alertmanager/provider  0
+skip github.com/prometheus/alertmanager/notify/email TestEmailNotifyWithErrors 0
+skip github.com/prometheus/alertmanager/notify/email TestEmailNotifyWithDoneContext 0
+skip github.com/prometheus/alertmanager/notify/email TestEmailNotifyWithoutAuthentication 0
+skip github.com/prometheus/alertmanager/notify/email TestEmailNotifyWithSTARTTLS 0
+skip github.com/prometheus/alertmanager/notify/email TestEmailNotifyWithAuthentication 0
+skip github.com/prometheus/alertmanager/notify/email TestEmailNotifyWithThreading 0
+pass github.com/prometheus/alertmanager/marker  7.981
+skip github.com/prometheus/alertmanager/silence/silencepb  0.018
+pass github.com/prometheus/alertmanager/notify/discord  8.336
+pass github.com/prometheus/alertmanager/notify/incidentio  8.861
+pass github.com/prometheus/alertmanager/notify/email  8.903
+skip github.com/prometheus/alertmanager/test  0
+skip github.com/prometheus/alertmanager/test/cli  0
+pass github.com/prometheus/alertmanager/notify/jira  8.055
+pass github.com/prometheus/alertmanager/notify/mattermost  6.99
+pass github.com/prometheus/alertmanager/notify/msteams  5.974
+pass github.com/prometheus/alertmanager/notify/msteamsv2  5.949
+skip github.com/prometheus/alertmanager/test/testutils  0
+skip github.com/prometheus/alertmanager/test/with_api_v2  0
+pass github.com/prometheus/alertmanager/notify/opsgenie  5.533
+pass github.com/prometheus/alertmanager/notify/pagerduty  6.436
+pass github.com/prometheus/alertmanager/notify/pushover  6.37
+pass github.com/prometheus/alertmanager/notify/rocketchat  6.227
+pass github.com/prometheus/alertmanager/dispatch  12.463
+pass github.com/prometheus/alertmanager/notify/slack  6.302
+pass github.com/prometheus/alertmanager/notify/sns  8.016
+pass github.com/prometheus/alertmanager/notify/victorops  8.305
+pass github.com/prometheus/alertmanager/notify/telegram  8.629
+pass github.com/prometheus/alertmanager/notify/webex  8.594
+pass github.com/prometheus/alertmanager/notify/webhook  8.627
+pass github.com/prometheus/alertmanager/notify/wechat  8.3
+pass github.com/prometheus/alertmanager/oscarstate  8.163
+pass github.com/prometheus/alertmanager/oscarstate/memadapter  8.416
+pass github.com/prometheus/alertmanager/pkg/labels  8.743
+pass github.com/prometheus/alertmanager/cmd/alertmanager  16.61
+pass github.com/prometheus/alertmanager/silence  9.031
+pass github.com/prometheus/alertmanager/store  9.068
+pass github.com/prometheus/alertmanager/template  8.86
+fail github.com/prometheus/alertmanager/ui TestMantineIndexAssetsAreServed//ui/api/branding/assets/favicon 0
+fail github.com/prometheus/alertmanager/ui TestMantineIndexAssetsAreServed 0.06
+fail github.com/prometheus/alertmanager/ui TestMantineIndexAssetsAreServedPrefix//alertmanager/ui/api/branding/assets/favicon 0
+fail github.com/prometheus/alertmanager/ui TestMantineIndexAssetsAreServedPrefix 0.05
+fail github.com/prometheus/alertmanager/ui  5.502
+pass github.com/prometheus/alertmanager/timeinterval  6.583
+skip github.com/prometheus/alertmanager/provider/mem TestTL1LifecycleQualification 0
+pass github.com/prometheus/alertmanager/tracing  6.129
+pass github.com/prometheus/alertmanager/provider/mem  11.994
+fail github.com/prometheus/alertmanager/test/cli/acceptance TestQuerySilence 3.22
+fail github.com/prometheus/alertmanager/test/cli/acceptance TestSilenceImportPartialFailure 3.26
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestCannotAddUTF8SilencesInClassicMode 2.36
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestAddSilence 2.36
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestAddUTF8Silences 2.39
+pass github.com/prometheus/alertmanager/test/e2e  11.98
+fail github.com/prometheus/alertmanager/test/cli/acceptance TestSilenceImport 3.3
+fail github.com/prometheus/alertmanager/test/cli/acceptance  12.7
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestAlertGetReturnsCurrentAlertStatus 4.39
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestSilenceDelete 6.88
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestSilencedAlertSendsNoResolvedNotification 7.36
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestSilencing 7.86
+pass github.com/prometheus/alertmanager/api/v2  31.878
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance  35.891
+panic: test timed out after 10m0s
+fail github.com/prometheus/alertmanager/app  601.311
+
+baseline-go-failures.log
+--- FAIL: TestDefaultConfigFilesOthersWithXDGConfigHome (0.00s)
+FAIL	github.com/prometheus/alertmanager/cli	0.372s
+--- FAIL: TestMantineIndexAssetsAreServed (0.07s)
+    --- FAIL: TestMantineIndexAssetsAreServed//ui/api/branding/assets/favicon (0.00s)
+--- FAIL: TestMantineIndexAssetsAreServedPrefix (0.05s)
+    --- FAIL: TestMantineIndexAssetsAreServedPrefix//alertmanager/ui/api/branding/assets/favicon (0.00s)
+FAIL	github.com/prometheus/alertmanager/ui	0.646s
+
+baseline-go-acceptance.log
+fail github.com/prometheus/alertmanager/test/cli/acceptance TestQuerySilence 2.85
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestAddUTF8Silences 2.28
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestCannotAddUTF8SilencesInClassicMode 2.39
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestAddSilence 2.16
+fail github.com/prometheus/alertmanager/test/cli/acceptance TestSilenceImportPartialFailure 3.06
+fail github.com/prometheus/alertmanager/test/cli/acceptance TestSilenceImport 3.07
+fail github.com/prometheus/alertmanager/test/cli/acceptance  5.173
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestAlertGetReturnsCurrentAlertStatus 4.25
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestSilenceDelete 6.73
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestSilencedAlertSendsNoResolvedNotification 7.24
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance TestSilencing 7.65
+fail github.com/prometheus/alertmanager/test/with_api_v2/acceptance  29.838
+
+head-app-without-long-fixtures.log
+WARNING: DATA RACE
+--- FAIL: TestOscarActionTelegramDiagnosticPreservesPublishedFloor (0.06s)
+--- FAIL: TestOscarActionPersistedTargetRevalidatesIndependently (0.06s)
+--- FAIL: TestOscarActionSelectedOpsgenieLaterMutationFenced (0.06s)
+--- FAIL: TestOscarActionJiraResolvedNoSendAllowsRefire (0.06s)
+--- FAIL: TestOscarActionRegisteredRecipients (0.07s)
+    --- FAIL: TestOscarActionRegisteredRecipients/slack (0.00s)
+--- FAIL: TestOscarActionDirectExpiryBetweenMutations (0.56s)
+--- FAIL: TestOscarActionIncidentContentTail (0.58s)
+    --- FAIL: TestOscarActionIncidentContentTail/direct_tail (0.14s)
+FAIL	github.com/prometheus/alertmanager/app	54.251s
+
+baseline-app-without-long-fixtures.log
+WARNING: DATA RACE
+--- FAIL: TestOscarActionSelectedOpsgenieLaterMutationFenced (0.05s)
+--- FAIL: TestOscarActionTelegramDiagnosticPreservesPublishedFloor (0.05s)
+--- FAIL: TestReloader_GroupMutedByFollowsConfig (0.05s)
+--- FAIL: TestOscarActionJiraResolvedNoSendAllowsRefire (0.05s)
+--- FAIL: TestOscarActionRegisteredRecipients (0.06s)
+    --- FAIL: TestOscarActionRegisteredRecipients/slack (0.00s)
+--- FAIL: TestOscarActionDirectExpiryBetweenMutations (0.54s)
+--- FAIL: TestOscarActionIncidentContentTail (0.55s)
+    --- FAIL: TestOscarActionIncidentContentTail/direct_tail (0.13s)
+FAIL	github.com/prometheus/alertmanager/app	55.069s
+
+baseline-app-first-long-fixture.log
+panic: test timed out after 10m0s
+fail github.com/prometheus/alertmanager/app  600.537
+
+long-app-direct-excluded.log
+pass github.com/prometheus/alertmanager/app TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome/accepted 2.42
+pass github.com/prometheus/alertmanager/app TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome/rejected 2.18
+pass github.com/prometheus/alertmanager/app TestOscarDirectCohortExcludedSettlementPreservesProviderOutcome 4.61
+pass github.com/prometheus/alertmanager/app  7.547
+
+long-app-short-permit.log
+pass github.com/prometheus/alertmanager/app TestOscarTerminalGroupShortIndividualPermitThroughAppAndProvider 161.8
+pass github.com/prometheus/alertmanager/app  163.772
+
+long-app-large-terminal.log
+pass github.com/prometheus/alertmanager/app TestOscarActionLargeTerminalGroupThroughAppAndProvider 1082.45
+pass github.com/prometheus/alertmanager/app  1084.841

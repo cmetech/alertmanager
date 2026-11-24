@@ -1,0 +1,35 @@
+{
+  "mode": "code discovery",
+  "round": 1,
+  "base": "b3cf31d9db656f34c442e321cd06f71a551d65c7",
+  "candidate": "d5631b4fbdd3096724e5230898c9f41dbce6f992",
+  "comparison": "explicit revisions",
+  "origin": "git@github.com:cmetech/alertmanager.git",
+  "changed_paths": [
+    "api/v2/openapi.yaml",
+    "api/v2/oscar_action_owner.go",
+    "api/v2/oscar_page.go",
+    "api/v2/oscar_page_test.go",
+    "api/v2/oscar_scoped_page.go",
+    "api/v2/oscar_scoped_page_test.go",
+    "api/v2/testdata/oscar_scope_parity_v1.json",
+    "docs/alerts_api.md",
+    "docs/plans/OSC-117-scoped-active-page.md"
+  ],
+  "status": "?? docs/reviews/\n",
+  "sha256": {
+    "api/v2/openapi.yaml": "2725801edefb94cffaa464a045427b2518f0b493db875c3e05fd556397992110",
+    "api/v2/oscar_action_owner.go": "b705fb600a6b80e19dfebea85602e6f0dc8fe8c8ababdcbfb22ba675c30416b6",
+    "api/v2/oscar_page.go": "faca9e80d044fa629cc4609a9586abca977f39ac4f4214c664a926fa6fb4ca04",
+    "api/v2/oscar_page_test.go": "d255443b1566520d7e66ea70276c05424f17845f7258218f6a0db71c268c7272",
+    "api/v2/oscar_scoped_page.go": "a40e92a91464900f5e02d616b39b5d6e86753fe6b6343b76999f94ab7342f0a7",
+    "api/v2/oscar_scoped_page_test.go": "471ac1e7ae84aa5eabc1e2e202de85f8f084f6b8983190cae0cafa23aa6be00b",
+    "api/v2/testdata/oscar_scope_parity_v1.json": "173a8cfc589a06d041e8f299bf3f4d10202e8a5fed323d90eee42ef5913c6bf0",
+    "docs/alerts_api.md": "461e4925626256d4a9b9f64d9e0e7593c6c1a49c706e885d2672ed53df64821d",
+    "docs/plans/OSC-117-scoped-active-page.md": "397fb481b9356227704688d8fb3758f2bc5e540f32a3baa74e4f7ba63d7dd4fc"
+  },
+  "exclusions": [
+    "docs/reviews/OSC-117/round-1/ (review artifacts, no product code)"
+  ],
+  "validation": "Source-only; see implementation report. Runtime tests/builds/CI/generated API pending."
+}

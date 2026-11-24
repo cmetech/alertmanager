@@ -81,6 +81,12 @@ type GetOscarActionParams struct {
 	// XOscarActionKeyID.
 	XOscarActionKeyID string
 
+	/* XOscarActionScope.
+
+	   Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.
+	*/
+	XOscarActionScope *string
+
 	// XOscarActionSender.
 	XOscarActionSender string
 
@@ -173,6 +179,17 @@ func (o *GetOscarActionParams) SetXOscarActionKeyID(xOscarActionKeyID string) {
 	o.XOscarActionKeyID = xOscarActionKeyID
 }
 
+// WithXOscarActionScope adds the xOscarActionScope to the get oscar action params
+func (o *GetOscarActionParams) WithXOscarActionScope(xOscarActionScope *string) *GetOscarActionParams {
+	o.SetXOscarActionScope(xOscarActionScope)
+	return o
+}
+
+// SetXOscarActionScope adds the xOscarActionScope to the get oscar action params
+func (o *GetOscarActionParams) SetXOscarActionScope(xOscarActionScope *string) {
+	o.XOscarActionScope = xOscarActionScope
+}
+
 // WithXOscarActionSender adds the xOscarActionSender to the get oscar action params
 func (o *GetOscarActionParams) WithXOscarActionSender(xOscarActionSender string) *GetOscarActionParams {
 	o.SetXOscarActionSender(xOscarActionSender)
@@ -244,6 +261,14 @@ func (o *GetOscarActionParams) WriteToRequest(r runtime.ClientRequest, reg strfm
 	// header param X-Oscar-Action-Key-Id
 	if err := r.SetHeaderParam("X-Oscar-Action-Key-Id", o.XOscarActionKeyID); err != nil {
 		return err
+	}
+
+	if o.XOscarActionScope != nil {
+
+		// header param X-Oscar-Action-Scope
+		if err := r.SetHeaderParam("X-Oscar-Action-Scope", *o.XOscarActionScope); err != nil {
+			return err
+		}
 	}
 
 	// header param X-Oscar-Action-Sender

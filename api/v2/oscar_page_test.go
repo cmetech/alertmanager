@@ -438,6 +438,7 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 	now := time.Now()
 	f := readFloorFixture{views: map[model.Fingerprint]*alert.Alert{}}
 	var target *alert.Alert
+	var inhibitorFP string
 	for n, severity := range []string{"major", "minor"} {
 		s := alert.New(model.Alert{Labels: model.LabelSet{"host": "h", "severity": model.LabelValue(severity)}, StartsAt: now, EndsAt: now.Add(time.Hour)}, now, false)
 		require.NoError(t, store.Put(t.Context(), s))
@@ -449,6 +450,8 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 		f.views[s.Fingerprint()] = effective
 		if n == 1 {
 			target = effective
+		} else {
+			inhibitorFP = s.Fingerprint().String()
 		}
 	}
 	groups := func(ctx context.Context, _ func(*dispatch.Route) bool, filter dispatch.AlertFilter) (dispatch.AlertGroups, map[model.Fingerprint][]string, error) {
@@ -469,9 +472,14 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 	api.Update(cfg, func(ctx context.Context, l labelset.LabelSet) { i.Mutes(ctx, l) })
 	api.PublishTiming(cfg, map[string][]TimingIntegration{"team": {{Name: "webhook"}}}, timingMuter{}, nil)
 	require.True(t, i.HasInhibitor(target.Labels, target.ProviderSource().Fingerprint()))
-	for _, path := range []string{"/api/v2/alerts", "/api/v2/alerts/groups", "/api/v2/oscar/alerts/page"} {
-		w := httptest.NewRecorder()
-		api.Handler.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+	api.Handler = api.scopedPageRoutes(api.Handler, []byte(scopeTestKey))
+	for _, path := range []string{"/api/v2/alerts", "/api/v2/alerts/groups", "/api/v2/oscar/alerts/page", scopeTestPath} {
+		w := newScopedRecorder()
+		req := httptest.NewRequest("GET", path, nil)
+		if path == scopeTestPath {
+			req = scopedRequest(`{"version":1,"scope":{"unrestricted":true,"allow":[],"deny":[]},"query":{}}`, "native-scoped-page-v1", time.Now())
+		}
+		api.Handler.ServeHTTP(w, req)
 		require.Equal(t, 200, w.Code)
 		var body any
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
@@ -488,7 +496,7 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 					status, ok := v["status"].(map[string]any)
 					if ok {
 						require.Equal(t, "suppressed", status["state"])
-						require.NotEmpty(t, status["inhibitedBy"])
+						require.Contains(t, status["inhibitedBy"], inhibitorFP)
 						found = true
 					}
 				}
@@ -499,7 +507,7 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 		}
 		walk(body)
 		require.True(t, found, path)
-		if strings.HasSuffix(path, "/page") {
+		if strings.HasSuffix(path, "/page") || path == scopeTestPath {
 			var page struct {
 				SourceSeverity map[string]string `json:"source_severity_by_fingerprint"`
 				Timing         map[string]struct {
@@ -514,4 +522,45 @@ func TestEffectiveFingerprintCollisionThroughReadHandlersAndTiming(t *testing.T)
 			require.Equal(t, "suppressed", steps[0].State)
 		}
 	}
+	body := `{"version":1,"scope":{"unrestricted":false,"allow":[{"items":[{"field":"label:severity","operator":"equals","value":"minor"}]}],"deny":[]},"query":{"severity":["major"]}}`
+	w := newScopedRecorder()
+	api.Handler.ServeHTTP(w, scopedRequest(body, "native-scoped-page-v1", time.Now()))
+	require.Equal(t, 200, w.Code)
+	var scoped struct {
+		Total   int `json:"total_records"`
+		Records []struct {
+			Fingerprint string
+			Labels      map[string]string
+			Status      struct {
+				State       string
+				InhibitedBy []string
+			}
+		}
+		Source map[string]string `json:"source_severity_by_fingerprint"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &scoped))
+
+	require.Equal(t, 1, scoped.Total)
+	require.Len(t, scoped.Records, 1)
+	require.Equal(t, "suppressed", scoped.Records[0].Status.State)
+	require.Empty(t, scoped.Records[0].Status.InhibitedBy)
+	fp := target.ProviderSource().Fingerprint().String()
+	require.Equal(t, fp, scoped.Records[0].Fingerprint)
+	require.Equal(t, "major", scoped.Records[0].Labels["severity"])
+	require.Equal(t, map[string]string{fp: "minor"}, scoped.Source)
+	// The same reference is visible when both provider records appear on the restricted page.
+	body = `{"version":1,"scope":{"unrestricted":false,"allow":[{"items":[{"field":"label:host","operator":"equals","value":"h"}]}],"deny":[]},"query":{}}`
+	w = newScopedRecorder()
+	api.Handler.ServeHTTP(w, scopedRequest(body, "native-scoped-page-v1", time.Now()))
+	require.Equal(t, 200, w.Code)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &scoped))
+	require.Len(t, scoped.Records, 2)
+	foundTarget := false
+	for _, row := range scoped.Records {
+		if row.Fingerprint == fp {
+			foundTarget = true
+			require.Equal(t, []string{inhibitorFP}, row.Status.InhibitedBy)
+		}
+	}
+	require.True(t, foundTarget)
 }

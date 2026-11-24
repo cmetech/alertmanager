@@ -1,0 +1,39 @@
+{
+  "mode": "generated Elm correction review",
+  "base": "78042598be4ab589672d3a5051edcd339ccb65f7",
+  "candidate": "98a0bfcfc4ae5162507ff72c22dae0b44857fd37",
+  "changed_paths": [
+    "api/v2/openapi.yaml",
+    "api/v2/restapi/embedded_spec.go",
+    "docs/alerts_api.md",
+    "docs/plans/OSC-117-scoped-active-page.md",
+    "ui/app/codegen/elm/recordEncoder.mustache",
+    "ui/app/codegen/elm/recordFieldType.mustache",
+    "ui/app/codegen/elm/recordFieldValueDecoder.mustache",
+    "ui/app/codegen/elm/recordFieldValueEncoder.mustache",
+    "ui/app/src/Data/OscarPageScopeGroup.elm",
+    "ui/app/src/Data/OscarPageScopeGroupItems.elm",
+    "ui/app/src/Data/OscarScopedPageRequest.elm",
+    "ui/app/src/Data/OscarScopedPageRequestScope.elm",
+    "ui/app/tests/OscarScopedPageWire.elm"
+  ],
+  "sha256": {
+    "api/v2/openapi.yaml": "dc6df07b3720eae723096fa19611707b1dbd4e2f06d5c53f888e22a99c4f87d3",
+    "api/v2/restapi/embedded_spec.go": "a99a979e8e4f873391a304bd48e8c8b19f271eab0ab314f96e5407cf346615d2",
+    "docs/alerts_api.md": "25e4d502763642f1ffa37aba6e05d56478f4ab222bf6db12a9ef9ea4cd70dac4",
+    "docs/plans/OSC-117-scoped-active-page.md": "dd40f6f7a8a314b00892481c18092b14abcfb8da469c8229de4236724eacab7d",
+    "ui/app/codegen/elm/recordEncoder.mustache": "7437ae88655929e72180f603333f792d65f9d37abd24d61d752464748027048b",
+    "ui/app/codegen/elm/recordFieldType.mustache": "a2e5853e9e0130dd53bb67a911e447a48e6cbb98eb1c28b2e07c91b89217883f",
+    "ui/app/codegen/elm/recordFieldValueDecoder.mustache": "4293c81f2d7c5282577e81a74dcf0c56e1eff3af0238f233dbefbc01d0fb1ab7",
+    "ui/app/codegen/elm/recordFieldValueEncoder.mustache": "a0ed68635aa619fdefd404d2d97b5442f7d92d8b95d0ec7c5296bc0f645673f7",
+    "ui/app/src/Data/OscarPageScopeGroup.elm": "5b378561783503110180786ea3084314542af653296d41c3ac829752d807f2dc",
+    "ui/app/src/Data/OscarPageScopeGroupItems.elm": "6da0e1bf484a4c24d5e783aa59ad47277ac9c9b245ba58613e76ca06a2655093",
+    "ui/app/src/Data/OscarScopedPageRequest.elm": "535e58750996b9f12c962b0946adff94d0f540a81dd210c84de7978c1ca5a823",
+    "ui/app/src/Data/OscarScopedPageRequestScope.elm": "ce446fd22629ee35f8571dacd240353c3d9f93eb26d35c7743fe2f7973b61188",
+    "ui/app/tests/OscarScopedPageWire.elm": "e86d200cb054451ea119ecff7ad80502235ec60ed448dd7959b7bd525d81a9e0"
+  },
+  "exclusions": [
+    "docs/reviews/OSC-117/ (review evidence)"
+  ],
+  "validation": "User authorized generation/assets and focused tests. See ignored SDD elm-validation-fix.md and captured final logs."
+}

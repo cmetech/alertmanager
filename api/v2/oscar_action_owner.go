@@ -1113,6 +1113,38 @@ func (o *nativeActionOwner) publish(ctx context.Context, s *episodeSlot, p Episo
 	return err
 }
 
+// The caller holds the episode turn. The provider callback makes the final
+// identity and label decision without performing network or store I/O.
+func (o *nativeActionOwner) checkOperator(scope *operatorScope, s *episodeSlot, ref EpisodeRef, p EpisodeProjection, source *alert.Alert, kind string) error {
+	_, err := o.operatorDecision(scope, s, ref, p, source, kind)
+	return err
+}
+
+func (o *nativeActionOwner) operatorDecision(scope *operatorScope, s *episodeSlot, ref EpisodeRef, p EpisodeProjection, source *alert.Alert, kind string) (int64, error) {
+	denied := actionError{403, "ACTIVITY_PERMISSION_DENIED"}
+	if scope == nil || s == nil || source == nil || o.readSource == nil || p.EpisodeRef != ref {
+		return 0, denied
+	}
+	owner := source.ActionOwner()
+	if !sameResident(p, source) {
+		return 0, denied
+	}
+	var decided int64
+	o.readSource(owner, p.NativeVariant.Fingerprint, func(current *alert.Alert) {
+		if current != source || s.current(p, current, true) != nil {
+			return
+		}
+		fold := newOscarCaseFolder()
+		if scope.read.matches(current, fold) && (kind == "" || scope.actions[kind] != nil && scope.actions[kind].matches(current, fold)) {
+			decided = time.Now().Unix()
+		}
+	})
+	if decided == 0 || decided >= scope.expires {
+		return 0, denied
+	}
+	return decided, nil
+}
+
 func (o *nativeActionOwner) Lookup(ctx context.Context, id string) (ActionResultV1, error) {
 	var r *ActionResultV1
 	if !managedUUID.MatchString(id) {
@@ -1123,6 +1155,20 @@ func (o *nativeActionOwner) Lookup(ctx context.Context, id string) (ActionResult
 	}
 	if r == nil {
 		return ActionResultV1{}, actionError{404, "NATIVE_OPERATION_MISSING"}
+	}
+	if scope, ok := ctx.Value(operatorScopeKey{}).(*operatorScope); ok {
+		s, e := o.episode(r.EpisodeRef)
+		if e != nil {
+			return ActionResultV1{}, actionError{403, "ACTIVITY_PERMISSION_DENIED"}
+		}
+		s.turn.Lock()
+		defer s.turn.Unlock()
+		if !o.ready() || o.verifySource(ctx, s.latest(), s.projection.State) != nil {
+			return ActionResultV1{}, unverified
+		}
+		if e = o.checkOperator(scope, s, r.EpisodeRef, s.projection, s.latest(), ""); e != nil {
+			return ActionResultV1{}, e
+		}
 	}
 	return *r, nil
 }
@@ -1181,6 +1227,15 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if sourceErr == nil {
 		s.turn.Lock()
 		defer s.turn.Unlock()
+	}
+	scope, _ := ctx.Value(operatorScopeKey{}).(*operatorScope)
+	if req.Actor.Kind == "operator" {
+		if scope == nil || scope.subject != req.Actor.ID || sourceErr != nil || o.verifySource(ctx, s.latest(), s.projection.State) != nil {
+			return r, actionError{403, "ACTIVITY_PERMISSION_DENIED"}
+		}
+		if err = o.checkOperator(scope, s, req.EpisodeRef, s.projection, s.latest(), ""); err != nil {
+			return r, err
+		}
 	}
 	i, err := o.intent(ctx, req.OperationID)
 	if err != nil {
@@ -1267,6 +1322,11 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	}
 	if pub, ok := o.dispatch.(ActionPublication); ok && !dispatchKind(req.Kind) && !pub.PublishedEpisode(source, p) {
 		return r, reconcile
+	}
+	if req.Actor.Kind == "operator" {
+		if err = o.checkOperator(scope, s, req.EpisodeRef, p, source, req.Kind); err != nil {
+			return r, err
+		}
 	}
 	if i == nil {
 		if err = o.write(ctx, "reserve", map[string]any{"request": req, "digest": digest, "expected_revision": p.SeverityRevision}, &r); err != nil {
@@ -1382,6 +1442,12 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 	if f := s.floorWrite; f != nil && (f.operationID != req.OperationID || !reflect.DeepEqual(f.update, update) || f.digest != digest) {
 		return r, reconcile
 	}
+	var decidedAt int64
+	if req.Actor.Kind == "operator" {
+		if decidedAt, err = o.operatorDecision(scope, s, req.EpisodeRef, p, source, req.Kind); err != nil {
+			return r, err
+		}
+	}
 	s.uncertain = true
 	if update.Floor != nil && !renew {
 		epoch, _ := ctx.Value(actionEpochKey{}).(uint64)
@@ -1393,7 +1459,11 @@ func (o *nativeActionOwner) Execute(ctx context.Context, req ActionRequestV1) (A
 		s.invalidateLocked()
 		s.local.Unlock()
 	}
-	if err = o.write(ctx, "commit", map[string]any{"operation_id": req.OperationID, "expected_revision": p.SeverityRevision, "update": update, "renew_permit": renew}, &r); err != nil {
+	commit := map[string]any{"operation_id": req.OperationID, "expected_revision": p.SeverityRevision, "update": update, "renew_permit": renew}
+	if scope != nil {
+		commit["operator_decision"] = map[string]any{"subject": scope.subject, "command_digest": digest, "scope": scope.wire, "decided_at": decidedAt}
+	}
+	if err = o.write(ctx, "commit", commit, &r); err != nil {
 		prior := err
 		var refusal actionError
 		if errors.As(err, &refusal) && refusal.code == 409 {
@@ -1495,6 +1565,10 @@ func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) 
 			if pub, ok := o.dispatch.(ActionPublication); ok && err == nil && !pub.PublishedEpisode(source, p) {
 				err = reconcile
 			}
+			scope, _ := ctx.Value(operatorScopeKey{}).(*operatorScope)
+			if scope != nil && err == nil {
+				err = o.checkOperator(scope, s, ref, p, source, "")
+			}
 			if err == nil {
 				revision := p.SeverityRevision
 				item.SeverityRevision = &revision
@@ -1503,6 +1577,8 @@ func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) 
 				reason := ""
 				if err != nil {
 					reason = err.Error()
+				} else if scope != nil && o.checkOperator(scope, s, ref, p, source, kind) != nil {
+					reason = "ACTIVITY_PERMISSION_DENIED"
 				} else if dispatchKind(kind) {
 					_, r, e := o.dispatch.Plan(ctx, source, p, ActionRequestV1{Version: 1, EpisodeRef: ref, Kind: kind, TargetScope: []ScopeEntry{}})
 					reason = r
@@ -1526,19 +1602,8 @@ func (o *nativeActionOwner) Eligibility(ctx context.Context, refs []EpisodeRef) 
 type ActionDialer = func(context.Context, string, string) (net.Conn, error)
 
 func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) error {
-	if !c.Enabled {
-		api.Handler = actionRoutes(api.Handler, nil, nil, func() bool { return false })
-		return nil
-	}
-	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
-	if err != nil {
-		return err
-	}
-	if len(dial) > 0 && dial[0] != nil {
-		client.http.Transport.(*http.Transport).DialContext = dial[0]
-	}
 	keys := map[string][]byte{}
-	used := map[string]bool{client.token: true}
+	used := map[string]bool{}
 	forbidden := append([][]byte{}, api.conversionCallbackKey, api.silenceMutationKey)
 	if api.managedOwner != nil {
 		forbidden = append(forbidden, []byte(api.managedOwner.client.token))
@@ -1547,12 +1612,12 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 		forbidden = append(forbidden, k)
 	}
 	for _, k := range forbidden {
-		if string(k) == client.token {
-			return errors.New("reused native action store credential")
-		}
 		used[string(k)] = true
 	}
 	for sender, file := range map[string]string{"operator": c.OperatorKeyFile, "policy": c.PolicyKeyFile} {
+		if !c.Enabled && (c.OperatorKeyFile == "" || file == "") {
+			continue
+		}
 		raw, e := os.ReadFile(file)
 		if e != nil {
 			return e
@@ -1564,6 +1629,30 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 		used[string(k)] = true
 		keys[sender] = k
 	}
+	if !c.Enabled {
+		// The operator may also read with actions offline; reject a shared configured store key.
+		if len(keys["operator"]) != 0 && c.StoreKeyFile != "" {
+			storeKey, err := os.ReadFile(c.StoreKeyFile)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(bytes.TrimSpace(storeKey), keys["operator"]) {
+				return errors.New("reused native action store credential")
+			}
+		}
+		api.Handler = api.scopedPageRoutes(actionRoutes(api.Handler, nil, nil, func() bool { return false }), keys["operator"])
+		return nil
+	}
+	client, err := newManagedClient(c.Scheme, c.CAFile, c.StoreKeyFile)
+	if err != nil {
+		return err
+	}
+	if len(dial) > 0 && dial[0] != nil {
+		client.http.Transport.(*http.Transport).DialContext = dial[0]
+	}
+	if used[client.token] {
+		return errors.New("reused native action store credential")
+	}
 	if c.AuthorityID == "" {
 		c.AuthorityID = defaultActionAuthority
 	}
@@ -1574,7 +1663,7 @@ func (api *API) InstallActionOwner(c ActionOwnerConfig, dial ...ActionDialer) er
 	api.actionOwner = o
 	o.callbackReady = func() bool { return api.callbacksReadyFor(client, true) }
 	ready := o.ready
-	api.Handler = actionRoutes(api.Handler, keys, o, ready)
+	api.Handler = api.scopedPageRoutes(actionRoutes(api.Handler, keys, o, ready), keys["operator"])
 	if c.Dispatch == nil {
 		return nil
 	}

@@ -57,6 +57,13 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 
 	api.JSONProducer = runtime.JSONProducer()
 
+	if api.AlertCheckOscarActionContactHandler == nil {
+		api.AlertCheckOscarActionContactHandler = alert.CheckOscarActionContactHandlerFunc(func(params alert.CheckOscarActionContactParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.CheckOscarActionContact has not yet been implemented")
+		})
+	}
 	if api.SilenceDeleteSilenceHandler == nil {
 		api.SilenceDeleteSilenceHandler = silence.DeleteSilenceHandlerFunc(func(params silence.DeleteSilenceParams) middleware.Responder {
 			_ = params
@@ -104,6 +111,13 @@ func configureAPI(api *operations.AlertmanagerAPI) http.Handler {
 			_ = params
 
 			return middleware.NotImplemented("operation alert.GetOscarAlertsPage has not yet been implemented")
+		})
+	}
+	if api.AlertGetOscarScopedAlertsPageHandler == nil {
+		api.AlertGetOscarScopedAlertsPageHandler = alert.GetOscarScopedAlertsPageHandlerFunc(func(params alert.GetOscarScopedAlertsPageParams) middleware.Responder {
+			_ = params
+
+			return middleware.NotImplemented("operation alert.GetOscarScopedAlertsPage has not yet been implemented")
 		})
 	}
 	if api.ReceiverGetReceiversHandler == nil {

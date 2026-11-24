@@ -308,18 +308,11 @@ func (api *API) Register(r *route.Router, routePrefix string) *http.ServeMux {
 		connectWebHandler = api.corsHandler(connectWebHandler)
 	}
 
-	mux.Handle(
-		apiPrefix+"/api/v2/",
-		api.instrumentHandler(
-			apiPrefix,
-			api.limitHandler(
-				http.StripPrefix(
-					apiPrefix,
-					v2Handler,
-				),
-			),
-		),
-	)
+	v2Handler = api.limitHandler(v2Handler)
+	if api.timeout > 0 {
+		v2Handler = apiv2.WithScopedPageReadDeadline(v2Handler)
+	}
+	mux.Handle(apiPrefix+"/api/v2/", api.instrumentHandler(apiPrefix, http.StripPrefix(apiPrefix, v2Handler)))
 
 	// Connect and gRPC-Web procedures are fully-qualified and carry their own
 	// service version (e.g. /status.v3alpha.StatusService/GetStatus), so mount them

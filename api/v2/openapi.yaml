@@ -164,6 +164,7 @@ paths:
         - $ref: '#/parameters/oscarActionSubject'
         - $ref: '#/parameters/oscarActionGrant'
         - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
         - name: X-Oscar-Action-Recovery
           in: header
           type: string
@@ -202,6 +203,7 @@ paths:
         - $ref: '#/parameters/oscarActionSubject'
         - $ref: '#/parameters/oscarActionGrant'
         - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
         - name: body
           in: body
           required: true
@@ -220,6 +222,36 @@ paths:
         '409': {description: Native lifecycle or operation conflict}
         '413': {description: Request too large}
         '503': {description: Native authority unavailable}
+  /oscar/actions/contact-check:
+    post:
+      tags: [alert]
+      operationId: checkOscarActionContact
+      description: Private owner check for one frozen human worker contact. Performs no admission or settlement.
+      parameters:
+        - $ref: '#/parameters/oscarActionSender'
+        - $ref: '#/parameters/oscarActionKeyId'
+        - $ref: '#/parameters/oscarActionTime'
+        - $ref: '#/parameters/oscarActionSubject'
+        - $ref: '#/parameters/oscarActionGrant'
+        - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
+        - name: body
+          in: body
+          required: true
+          schema: {$ref: '#/definitions/oscarContactCheck'}
+      responses:
+        '200':
+          description: Exact authorized request bytes including fresh nonce
+          headers:
+            X-Oscar-Contact-Response:
+              type: string
+              description: Operator HMAC over purpose, request signature and exact response digest
+          schema: {$ref: '#/definitions/oscarContactCheck'}
+        '400': {description: Invalid contact binding}
+        '401': {description: Invalid action assertion}
+        '403': {description: Contact permission denied}
+        '409': {description: Changed or unavailable contact}
+        '503': {description: Native authority unavailable}
   /oscar/actions/{operation_id}:
     get:
       tags: [alert]
@@ -232,6 +264,7 @@ paths:
         - $ref: '#/parameters/oscarActionSubject'
         - $ref: '#/parameters/oscarActionGrant'
         - $ref: '#/parameters/oscarActionSignature'
+        - $ref: '#/parameters/oscarActionScope'
         - {name: operation_id, in: path, type: string, format: uuid, required: true}
       responses:
         '200':
@@ -245,6 +278,44 @@ paths:
         '409': {description: Native lifecycle or operation conflict}
         '413': {description: Request too large}
         '503': {description: Native authority unavailable}
+  /oscar/alerts/scoped-page:
+    post:
+      tags: [alert]
+      operationId: getOscarScopedAlertsPage
+      description: Read a native page under an operator-signed authority. See docs/alerts_api.md for the HMAC transcript and limits.
+      parameters:
+        - {in: header, name: X-Oscar-Read-Sender, type: string, required: true, description: 'operator'}
+        - {in: header, name: X-Oscar-Read-Key-Id, type: string, required: true, description: 'v1'}
+        - {in: header, name: X-Oscar-Read-Time, type: string, required: true, description: 'Unix timestamp in seconds'}
+        - {in: header, name: X-Oscar-Read-Subject, type: string, required: true, description: 'Unpadded base64url of the acting operator ID'}
+        - {in: header, name: X-Oscar-Read-Grant, type: string, required: true, description: 'read:alerts'}
+        - {in: header, name: X-Oscar-Read-Signature, type: string, required: true, description: 'Hex HMAC-SHA256 over the scoped read transcript'}
+        - in: body
+          name: request
+          required: true
+          schema:
+            $ref: '#/definitions/oscarScopedPageRequest'
+      responses:
+        '200':
+          description: Authorized native page with contract version 2
+          headers:
+            X-Oscar-Scoped-Page-Version: {type: string, description: Signed scope contract version 1}
+          schema:
+            $ref: '#/definitions/oscarAlertPage'
+        '400':
+          description: Invalid envelope, policy or paging parameters
+        '401':
+          description: Invalid read assertion or operator key unavailable
+        '405':
+          description: Method must be POST
+        '408':
+          description: Request body read deadline expired
+        '413':
+          description: Body exceeds the read limit
+        '500':
+          $ref: '#/responses/InternalServerError'
+        '503':
+          description: Overall request timeout expired, concurrent read limit reached, or transport read deadline unavailable
   /oscar/alerts/page:
     get:
       tags:
@@ -463,6 +534,11 @@ parameters:
     in: header
     type: string
     required: true
+  oscarActionScope:
+    name: X-Oscar-Action-Scope
+    in: header
+    type: string
+    description: Required for operator requests. Signed unpadded base64url JSON containing the short-lived independent read and action policies.
   oscarActionSignature:
     name: X-Oscar-Action-Signature
     in: header
@@ -479,6 +555,55 @@ parameters:
       type: string
 
 definitions:
+  oscarScopedPageRequest:
+    type: object
+    additionalProperties: false
+    required: [version, scope, query]
+    properties:
+      version: {type: integer, enum: [1]}
+      query:
+        type: object
+        description: Existing OSCAR GET page parameters, each represented as an array of strings.
+        additionalProperties:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: {type: string}
+      scope:
+        type: object
+        additionalProperties: false
+        required: [unrestricted, allow, deny]
+        properties:
+          unrestricted: {type: boolean}
+          allow:
+            type: array
+            maxItems: 32
+            items: {$ref: '#/definitions/oscarPageScopeGroup'}
+          deny:
+            type: array
+            maxItems: 32
+            items: {$ref: '#/definitions/oscarPageScopeGroup'}
+  oscarPageScopeGroup:
+    x-elm-omit-absent: logicOperator
+    type: object
+    additionalProperties: false
+    required: [items]
+    properties:
+      logicOperator: {type: string, enum: [and, or]}
+      items:
+        type: array
+        minItems: 1
+        maxItems: 100
+        items:
+          type: object
+          additionalProperties: false
+          required: [field, operator, value]
+          properties:
+            field: {type: string, pattern: '^label:.+'}
+            operator: {type: string, enum: [equals, isAnyOf]}
+            value:
+              x-elm-json-value: true
+              description: A string for equals or an array of 1 through 100 strings for isAnyOf.
   oscarEpisodeRef:
     x-elm-natural-fields: true
     type: object
@@ -515,6 +640,18 @@ definitions:
       binding_id: {type: string, format: uuid}
       revision_id: {type: string, format: uuid}
       cancellation_generation: {type: integer, format: uint64, x-elm-integer: Natural, minimum: 0}
+  oscarContactCheck:
+    type: object
+    additionalProperties: false
+    required: [nonce, operation_id, command_digest, episode_ref, severity_revision, target_key, effect_digest]
+    properties:
+      nonce: {type: string, pattern: '^[a-f0-9]{64}$'}
+      operation_id: {type: string, format: uuid}
+      command_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
+      episode_ref: {$ref: '#/definitions/oscarEpisodeRef'}
+      severity_revision: {type: integer, minimum: 0}
+      target_key: {type: string, pattern: '^[a-f0-9]{64}$'}
+      effect_digest: {type: string, pattern: '^[a-f0-9]{64}$'}
   oscarActionRequest:
     type: object
     additionalProperties: false

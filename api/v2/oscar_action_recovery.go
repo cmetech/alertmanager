@@ -9,10 +9,59 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"reflect"
 	"slices"
 	"time"
 )
+
+func (o *nativeActionOwner) recoveryScope(ctx context.Context, i *actionIntent, req ActionRequestV1) (*operatorScope, error) {
+	var proof struct {
+		Challenge struct {
+			Version     int        `json:"version"`
+			AuthorityID string     `json:"authority_id"`
+			OperationID string     `json:"operation_id"`
+			LogicalID   string     `json:"logical_id"`
+			Digest      string     `json:"command_digest"`
+			Ref         EpisodeRef `json:"episode_ref"`
+			Kind        string     `json:"kind"`
+			Actor       string     `json:"actor_id"`
+			Expires     int64      `json:"expires_at"`
+			Nonce       string     `json:"nonce"`
+		} `json:"challenge"`
+		Scope json.RawMessage `json:"scope"`
+	}
+	digest, err := actionDigest(req)
+	if err != nil || digest != i.Digest || req.Actor.Kind != "operator" || req.PolicyBinding != nil || req.OperationID != i.Result.OperationID || req.EpisodeRef != i.Result.EpisodeRef {
+		return nil, reconcile
+	}
+	if err = o.write(ctx, "recovery-authority", map[string]any{"operation_id": req.OperationID}, &proof); err != nil {
+		return nil, err
+	}
+	c := proof.Challenge
+	now := time.Now().Unix()
+	nonce, e := hex.DecodeString(c.Nonce)
+	if c.Version != 1 || c.AuthorityID != o.authority || c.OperationID != req.OperationID || c.LogicalID != i.LogicalActionID || c.Digest != digest || c.Ref != req.EpisodeRef || c.Kind != req.Kind || c.Actor != req.Actor.ID || e != nil || len(nonce) != 16 || c.Expires > now+15 || len(proof.Scope) > 65536 {
+		return nil, reconcile
+	}
+	scope, ok := parseOperatorScope(proof.Scope, c.Actor, c.Expires-15, now)
+	if !ok || scope.expires != c.Expires || len(scope.actions) != 1 || scope.actions[req.Kind] == nil {
+		return nil, reconcile
+	}
+	return scope, nil
+}
+
+func (o *nativeActionOwner) recoverExecute(ctx context.Context, i *actionIntent, req ActionRequestV1) error {
+	if req.Actor.Kind == "operator" {
+		scope, err := o.recoveryScope(ctx, i, req)
+		if err != nil {
+			return err
+		}
+		ctx = context.WithValue(ctx, operatorScopeKey{}, scope)
+	}
+	_, err := o.Execute(ctx, req)
+	return err
+}
 
 func (o *nativeActionOwner) recoverWork(ctx context.Context, id string, seen map[string]bool) error {
 	ctx = o.withEpoch(ctx)
@@ -126,7 +175,7 @@ func (o *nativeActionOwner) recoverWork(ctx context.Context, id string, seen map
 				expected := EpisodeProjection{episodeUpdate: episodeUpdate{EpisodeRef: r.EpisodeRef, LifecycleSeq: ordinary.LifecycleSeq}, SeverityRevision: ordinary.SeverityRevision}
 				_, err = o.reserveOrdinary(ctx, id, nil, expected, ordinary.Target)
 			} else {
-				_, err = o.Execute(ctx, req)
+				err = o.recoverExecute(ctx, i, req)
 			}
 			if err != nil {
 				return err
@@ -136,7 +185,7 @@ func (o *nativeActionOwner) recoverWork(ctx context.Context, id string, seen map
 	}
 	// Fenced zero-target/local admissions are driven only by the authenticated caller.
 	if dispatchKind(req.Kind) && r.State == "held" && i.ReservationSuccessorID == nil {
-		_, err = o.Execute(ctx, req)
+		err = o.recoverExecute(ctx, i, req)
 		return err
 	}
 	return nil
@@ -636,7 +685,14 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 			if !o.live(turn) {
 				break
 			}
-			_ = o.recoverWork(turn, r.OperationID, map[string]bool{})
+			if err := o.recoverWork(turn, r.OperationID, map[string]bool{}); err != nil {
+				reason := unavailable.reason
+				var rejection actionError
+				if errors.As(err, &rejection) && len(rejection.reason) <= 80 {
+					reason = rejection.reason
+				}
+				slog.Warn("Native action recovery held", "operation_id", r.OperationID, "reason", reason)
+			}
 			after = r.OperationID
 		}
 	}
