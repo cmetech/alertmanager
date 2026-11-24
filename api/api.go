@@ -386,6 +386,12 @@ type (
 	TimingLookupFunc  = apiv2.TimingLookupFunc
 )
 
+// Native action journal pool defaults (see apiv2.ActionOwnerConfig).
+const (
+	DefaultActionMaxConns = apiv2.DefaultActionMaxConns
+	DefaultActionTimeout  = apiv2.DefaultActionTimeout
+)
+
 func (api *API) PauseTiming() {
 	if api.v2 != nil {
 		api.v2.PauseTiming()
