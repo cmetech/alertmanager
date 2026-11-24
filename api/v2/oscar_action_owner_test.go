@@ -2296,3 +2296,60 @@ func TestContactChecksCurrentSourceAndPersistedTarget(t *testing.T) {
 	ctx.Value(operatorScopeKey{}).(*operatorScope).read = &pageScope{}
 	require.Error(t, o.checkContact(ctx, q))
 }
+
+func TestDirectOperatorClaimBindsFreshDecisionToStoreEntry(t *testing.T) {
+	var req ActionRequestV1
+	require.True(t, decodeAction([]byte(actionBody), &req))
+	req.Kind = "resend"
+	digest, err := actionDigest(req)
+	require.NoError(t, err)
+	key := strings.Repeat("a", 64)
+	target := DispatchTarget{ReceiverID: "ops"}
+	source := alert.New(model.Alert{Labels: model.LabelSet{"severity": "major"}, StartsAt: time.Now(), EndsAt: time.Now().Add(time.Hour)}, time.Now(), false)
+	until := time.Now().Add(time.Minute)
+	receipt := ActionResultV1{OperationID: req.OperationID, EpisodeRef: req.EpisodeRef, State: "accepted", SeverityRevision: 1, PermitExpiresAt: &until,
+		Targets: []TargetResult{{Target: target, TargetKey: key, State: "pending"}}}
+	policy := scopeWire{Unrestricted: true, Allow: []scopeGroup{}, Deny: []scopeGroup{}}
+	allowed := false
+	claims := 0
+	o := newNativeActionOwner(req.EpisodeRef.AuthorityID, actionRPCFunc(func(_ context.Context, cmd string, args map[string]any, out any) error {
+		var value any
+		switch cmd {
+		case "lookup":
+			value = actionIntent{LogicalActionID: req.OperationID, Digest: digest, Request: mustRaw(t, req), Result: receipt}
+		case "recovery-authority":
+			end := time.Now().Unix() + 15
+			value = map[string]any{"challenge": map[string]any{"version": 1, "authority_id": req.EpisodeRef.AuthorityID, "operation_id": req.OperationID, "logical_id": req.OperationID, "command_digest": digest, "episode_ref": req.EpisodeRef, "kind": req.Kind, "actor_id": req.Actor.ID, "expires_at": end, "nonce": strings.Repeat("f", 32)}, "scope": map[string]any{"version": 1, "expires_at": end, "read": policy, "actions": map[string]scopeWire{req.Kind: policy}}}
+		case "claim-target":
+			claims++
+			require.Equal(t, req.OperationID, args["operation_id"])
+			require.Equal(t, key, args["target_key"])
+			d, ok := args["operator_decision"].(map[string]any)
+			require.True(t, ok)
+			require.Equal(t, req.Actor.ID, d["subject"])
+			require.Equal(t, digest, d["command_digest"])
+			require.NotEmpty(t, d["scope"])
+			require.Positive(t, d["decided_at"])
+			if !allowed {
+				return actionError{403, "ACTIVITY_PERMISSION_DENIED"}
+			}
+			value = map[string]any{"entry_token": key, "lease_expires_at": until, "permit_expires_at": until}
+		default:
+			t.Fatalf("unexpected %s", cmd)
+		}
+		return json.Unmarshal(mustRaw(t, value), out)
+	}), singleActionDispatch{target: target})
+	o.lease = actionLease{Epoch: 1, ExpiresAt: until}
+	o.recovered = true
+	o.readSource = func(_, _ string, fn func(*alert.Alert)) { fn(source) }
+	o.byID[req.EpisodeRef.EpisodeID] = &episodeSlot{source: source, projection: EpisodeProjection{SeverityRevision: 1, episodeUpdate: episodeUpdate{
+		EpisodeRef: req.EpisodeRef, State: "firing", SourceSeverity: "major", NativeVariant: variantOf(source)}}}
+	entry, err := o.Claim(t.Context(), req.OperationID, key)
+	require.Error(t, err)
+	require.Nil(t, entry)
+	allowed = true
+	entry, err = o.Claim(t.Context(), req.OperationID, key)
+	require.NoError(t, err)
+	require.True(t, entry.Valid())
+	require.Equal(t, 2, claims)
+}

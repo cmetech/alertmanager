@@ -475,9 +475,11 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 		args["callback"] = proof
 	}
 	if scope != nil {
-		if err = o.checkOperator(scope, s, req.EpisodeRef, p, source, req.Kind); err != nil {
-			return nil, err
+		decidedAt, decisionErr := o.operatorDecision(scope, s, req.EpisodeRef, p, source, req.Kind)
+		if decisionErr != nil {
+			return nil, decisionErr
 		}
+		args["operator_decision"] = map[string]any{"subject": scope.subject, "command_digest": i.Digest, "scope": scope.wire, "decided_at": decidedAt}
 	}
 	if err = o.write(ctx, "claim-target", args, &entry); err != nil {
 		// A response arriving after the local cutoff may still contain our original token.
@@ -491,6 +493,9 @@ func (o *nativeActionOwner) Claim(ctx context.Context, id, key string) (Entry, e
 	until := o.localDeadline(entry.Lease)
 	if d := o.localDeadline(entry.Permit); d.Before(until) {
 		until = d
+	}
+	if scope != nil && time.Unix(scope.expires, 0).Before(until) {
+		until = time.Unix(scope.expires, 0)
 	}
 	if !managedHash.MatchString(entry.Token) {
 		return nil, reconcile
