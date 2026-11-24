@@ -163,4 +163,5 @@ A caller can probe capability with a signed restricted empty allow list.
 Require both contracts and fail closed for missing keys, incompatible readers
 or errors. OSC-104 owns middleware signing, read-only secret provisioning,
 History parity and cross-service integration. OSC-105 owns the browser/native
-route gate. Activation requires those changes and the generated API artifacts.
+route gate. Native Go server/client/models and embedded Swagger have been
+generated. Elm assets, runtime tests and companion integration remain pending.

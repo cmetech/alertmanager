@@ -237,3 +237,15 @@ func TestScopeParityFixture(t *testing.T) {
 		})
 	}
 }
+
+func TestScopedPageGeneratedRouteRequiresReadGuard(t *testing.T) {
+	api, err := NewAPI(nil, nil, nil, nil, promslog.NewNopLogger(), prometheus.NewRegistry())
+	require.NoError(t, err)
+	const body = `{"version":1,"scope":{"unrestricted":true,"allow":[],"deny":[]},"query":{"perPage":["1"]}}`
+	req := scopedRequest(body, "native-scoped-page-v1", time.Now())
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.Handler.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	require.Empty(t, w.Header().Values("X-Oscar-Scoped-Page-Version"))
+}

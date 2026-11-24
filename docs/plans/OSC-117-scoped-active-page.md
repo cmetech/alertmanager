@@ -23,3 +23,8 @@ Update OpenAPI source and runtime capability evidence consistently. Follow repos
 Write focused tests first at api/v2 for AC-1 pre-limit/count/metadata, AC-2 role union + narrowing, AC-3 signature boundary negatives, AC-4 restricted parents, AC-5 strict validation/normalization fixtures, AC-6 route/capability/read-key behavior with actions disabled. Include actionView/ProviderSource regression. Tests remain unrun under execution limits.
 
 Update native contract documentation and AC-to-test evidence. Self-review and commit with Corey identity, no AI attribution. No push or PR by implementer. Controller performs independent review and draft PR handoff.
+
+
+## Generation status
+
+The controller ran the repository's pinned native Swagger source generator. Go server, client, models and embedded Swagger now include the scoped operation. The handwritten generated-operation fallback returns 401 when the private read guard has not verified the original request. Elm Data generation requires a container and the assets target builds the frontend. Those steps, runtime tests and companion integration remain pending.
