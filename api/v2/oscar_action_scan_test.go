@@ -86,7 +86,7 @@ func (f *scanFixture) recoveries() int {
 }
 
 // tick runs one maintain tick of the scan and fails if it read more than one page.
-func (f *scanFixture) tick(o *nativeActionOwner, turn context.Context, scan *operationScan, at time.Time) {
+func (f *scanFixture) tick(turn context.Context, o *nativeActionOwner, scan *operationScan, at time.Time) {
 	f.mu.Lock()
 	f.now = at
 	pages := f.pages
@@ -110,7 +110,7 @@ func TestOscarActionScanBacksOffUnchangedOperations(t *testing.T) {
 		start := time.Now()
 		const window = 600
 		for s := range window {
-			f.tick(o, turn, scan, start.Add(time.Duration(s)*time.Second))
+			f.tick(turn, o, scan, start.Add(time.Duration(s)*time.Second))
 		}
 		renewals, boot := window/10, 1
 		requests := float64(f.pages + boot + renewals + 3*f.recoveries())
@@ -125,7 +125,7 @@ func TestOscarActionScanBacksOffUnchangedOperations(t *testing.T) {
 }
 
 // AC-2: a row that appears or changes between passes is recovered on the next pass,
-// at most B plus one tick after the previous pass started.
+// which starts on the first tick B plus one tick after the previous pass started.
 func TestOscarActionScanRecoversChangedRowsOnTheNextPass(t *testing.T) {
 	t.Parallel()
 	f := newScanFixture(2, "unknown")
@@ -136,18 +136,18 @@ func TestOscarActionScanRecoversChangedRowsOnTheNextPass(t *testing.T) {
 	start := time.Now()
 	at := func(s int) time.Time { return start.Add(time.Duration(s) * time.Second) }
 	for s := range 5 {
-		f.tick(o, turn, scan, at(s))
+		f.tick(turn, o, scan, at(s))
 	}
 	f.mu.Lock()
 	f.rows = append(f.rows, late)
 	f.rows[0].Targets = []TargetResult{{TargetKey: "a", State: "confirmed"}}
 	f.mu.Unlock()
 	for s := 5; s < 17; s++ {
-		f.tick(o, turn, scan, at(s))
+		f.tick(turn, o, scan, at(s))
 	}
 	require.Equal(t, 0, f.lookups[late.OperationID], "passes stay B plus one tick apart")
 	require.Equal(t, 1, f.lookups[f.rows[0].OperationID])
-	f.tick(o, turn, scan, at(17))
+	f.tick(turn, o, scan, at(17))
 	require.Equal(t, 1, f.lookups[late.OperationID])
 	require.Equal(t, 2, f.lookups[f.rows[0].OperationID])
 }
@@ -165,12 +165,12 @@ func TestOscarActionScanBoundsPendingAndHeldRecovery(t *testing.T) {
 		scan := &operationScan{}
 		start := time.Now()
 		for s := range 60 {
-			f.tick(o, turn, scan, start.Add(time.Duration(s)*time.Second))
+			f.tick(turn, o, scan, start.Add(time.Duration(s)*time.Second))
 		}
 		id := f.rows[0].OperationID
 		require.Equal(t, 4, f.lookups[id]) // t = 0, 17, 34, 51
 		restarted := &operationScan{}
-		f.tick(o, turn, restarted, start.Add(60*time.Second))
+		f.tick(turn, o, restarted, start.Add(60*time.Second))
 		require.Equal(t, 5, f.lookups[id])
 	}
 }
@@ -182,9 +182,9 @@ func TestOscarActionScanPassSpacingToleratesTickJitter(t *testing.T) {
 	o, turn := f.owner()
 	scan := &operationScan{}
 	start := time.Now()
-	f.tick(o, turn, scan, start.Add(600*time.Millisecond)) // the pass starts late in its tick
+	f.tick(turn, o, scan, start.Add(600*time.Millisecond)) // the pass starts late in its tick
 	for k := 1; k <= 17; k++ {
-		f.tick(o, turn, scan, start.Add(time.Duration(k)*time.Second+100*time.Millisecond))
+		f.tick(turn, o, scan, start.Add(time.Duration(k)*time.Second+100*time.Millisecond))
 	}
 	require.Equal(t, 2, f.lookups[f.rows[0].OperationID], "the pass due at tick 17 runs at tick 17")
 }

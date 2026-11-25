@@ -7,7 +7,8 @@
   native-actions requests a second with no alerts; the bound is now 1 + 3N/16 per second.
 - Unchanged: manual-source pulls keep their 1 s cadence, boot recovery runs once per lease epoch
   and an owner restart starts a fresh pass at once. The scan is the crash-recovery path; the normal
-  delivery path does not wait for it. Pass spacing stays below the 30 s permit window.
+  delivery path does not wait for it. Pass spacing stays below the 30 s permit window while a pass
+  fits (up to about 380 operations; production holds about 32).
 - No wire or configuration change. Pairs with OSCAR OSC-173 (reconciled operations leave
   `recover()`); either can ship first. Rollback: the previous native image.
 
