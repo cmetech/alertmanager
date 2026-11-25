@@ -594,7 +594,7 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 	}()
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
-	after := ""
+	scan := &operationScan{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -613,7 +613,7 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 			if err := o.recoverAuthority(turn, lease.Epoch); err != nil {
 				continue
 			}
-			after = ""
+			scan = &operationScan{}
 		}
 		if !o.live(turn) || !o.ready() {
 			continue
@@ -621,24 +621,47 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 		if lease.ManualSourceBridge == 1 && lease.ManualSourceDue && o.manual != nil {
 			_ = o.pullManual(turn)
 		}
-		rows, err := o.operationPage(turn, after)
-		if err != nil {
-			continue
+		o.scanOperations(ctx, turn, scan, time.Now())
+	}
+}
+
+// operationBackoff is the shortest interval between the starts of two recovery passes.
+// Starting the next pass one tick after it keeps the request rate under 1 + 3N/B;
+// with one page per tick both stay below the 30 s permit window for the usual N.
+const operationBackoff = 16 * time.Second
+
+// operationScan carries the page cursor and paces whole passes: each operation is
+// recovered once per pass, and a pass starts at least operationBackoff plus one tick
+// after the previous one started.
+type operationScan struct {
+	after   string
+	started time.Time
+	next    time.Time
+}
+
+// scanOperations advances the recovery scan by at most one page per tick, as before.
+func (o *nativeActionOwner) scanOperations(ctx, turn context.Context, s *operationScan, now time.Time) {
+	if s.after == "" {
+		// Half a tick of slack absorbs jitter in when each tick samples the clock.
+		if now.Add(time.Second / 2).Before(s.next) {
+			return
 		}
-		if len(rows) == 0 {
-			after = ""
-			continue
+		s.started = now
+	}
+	rows, err := o.operationPage(turn, s.after)
+	if err != nil {
+		return
+	}
+	if len(rows) == 0 {
+		s.after, s.next = "", s.started.Add(operationBackoff+time.Second)
+		return
+	}
+	for _, r := range rows {
+		if ctx.Err() != nil || !o.live(turn) {
+			return
 		}
-		for _, r := range rows {
-			if ctx.Err() != nil {
-				return
-			}
-			if !o.live(turn) {
-				break
-			}
-			_ = o.recoverWork(turn, r.OperationID, map[string]bool{})
-			after = r.OperationID
-		}
+		_ = o.recoverWork(turn, r.OperationID, map[string]bool{})
+		s.after = r.OperationID
 	}
 }
 
