@@ -625,9 +625,9 @@ func (o *nativeActionOwner) maintain(ctx context.Context) {
 	}
 }
 
-// operationBackoff is the shortest interval between two passes of the recovery scan.
-// Starting the next pass one tick after it keeps the request rate strictly under
-// 3N/B; both stay below the 30 s permit window.
+// operationBackoff is the shortest interval between the starts of two recovery passes.
+// Starting the next pass one tick after it keeps the request rate under 1 + 3N/B;
+// with one page per tick both stay below the 30 s permit window for the usual N.
 const operationBackoff = 16 * time.Second
 
 // operationScan carries the page cursor and paces whole passes: each operation is
@@ -642,7 +642,8 @@ type operationScan struct {
 // scanOperations advances the recovery scan by at most one page per tick, as before.
 func (o *nativeActionOwner) scanOperations(ctx, turn context.Context, s *operationScan, now time.Time) {
 	if s.after == "" {
-		if now.Before(s.next) {
+		// Half a tick of slack absorbs jitter in when each tick samples the clock.
+		if now.Add(time.Second / 2).Before(s.next) {
 			return
 		}
 		s.started = now

@@ -1,3 +1,16 @@
+## Unreleased — Back off the native operation recovery scan (OSC-174)
+
+- Changed: the native owner's operation recovery scan no longer walks every unfinished operation
+  each second. It still reads one page of 32 operations per tick and recovers each operation once
+  per pass, but a new pass starts about 17 s (16 s plus one tick) after the previous one started.
+  About 32 stuck operations (for example after webhook failures) previously cost about 95
+  native-actions requests a second with no alerts; the bound is now 1 + 3N/16 per second.
+- Unchanged: manual-source pulls keep their 1 s cadence, boot recovery runs once per lease epoch
+  and an owner restart starts a fresh pass at once. The scan is the crash-recovery path; the normal
+  delivery path does not wait for it. Pass spacing stays below the 30 s permit window.
+- No wire or configuration change. Pairs with OSCAR OSC-173 (reconciled operations leave
+  `recover()`); either can ship first. Rollback: the previous native image.
+
 ## Unreleased — Native per-alert delivery ledger (OSC-136)
 
 - The native reader remembers, per alert and native target, the ordinary coverage this process

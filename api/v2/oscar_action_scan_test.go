@@ -85,11 +85,18 @@ func (f *scanFixture) recoveries() int {
 	return total
 }
 
+// tick runs one maintain tick of the scan and fails if it read more than one page.
 func (f *scanFixture) tick(o *nativeActionOwner, turn context.Context, scan *operationScan, at time.Time) {
 	f.mu.Lock()
 	f.now = at
+	pages := f.pages
 	f.mu.Unlock()
 	o.scanOperations(turn, turn, scan, at)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pages > pages+1 {
+		panic("scanOperations read more than one page in a tick")
+	}
 }
 
 // AC-1: unchanged rows cost at most 1 + 3N/B requests per second over ten minutes,
@@ -168,6 +175,20 @@ func TestOscarActionScanBoundsPendingAndHeldRecovery(t *testing.T) {
 	}
 }
 
+// AC-2/AC-3: tick jitter does not push a pass one tick past B plus one tick.
+func TestOscarActionScanPassSpacingToleratesTickJitter(t *testing.T) {
+	t.Parallel()
+	f := newScanFixture(1, "unknown")
+	o, turn := f.owner()
+	scan := &operationScan{}
+	start := time.Now()
+	f.tick(o, turn, scan, start.Add(600*time.Millisecond)) // the pass starts late in its tick
+	for k := 1; k <= 17; k++ {
+		f.tick(o, turn, scan, start.Add(time.Duration(k)*time.Second+100*time.Millisecond))
+	}
+	require.Equal(t, 2, f.lookups[f.rows[0].OperationID], "the pass due at tick 17 runs at tick 17")
+}
+
 type idleManual struct{ manualProvider }
 
 // AC-4: manual-source pulls keep their 1 s cadence while the operation scan backs off.
@@ -177,7 +198,7 @@ func TestOscarActionMaintainKeepsManualCadenceWhileScanBacksOff(t *testing.T) {
 	o, _ := f.owner()
 	o.lease.ManualSourceBridge, o.lease.ManualSourceDue = 1, true
 	o.manual = idleManual{}
-	ctx, cancel := context.WithTimeout(t.Context(), 3500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 4500*time.Millisecond)
 	defer cancel()
 	o.maintain(ctx)
 	f.mu.Lock()
